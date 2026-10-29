@@ -9,6 +9,7 @@ import android.net.Uri;
 import android.os.CountDownTimer;
 import android.os.Handler;
 import android.os.Looper;
+import android.text.TextUtils;
 import android.util.Base64;
 import android.view.Gravity;
 import android.view.KeyEvent;
@@ -110,6 +111,8 @@ public class LiveActivity extends BaseActivity {
     private List<LiveChannelGroup> liveChannelGroupList = new ArrayList<>();
     private int currentLiveChannelIndex = -1;
     private int currentLiveChangeSourceTimes = 0;
+    private int liveSwitchGeneration = 0;
+    private int scheduledSwitchGeneration = 0;
     private LiveChannelItem currentLiveChannelItem = null;
     private LivePlayerManager livePlayerManager = new LivePlayerManager();
     private ArrayList<Integer> channelGroupPasswordConfirmed = new ArrayList<>();
@@ -203,25 +206,15 @@ public class LiveActivity extends BaseActivity {
 
     //显示底部EPG
     private void showBottomEpg() {
-        if (isSHIYI)
-            return;
-        if (channel_Name.getChannelName() != null) {
-            mPlayerTitleView.setTitle(channel_Name.getChannelName());
-            tip_chname.setText(channel_Name.getChannelName());
-            tv_channelnum.setText("" + channel_Name.getChannelNum());
-            //todo 上一/下一/当前节目信息
-            if (countDownTimer != null) {
-                countDownTimer.cancel();
-            }
-
-            if (channel_Name == null || channel_Name.getSourceNum() <= 0) {
-                tv_srcinfo.setText("1/1");
-            } else {
-                tv_srcinfo.setText("线路" + (channel_Name.getSourceIndex() + 1) + "/" + channel_Name.getSourceNum());
-            }
-
-            Handler handler = new Handler(Looper.getMainLooper());
-
+        if (isSHIYI || channel_Name == null || TextUtils.isEmpty(channel_Name.getChannelName())) return;
+        mPlayerTitleView.setTitle(channel_Name.getChannelName());
+        tip_chname.setText(channel_Name.getChannelName());
+        tv_channelnum.setText(String.valueOf(channel_Name.getChannelNum()));
+        if (countDownTimer != null) countDownTimer.cancel();
+        if (channel_Name.getSourceNum() <= 0) {
+            tv_srcinfo.setText("1/1");
+        } else {
+            tv_srcinfo.setText("线路" + (channel_Name.getSourceIndex() + 1) + "/" + channel_Name.getSourceNum());
         }
     }
 
@@ -366,32 +359,42 @@ public class LiveActivity extends BaseActivity {
     };
 
     private boolean playChannel(int channelGroupIndex, int liveChannelIndex, boolean changeSource) {
+        if (channelGroupIndex < 0 || channelGroupIndex >= liveChannelGroupList.size()) return false;
+        ArrayList<LiveChannelItem> channels = getLiveChannels(channelGroupIndex);
+        if (channels == null || liveChannelIndex < 0 || liveChannelIndex >= channels.size()) return false;
+        if (changeSource && currentLiveChannelItem == null) return false;
         if ((channelGroupIndex == currentChannelGroupIndex && liveChannelIndex == currentLiveChannelIndex && !changeSource)
-                || (changeSource && currentLiveChannelItem.getSourceNum() == 1)) {
-           // showChannelInfo();
+                || (changeSource && currentLiveChannelItem.getSourceNum() <= 1)) {
             return true;
         }
+        mHandler.removeCallbacks(mConnectTimeoutChangeSourceRun);
+        liveSwitchGeneration++;
+        currentLiveChangeSourceTimes = 0;
         mVideoView.release();
         if (!changeSource) {
             currentChannelGroupIndex = channelGroupIndex;
             currentLiveChannelIndex = liveChannelIndex;
-            currentLiveChannelItem = getLiveChannels(currentChannelGroupIndex).get(currentLiveChannelIndex);
+            currentLiveChannelItem = channels.get(liveChannelIndex);
             Hawk.put(HawkConfig.LIVE_CHANNEL, currentLiveChannelItem.getChannelName());
             livePlayerManager.getLiveChannelPlayer(mVideoView, currentLiveChannelItem.getChannelName());
         }
-
-        channel_Name = currentLiveChannelItem;
-        isSHIYI=false;
-        isBack = false;
-        if(currentLiveChannelItem.getUrl().indexOf("PLTV/8888") !=-1){
-            currentLiveChannelItem.setinclude_back(true);
-        }else {
-            currentLiveChannelItem.setinclude_back(false);
+        if (currentLiveChannelItem == null || currentLiveChannelItem.getChannelUrls() == null
+                || currentLiveChannelItem.getChannelUrls().isEmpty()) return false;
+        String playUrl = currentLiveChannelItem.getUrl();
+        if (TextUtils.isEmpty(playUrl)) {
+            int sourceCount = currentLiveChannelItem.getSourceNum();
+            for (int i = 0; i < sourceCount && TextUtils.isEmpty(playUrl); i++) {
+                currentLiveChannelItem.nextSource();
+                playUrl = currentLiveChannelItem.getUrl();
+            }
+            if (TextUtils.isEmpty(playUrl)) return false;
         }
+        channel_Name = currentLiveChannelItem;
+        isSHIYI = false;
+        isBack = false;
+        currentLiveChannelItem.setinclude_back(playUrl.contains("PLTV/8888"));
         showBottomEpg();
-
-        mVideoView.setUrl(currentLiveChannelItem.getUrl());
-       // showChannelInfo();
+        mVideoView.setUrl(playUrl);
         mVideoView.start();
         return true;
     }
@@ -409,13 +412,13 @@ public class LiveActivity extends BaseActivity {
     }
 
     public void playPreSource() {
-        if (!isCurrentLiveChannelValid()) return;
+        if (!isCurrentLiveChannelValid() || currentLiveChannelItem.getSourceNum() <= 1) return;
         currentLiveChannelItem.preSource();
         playChannel(currentChannelGroupIndex, currentLiveChannelIndex, true);
     }
 
     public void playNextSource() {
-        if (!isCurrentLiveChannelValid()) return;
+        if (!isCurrentLiveChannelValid() || currentLiveChannelItem.getSourceNum() <= 1) return;
         currentLiveChannelItem.nextSource();
         playChannel(currentChannelGroupIndex, currentLiveChannelIndex, true);
     }
@@ -525,13 +528,11 @@ public class LiveActivity extends BaseActivity {
                         break;
                     case VideoView.STATE_ERROR:
                     case VideoView.STATE_PLAYBACK_COMPLETED:
-                        mHandler.removeCallbacks(mConnectTimeoutChangeSourceRun);
-                        mHandler.postDelayed(mConnectTimeoutChangeSourceRun, 2000);
+                        scheduleSourceSwitch(2000);
                         break;
                     case VideoView.STATE_PREPARING:
                     case VideoView.STATE_BUFFERING:
-                        mHandler.removeCallbacks(mConnectTimeoutChangeSourceRun);
-                        mHandler.postDelayed(mConnectTimeoutChangeSourceRun, (Hawk.get(HawkConfig.LIVE_CONNECT_TIMEOUT, 1) + 1) * 5000);
+                        scheduleSourceSwitch((Hawk.get(HawkConfig.LIVE_CONNECT_TIMEOUT, 1) + 1) * 5000L);
                         break;
                 }
             }
@@ -575,11 +576,19 @@ public class LiveActivity extends BaseActivity {
         return playerMenuView;
     }
 
+    private void scheduleSourceSwitch(long delayMs) {
+        mHandler.removeCallbacks(mConnectTimeoutChangeSourceRun);
+        scheduledSwitchGeneration = liveSwitchGeneration;
+        mHandler.postDelayed(mConnectTimeoutChangeSourceRun, delayMs);
+    }
+
     private Runnable mConnectTimeoutChangeSourceRun = new Runnable() {
         @Override
         public void run() {
+            if (!isCurrentLiveChannelValid() || scheduledSwitchGeneration != liveSwitchGeneration) return;
             currentLiveChangeSourceTimes++;
-            if (currentLiveChannelItem.getSourceNum() == currentLiveChangeSourceTimes) {
+            if (currentLiveChannelItem.getSourceNum() <= 1
+                    || currentLiveChangeSourceTimes >= currentLiveChannelItem.getSourceNum()) {
                 currentLiveChangeSourceTimes = 0;
                 Integer[] groupChannelIndex = getNextChannel(Hawk.get(HawkConfig.LIVE_CHANNEL_REVERSE, false) ? -1 : 1);
                 playChannel(groupChannelIndex[0], groupChannelIndex[1], false);
@@ -963,7 +972,6 @@ public class LiveActivity extends BaseActivity {
             }
 
             mLiveChannelView.smoothScrollToPosition(liveChannelIndex);
-            playChannel(groupIndex, liveChannelIndex, false);
         }
     }
 

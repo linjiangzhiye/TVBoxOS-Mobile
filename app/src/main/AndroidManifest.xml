@@ -27,6 +27,7 @@
 
     <application
         android:name=".base.App"
+        android:extractNativeLibs="false"
         android:allowBackup="true"
         android:configChanges="orientation|keyboardHidden|screenSize"
         android:hardwareAccelerated="true"

@@ -66,12 +66,14 @@ import com.github.tvbox.osc.server.RemoteServer;
 import com.github.tvbox.osc.ui.activity.DetailActivity;
 import com.github.tvbox.osc.ui.adapter.ParseAdapter;
 import com.github.tvbox.osc.ui.adapter.SelectDialogAdapter;
+import com.github.tvbox.osc.ui.dialog.DanmuSettingDialog;
 import com.github.tvbox.osc.ui.dialog.PlayingControlDialog;
 import com.github.tvbox.osc.ui.dialog.PlayingControlRightDialog;
 import com.github.tvbox.osc.ui.dialog.SearchSubtitleDialog;
 import com.github.tvbox.osc.ui.dialog.SelectDialog;
 import com.github.tvbox.osc.ui.dialog.SubtitleDialog;
 import com.github.tvbox.osc.util.AdBlocker;
+import com.github.tvbox.osc.util.DanmuHelper;
 import com.github.tvbox.osc.util.DefaultConfig;
 import com.github.tvbox.osc.util.HawkConfig;
 import com.github.tvbox.osc.util.LOG;
@@ -229,6 +231,7 @@ public class PlayFragment extends BaseLazyFragment {
         mPlayLoading = findViewById(R.id.play_loading);
         mPlayLoadErr = findViewById(R.id.play_load_error);
         mController = new VodController(requireContext());
+        mController.setDanmuEnabled(DanmuHelper.isOpen());
         mController.showParse(false);
         mController.setCanChangePosition(true);
         mController.setEnableInNormal(true);
@@ -301,6 +304,33 @@ public class PlayFragment extends BaseLazyFragment {
             @Override
             public void selectAudioTrack() {
                 selectMyAudioTrack();
+            }
+
+            @Override
+            public void toggleDanmu() {
+                setDanmakuEnabled(!DanmuHelper.isOpen());
+            }
+
+            @Override
+            public void showDanmuSetting() {
+                if (danmuLoadController == null) return;
+                DanmuSettingDialog dialog = new DanmuSettingDialog(requireContext(), new DanmuSettingDialog.Listener() {
+                    @Override
+                    public void onDanmakuEnabledChanged(boolean enabled) {
+                        setDanmakuEnabled(enabled);
+                    }
+
+                    @Override
+                    public void onDanmakuSettingsChanged() {
+                        if (danmuLoadController != null) danmuLoadController.applySettings(true);
+                    }
+
+                    @Override
+                    public boolean onSendDanmaku(String text) {
+                        return danmuLoadController != null && danmuLoadController.addDanmaku(text);
+                    }
+                });
+                new XPopup.Builder(requireContext()).asCustom(dialog).show();
             }
 
             @Override
@@ -1146,6 +1176,15 @@ public class PlayFragment extends BaseLazyFragment {
 
     private void startDanmuIfReady() {
         if (danmuLoadController != null) danmuLoadController.startIfReady();
+    }
+
+    private void setDanmakuEnabled(boolean enabled) {
+        if (danmuLoadController != null) danmuLoadController.setEnabled(enabled);
+        else DanmuHelper.setOpen(enabled);
+        if (mController != null) mController.setDanmuEnabled(enabled);
+        if (enabled && danmuLoadController != null && !danmuLoadController.hasDanmaku()) {
+            checkDanmu("");
+        }
     }
 
     void initPlayerCfg() {

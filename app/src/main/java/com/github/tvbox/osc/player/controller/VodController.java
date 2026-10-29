@@ -143,6 +143,8 @@ public class VodController extends BaseController {
     public SimpleSubtitleView mSubtitleView;
     public TextView mZimuBtn;
     public TextView mAudioTrackBtn;
+    public TextView mDanmuSwitchBtn;
+    public TextView mDanmuSettingBtn;
     public TextView mLandscapePortraitBtn;
     private ImageView mIvPlayStatus;
     private View mChooseSeries;
@@ -227,6 +229,8 @@ public class VodController extends BaseController {
         mSubtitleView = findViewById(R.id.subtitle_view);
         mZimuBtn = findViewById(R.id.zimu_select);
         mAudioTrackBtn = findViewById(R.id.audio_track_select);
+        mDanmuSwitchBtn = findViewById(R.id.danmu_switch);
+        mDanmuSettingBtn = findViewById(R.id.danmu_setting);
         mLandscapePortraitBtn = findViewById(R.id.landscape_portrait);
         mIvPlayStatus = findViewById(R.id.play_status);
         mChooseSeries = findViewById(R.id.choose_series);
@@ -586,6 +590,16 @@ public class VodController extends BaseController {
             listener.selectAudioTrack();
             hideBottom();
         });
+        mDanmuSwitchBtn.setOnClickListener(view -> {
+            FastClickCheckUtil.check(view);
+            listener.toggleDanmu();
+            hideBottom();
+        });
+        mDanmuSettingBtn.setOnClickListener(view -> {
+            FastClickCheckUtil.check(view);
+            listener.showDanmuSetting();
+            hideBottom();
+        });
         mLandscapePortraitBtn.setOnClickListener(view -> {
             FastClickCheckUtil.check(view);
             setLandscapePortrait();
@@ -719,6 +733,10 @@ public class VodController extends BaseController {
         }
     }
 
+    public void setDanmuEnabled(boolean enabled) {
+        if (mDanmuSwitchBtn != null) mDanmuSwitchBtn.setText(enabled ? "弹幕开" : "弹幕关");
+    }
+
     public void setTitle(String playTitleInfo) {
         mPlayTitle1.setText(playTitleInfo);
     }
@@ -769,6 +787,10 @@ public class VodController extends BaseController {
         void selectSubtitle();
 
         void selectAudioTrack();
+
+        void toggleDanmu();
+
+        void showDanmuSetting();
 
         void toggleFullScreen();
 

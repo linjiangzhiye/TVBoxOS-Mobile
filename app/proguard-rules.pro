@@ -230,3 +230,14 @@
   public static * bind(android.view.View);
 }
 
+# 弹幕组件使用反射创建弹幕对象
+-keep class master.flame.danmaku.** { *; }
+-dontwarn master.flame.danmaku.**
+-keep class com.github.tvbox.osc.player.danmu.** { *; }
+
+# 内置 DLNA/Cling 组件包含按类名加载的 UPnP 实现
+-keep class com.android.cast.dlna.** { *; }
+-keep class org.fourthline.cling.** { *; }
+-dontwarn org.fourthline.cling.**
+-dontwarn org.eclipse.jetty.**
+

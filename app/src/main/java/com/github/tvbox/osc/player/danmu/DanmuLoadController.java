@@ -1,5 +1,6 @@
 package com.github.tvbox.osc.player.danmu;
 
+import android.graphics.Color;
 import android.text.TextUtils;
 import android.view.View;
 
@@ -18,6 +19,7 @@ import master.flame.danmaku.danmaku.model.BaseDanmaku;
 import master.flame.danmaku.danmaku.model.IDisplayer;
 import master.flame.danmaku.danmaku.model.android.DanmakuContext;
 import master.flame.danmaku.ui.widget.DanmakuView;
+import master.flame.danmaku.danmaku.util.DanmakuUtils;
 import xyz.doikki.videoplayer.player.VideoView;
 
 public class DanmuLoadController {
@@ -141,15 +143,45 @@ public class DanmuLoadController {
     }
 
     public boolean toggle() {
-        if (temporarilyClosed) {
-            temporarilyClosed = false;
-            reloadForPlayback();
-            startIfReady();
-            return true;
+        return setEnabled(!DanmuHelper.isOpen());
+    }
+
+    public boolean hasDanmaku() {
+        return !TextUtils.isEmpty(danmuText);
+    }
+
+    public boolean setEnabled(boolean enabled) {
+        DanmuHelper.setOpen(enabled);
+        temporarilyClosed = !enabled;
+        if (!enabled) {
+            close();
+            return false;
         }
-        temporarilyClosed = true;
-        close();
-        return false;
+        reloadForPlayback();
+        startIfReady();
+        return true;
+    }
+
+    public boolean addDanmaku(String text) {
+        if (!DanmuHelper.isOpen() || TextUtils.isEmpty(text) || danmuView == null
+                || danmakuContext == null || !danmuView.isPrepared()) {
+            return false;
+        }
+        try {
+            BaseDanmaku item = danmakuContext.mDanmakuFactory.createDanmaku(BaseDanmaku.TYPE_SCROLL_RL, danmakuContext);
+            if (item == null) return false;
+            item.textSize = 25f * DanmuHelper.getSizeScale();
+            item.textColor = DanmuHelper.useRandomColor() ? DanmuHelper.randomColor() : Color.WHITE;
+            item.textShadowColor = Color.BLACK;
+            item.flags = danmakuContext.mGlobalFlagValues;
+            item.setTime(videoView == null ? 0 : Math.max(0, videoView.getCurrentPosition()));
+            DanmakuUtils.fillText(item, text.trim());
+            danmuView.addDanmaku(item);
+            return true;
+        } catch (Throwable th) {
+            LOG.e("echo-danmu add local error: " + th.getMessage());
+            return false;
+        }
     }
 
     public void reloadForPlayback() {
