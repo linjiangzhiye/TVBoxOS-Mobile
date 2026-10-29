@@ -67,7 +67,7 @@ public class OkHttp {
         return get().client = getBuilder().build();
     }
 
-    public static OkHttpClient client(int timeout) {
+    public static OkHttpClient client(long timeout) {
         return client().newBuilder().connectTimeout(timeout, TimeUnit.MILLISECONDS).readTimeout(timeout, TimeUnit.MILLISECONDS).writeTimeout(timeout, TimeUnit.MILLISECONDS).build();
     }
 
@@ -121,6 +121,29 @@ public class OkHttp {
         FormBody.Builder body = new FormBody.Builder();
         for (Map.Entry<String, String> entry : params.entrySet()) body.add(entry.getKey(), entry.getValue());
         return body.build();
+    }
+
+    public static Call newCall(String url, String tag) {
+        return client().newCall(new Request.Builder().url(url).tag(tag).build());
+    }
+
+    public static Call newCall(OkHttpClient client, String url, String tag) {
+        return client.newCall(new Request.Builder().url(url).tag(tag).build());
+    }
+
+    public static Call newCall(String url, RequestBody body, String tag) {
+        return client().newCall(new Request.Builder().url(url).post(body).tag(tag).build());
+    }
+
+    public static void cancel(String tag) {
+        if (tag == null) return;
+        OkHttpClient okHttpClient = client();
+        for (Call call : okHttpClient.dispatcher().queuedCalls()) {
+            if (tag.equals(call.request().tag())) call.cancel();
+        }
+        for (Call call : okHttpClient.dispatcher().runningCalls()) {
+            if (tag.equals(call.request().tag())) call.cancel();
+        }
     }
 
     private static HttpUrl buildUrl(String url, ArrayMap<String, String> params) {

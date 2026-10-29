@@ -64,4 +64,14 @@ public class HawkConfig {
      * 搜索记录
      */
     public static final String HISTORY_SEARCH = "history_search";
+    /**
+     * 弹幕设置。即使不提供设置界面，也可由配置或远程操作覆盖。
+     */
+    public static final String DANMU_OPEN = "danmu_open";
+    public static final String DANMU_MAX_LINE = "danmu_max_line";
+    public static final String DANMU_SPEED = "danmu_speed";
+    public static final String DANMU_ALPHA = "danmu_alpha";
+    public static final String DANMU_SIZE_SCALE = "danmu_size_scale";
+    public static final String DANMU_RANDOM_COLOR = "danmu_random_color";
+    public static final String DANMU_API = "danmu_api";
 }

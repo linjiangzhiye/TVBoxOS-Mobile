@@ -62,6 +62,7 @@ public class ApiConfig {
     private List<IJKCode> ijkCodes;
     private String spider = null;
     public String wallpaper = "";
+    private String danmaku = "";
 
     private SourceBean emptyHome = new SourceBean();
 
@@ -306,6 +307,8 @@ public class ApiConfig {
         JsonObject infoJson = new Gson().fromJson(jsonStr, JsonObject.class);
         // spider
         spider = DefaultConfig.safeJsonString(infoJson, "spider", "");
+        // danmaku service
+        danmaku = DefaultConfig.safeJsonString(infoJson, "danmaku", "");
         // wallpaper
         wallpaper = DefaultConfig.safeJsonString(infoJson, "wallpaper", "");
         // 远端站点源
@@ -649,6 +652,10 @@ public class ApiConfig {
 
     public String getSpider() {
         return spider;
+    }
+
+    public String getDanmaku() {
+        return danmaku == null ? "" : danmaku;
     }
 
     public Spider getCSP(SourceBean sourceBean) {

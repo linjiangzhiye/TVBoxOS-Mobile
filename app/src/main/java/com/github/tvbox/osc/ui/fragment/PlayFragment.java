@@ -46,6 +46,7 @@ import com.blankj.utilcode.util.ToastUtils;
 import com.github.catvod.crawler.Spider;
 import com.github.tvbox.osc.R;
 import com.github.tvbox.osc.api.ApiConfig;
+import com.github.tvbox.osc.api.DanmakuApi;
 import com.github.tvbox.osc.base.App;
 import com.github.tvbox.osc.base.BaseLazyFragment;
 import com.github.tvbox.osc.bean.ParseBean;
@@ -60,6 +61,7 @@ import com.github.tvbox.osc.player.MyVideoView;
 import com.github.tvbox.osc.player.TrackInfo;
 import com.github.tvbox.osc.player.TrackInfoBean;
 import com.github.tvbox.osc.player.controller.VodController;
+import com.github.tvbox.osc.player.danmu.DanmuLoadController;
 import com.github.tvbox.osc.server.RemoteServer;
 import com.github.tvbox.osc.ui.activity.DetailActivity;
 import com.github.tvbox.osc.ui.adapter.ParseAdapter;
@@ -113,10 +115,12 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.atomic.AtomicInteger;
 
+import master.flame.danmaku.ui.widget.DanmakuView;
 import me.jessyan.autosize.AutoSize;
 import tv.danmaku.ijk.media.player.IMediaPlayer;
 import tv.danmaku.ijk.media.player.IjkTimedText;
 import xyz.doikki.videoplayer.player.AbstractPlayer;
+import xyz.doikki.videoplayer.player.VideoView;
 import xyz.doikki.videoplayer.player.ProgressManager;
 
 public class PlayFragment extends BaseLazyFragment {
@@ -127,6 +131,10 @@ public class PlayFragment extends BaseLazyFragment {
     private VodController mController;
     private SourceViewModel sourceViewModel;
     private Handler mHandler;
+    private DanmakuView mDanmuView;
+    private DanmuLoadController danmuLoadController;
+    private VideoView.OnStateChangeListener danmuStateListener;
+    private String danmuSearchKey = "";
 
     private final long videoDuration = -1;
     /**
@@ -209,6 +217,14 @@ public class PlayFragment extends BaseLazyFragment {
             }
         });
         mVideoView = findViewById(R.id.mVideoView);
+        initDanmuView();
+        danmuStateListener = new VideoView.SimpleOnStateChangeListener() {
+            @Override
+            public void onPlayerStateChanged(int playerState) {
+                startDanmuIfReady();
+            }
+        };
+        mVideoView.addOnStateChangeListener(danmuStateListener);
         mPlayLoadTip = findViewById(R.id.play_load_tip);
         mPlayLoading = findViewById(R.id.play_loading);
         mPlayLoadErr = findViewById(R.id.play_load_error);
@@ -290,6 +306,7 @@ public class PlayFragment extends BaseLazyFragment {
             @Override
             public void prepared() {
                 initSubtitleView();
+                startDanmuIfReady();
             }
 
             @Override
@@ -1041,6 +1058,12 @@ public class PlayFragment extends BaseLazyFragment {
                         mController.showParse(false);
                         playUrl(playUrl + url, headers);
                     }
+                    String danmaku = info.optString("danmaku", "").trim();
+                    if (!TextUtils.isEmpty(danmaku)) {
+                        checkDanmu(danmaku);
+                    } else {
+                        searchDanmu("");
+                    }
                 } catch (Throwable th) {
                     LogUtils.e(th.toString());
 //                        errorWithRetry("获取播放信息错误", true);
@@ -1067,6 +1090,62 @@ public class PlayFragment extends BaseLazyFragment {
         if (intent != null && intent.getExtras() != null) {
 
         }*/
+    }
+
+    private void initDanmuView() {
+        mDanmuView = findViewById(R.id.danmaku);
+        danmuLoadController = new DanmuLoadController(mVideoView, mDanmuView);
+    }
+
+    private void checkDanmu(String danmu) {
+        if (danmuLoadController == null) return;
+        if (!TextUtils.isEmpty(danmu)) danmuSearchKey = "";
+        final String key = progressKey;
+        final String title = mVodInfo == null ? "" : mVodInfo.name;
+        final String episode = getCurrentSeriesName();
+        danmuLoadController.check(danmu, title, episode, () -> {
+            if (TextUtils.equals(key, progressKey)) searchDanmu("");
+        });
+        if (TextUtils.isEmpty(danmu)) searchDanmu("");
+    }
+
+    private void searchDanmu(String danmu) {
+        if (!TextUtils.isEmpty(danmu) || mVodInfo == null || !DanmakuApi.canSearch()) return;
+        final String key = progressKey;
+        if (TextUtils.equals(key, danmuSearchKey)) return;
+        danmuSearchKey = key;
+        final String title = mVodInfo.name;
+        final String episode = getCurrentSeriesName();
+        DanmakuApi.search(title, episode, new DanmakuApi.SearchCallback() {
+            @Override
+            public void onFound(String url) {
+                if (!TextUtils.equals(key, progressKey) || danmuLoadController == null) return;
+                danmuLoadController.check(url, title, episode, null);
+            }
+
+            @Override
+            public void onNotFound() {
+                if (!TextUtils.equals(key, progressKey) || danmuLoadController == null) return;
+                danmuLoadController.check("", title, episode, null);
+            }
+        });
+    }
+
+    private String getCurrentSeriesName() {
+        if (mVodInfo == null || mVodInfo.seriesMap == null || mVodInfo.playFlag == null) return "";
+        List<VodInfo.VodSeries> seriesList = mVodInfo.seriesMap.get(mVodInfo.playFlag);
+        if (seriesList == null || mVodInfo.playIndex < 0 || mVodInfo.playIndex >= seriesList.size()) return "";
+        VodInfo.VodSeries series = seriesList.get(mVodInfo.playIndex);
+        return series == null || series.name == null ? "" : series.name;
+    }
+
+    private void resetDanmuState() {
+        danmuSearchKey = "";
+        if (danmuLoadController != null) danmuLoadController.reset();
+    }
+
+    private void startDanmuIfReady() {
+        if (danmuLoadController != null) danmuLoadController.startIfReady();
     }
 
     void initPlayerCfg() {
@@ -1149,6 +1228,16 @@ public class PlayFragment extends BaseLazyFragment {
         sourceViewModel.playResult.removeObserver(mObserverPlayResult);
 
         EventBus.getDefault().unregister(this);
+        if (mVideoView != null && danmuStateListener != null) {
+            mVideoView.removeOnStateChangeListener(danmuStateListener);
+            danmuStateListener = null;
+        }
+        if (danmuLoadController != null) {
+            danmuLoadController.destroy();
+            danmuLoadController = null;
+        }
+        mDanmuView = null;
+        danmuSearchKey = "";
         if (mVideoView != null) {
             mVideoView.release();
             mVideoView = null;
@@ -1235,9 +1324,12 @@ public class PlayFragment extends BaseLazyFragment {
 
         stopParse();
         initParseLoadFound();
+        resetDanmuState();
         if (mVideoView != null) mVideoView.release();
         String subtitleCacheKey = mVodInfo.sourceKey + "-" + mVodInfo.id + "-" + mVodInfo.playFlag + "-" + mVodInfo.playIndex + "-" + vs.name + "-subt";
         String progressKey = mVodInfo.sourceKey + mVodInfo.id + mVodInfo.playFlag + mVodInfo.playIndex + vs.name;
+        this.progressKey = progressKey;
+        checkDanmu("");
         //重新播放清除现有进度
         if (reset) {
             CacheManager.delete(MD5.string2MD5(progressKey), 0);
