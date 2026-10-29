@@ -40,5 +40,3 @@ dependencies {
     //noinspection GradleDependency
     api 'org.fourthline.cling:cling-support:2.1.1'
 }
-
-apply from: "../jcenter.gradle"
