@@ -37,6 +37,10 @@ public class MyVideoView extends VideoView implements DrawHandler.Callback {
         return mMediaPlayer;
     }
 
+    public long getPlaybackPosition() {
+        return mCurrentPosition;
+    }
+
     @Override
     public void seekTo(long pos) {
         super.seekTo(pos);
