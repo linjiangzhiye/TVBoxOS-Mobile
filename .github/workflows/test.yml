@@ -18,6 +18,9 @@ jobs:
         with:
           distribution: temurin
           java-version: '17'
+      - name: Prepare CI Signing Key
+        run: |
+          keytool -genkeypair -v             -keystore TVBoxOSC.jks             -alias TVBoxOSC             -keyalg RSA             -keysize 2048             -validity 10000             -storepass TVBoxOSC             -keypass TVBoxOSC             -dname "CN=TVBox CI, O=TVBox, C=CN"
       - name: Build With Gradle
         run: |
           chmod +x gradlew
