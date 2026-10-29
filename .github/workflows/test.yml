@@ -1,10 +1,9 @@
 name: Test Build
 
 on:
-#  push:
-#    branches:
-#      - main
-#  pull_request:
+  push:
+    branches:
+      - feat/mobile-danmaku
   workflow_dispatch:
 
 jobs:
