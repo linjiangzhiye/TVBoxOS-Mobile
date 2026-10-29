@@ -488,6 +488,14 @@ public class DanmakuApi {
         return url.endsWith("/danmaku");
     }
 
+    private static String normalizeBuiltinQuery(String name) {
+        String original = Trans.t2s(name == null ? "" : name).trim();
+        String title = original.replaceAll("[（(\\[【].*?[）)\\]】]", " ");
+        title = title.replaceAll("(?i)(国语版?|粤语版?|日语版?|中字|高清|蓝光|tv版|电视剧版)", " ");
+        title = title.replaceAll("\\s+", " ").trim();
+        return title.isEmpty() ? original : title;
+    }
+
     private static String normalizeBaseUrl(String apiUrl) {
         String url = apiUrl == null ? "" : apiUrl.trim();
         if (url.endsWith("/")) url = url.substring(0, url.length() - 1);
@@ -608,7 +616,7 @@ public class DanmakuApi {
     }
 
     private static JSONArray findEpisodes(JSONObject object, String queryTitle) {
-        EpisodeList episodeList = findEpisodeList(object, queryTitle, episode);
+        EpisodeList episodeList = findEpisodeList(object, queryTitle, "");
         return episodeList == null ? null : episodeList.episodes;
     }
 
