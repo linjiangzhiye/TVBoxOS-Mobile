@@ -241,7 +241,7 @@ public class DetailActivity extends BaseVbActivity<ActivityDetailBinding> {
         });
 
         mBinding.tvSite.setOnClickListener(view -> {
-            startQuickSearch();
+            if (!startQuickSearch()) return;
             QuickSearchDialog quickSearchDialog = new QuickSearchDialog(DetailActivity.this);
             EventBus.getDefault().post(new RefreshEvent(RefreshEvent.TYPE_QUICK_SEARCH, quickSearchData));
             EventBus.getDefault().post(new RefreshEvent(RefreshEvent.TYPE_QUICK_SEARCH_WORD, quickSearchWord));
@@ -629,14 +629,22 @@ public class DetailActivity extends BaseVbActivity<ActivityDetailBinding> {
         searchResult();
     }
 
-    private void startQuickSearch() {
+    private boolean startQuickSearch() {
         initCheckedSourcesForSearch();
         if (hadQuickStart)
-            return;
+            return true;
         hadQuickStart = true;
         OkGo.getInstance().cancelTag("quick_search");
         quickSearchWord.clear();
-        searchTitle = mVideo.name;
+        String videoName = mVideo == null ? "" : mVideo.name;
+        if (TextUtils.isEmpty(videoName) && vodInfo != null) videoName = vodInfo.name;
+        if (TextUtils.isEmpty(videoName)) {
+            hadQuickStart = false;
+            quickSearchData.clear();
+            Toast.makeText(this, "影片名称缺失，暂时无法快速搜索", Toast.LENGTH_SHORT).show();
+            return false;
+        }
+        searchTitle = videoName;
         quickSearchData.clear();
         quickSearchWord.addAll(SearchHelper.splitWords(searchTitle));
         // 分词
@@ -673,6 +681,7 @@ public class DetailActivity extends BaseVbActivity<ActivityDetailBinding> {
                 });
 
         searchResult();
+        return true;
     }
 
     private void searchResult() {

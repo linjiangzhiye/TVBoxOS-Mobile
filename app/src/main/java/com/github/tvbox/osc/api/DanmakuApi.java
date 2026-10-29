@@ -275,7 +275,7 @@ public class DanmakuApi {
 
     private static void searchBuiltin(String apiUrl, String name, String episode, SearchCallback callback, int retry, int seq, int queryMode) {
         final String baseUrl = normalizeBaseUrl(apiUrl);
-        final String simpleName = Trans.t2s(name == null ? "" : name);
+        final String simpleName = normalizeBuiltinQuery(name);
         final String simpleEpisode = Trans.t2s(episode == null ? "" : episode);
         final String episodeQuery = getEpisodeQuery(simpleEpisode, queryMode);
         final String searchUrl = baseUrl + "/api/v2/search/episodes?anime=" + encode(simpleName)
@@ -352,12 +352,12 @@ public class DanmakuApi {
                 if (!isCurrentSearch(seq)) return;
                 try {
                     String body = response.body() == null ? "" : response.body().string();
-                    String animeId = findAnimeId(body, name);
+                    String animeId = findAnimeId(body, name, episode);
                     if (TextUtils.isEmpty(animeId)) {
                         if (notifyOnEmpty) notifyNotFound(callback, seq);
                         return;
                     }
-                    loadBuiltinBangumi(baseUrl, animeId, episode, callback, seq);
+                    loadBuiltinBangumi(baseUrl, animeId, name, episode, callback, seq);
                 } catch (Throwable th) {
                     LOG.e("echo-danmaku builtin anime parse error: " + th.getMessage());
                     if (notifyOnEmpty) notifyNotFound(callback, seq);
@@ -368,7 +368,7 @@ public class DanmakuApi {
         });
     }
 
-    private static void loadBuiltinBangumi(String baseUrl, String animeId, String episode, SearchCallback callback, int seq) {
+    private static void loadBuiltinBangumi(String baseUrl, String animeId, String queryTitle, String episode, SearchCallback callback, int seq) {
         final String bangumiUrl = baseUrl + "/api/v2/bangumi/" + animeId;
 //        LOG.i("echo-danmaku builtin bangumi: " + bangumiUrl);
         OkHttp.newCall(getBuiltinClient(), bangumiUrl, TAG).enqueue(new Callback() {
@@ -384,7 +384,7 @@ public class DanmakuApi {
                 if (!isCurrentSearch(seq)) return;
                 try {
                     String body = response.body() == null ? "" : response.body().string();
-                    EpisodeMatch episodeMatch = findEpisode(body, "", episode);
+                    EpisodeMatch episodeMatch = findEpisode(body, queryTitle, episode);
                     if (episodeMatch != null && !TextUtils.isEmpty(episodeMatch.id)) {
                         loadBuiltinComment(baseUrl, "", episode, episodeMatch, callback, seq);
                     } else {
@@ -516,7 +516,7 @@ public class DanmakuApi {
         return -1;
     }
 
-    private static String findAnimeId(String body, String queryTitle) throws Exception {
+    private static String findAnimeId(String body, String queryTitle, String episode) throws Exception {
         JSONObject object = new JSONObject(body);
         JSONArray array = object.optJSONArray("animes");
         if (array == null) array = object.optJSONArray("anime");
@@ -528,7 +528,7 @@ public class DanmakuApi {
             JSONObject item = array.optJSONObject(i);
             if (item == null) continue;
             String title = firstString(item, "animeTitle", "title", "name");
-            int score = titleScore(queryTitle, title);
+            int score = titleScore(queryTitle, title) + candidateTypeScore(queryTitle, episode, item);
             String id = firstString(item, "animeId", "id");
             if (TextUtils.isEmpty(id)) continue;
             if (bestScore == Integer.MIN_VALUE || score > bestScore) {
@@ -536,7 +536,7 @@ public class DanmakuApi {
                 bestId = id;
             }
         }
-        return bestId;
+        return bestScore >= 800 ? bestId : "";
     }
 
     private static EpisodeMatch findEpisode(String body, String episode) throws Exception {
@@ -549,7 +549,7 @@ public class DanmakuApi {
 
     private static EpisodeMatch findEpisode(String body, String queryTitle, String episode, boolean allowMovieFallback) throws Exception {
         JSONObject object = new JSONObject(body);
-        EpisodeList episodeList = findEpisodeList(object, queryTitle);
+        EpisodeList episodeList = findEpisodeList(object, queryTitle, episode);
         JSONArray episodes = episodeList == null ? null : episodeList.episodes;
         if (episodes == null || episodes.length() <= 0) return null;
         int targetNumber = extractEpisodeNumber(episode);
@@ -570,7 +570,7 @@ public class DanmakuApi {
             if (first == null) first = match;
             if (firstMandarin == null && isMandarinTitle(title)) firstMandarin = match;
 
-            int score = 0;
+            int score = targetNumber > 0 ? -10000 : 0;
             if (targetNumber > 0) {
                 if (number == targetNumber) score += 600;
                 if (extractEpisodeNumber(title) == targetNumber) score += 300;
@@ -595,6 +595,7 @@ public class DanmakuApi {
     private static EpisodeMatch findEpisodeFromSearchEpisodes(String body, String queryTitle, String episode) throws Exception {
         EpisodeMatch match = findEpisode(body, queryTitle, episode, false);
         if (match != null) return match;
+        if (!canUseMovieFallback(queryTitle, episode)) return null;
         EpisodeMatch movieFallback = findMovieFallback(new JSONObject(body), queryTitle, episode);
         if (movieFallback != null) {
             LOG.i("echo-danmaku episodes movie fallback episode: " + safeLog(movieFallback.title) + ", episodeId: " + movieFallback.id);
@@ -607,11 +608,11 @@ public class DanmakuApi {
     }
 
     private static JSONArray findEpisodes(JSONObject object, String queryTitle) {
-        EpisodeList episodeList = findEpisodeList(object, queryTitle);
+        EpisodeList episodeList = findEpisodeList(object, queryTitle, episode);
         return episodeList == null ? null : episodeList.episodes;
     }
 
-    private static EpisodeList findEpisodeList(JSONObject object, String queryTitle) {
+    private static EpisodeList findEpisodeList(JSONObject object, String queryTitle, String episode) {
         JSONArray array = object.optJSONArray("episodes");
         if (array != null) return new EpisodeList(array, isMovieType(object));
         JSONObject bangumi = object.optJSONObject("bangumi");
@@ -631,13 +632,52 @@ public class DanmakuApi {
             array = item.optJSONArray("episodes");
             if (array == null || array.length() <= 0) continue;
             String title = firstString(item, "animeTitle", "title", "name");
-            int score = titleScore(queryTitle, title);
+            int score = titleScore(queryTitle, title) + candidateTypeScore(queryTitle, episode, item);
+            score += Math.min(array.length(), 100);
             if (best == null || score > bestScore) {
                 bestScore = score;
                 best = new EpisodeList(array, isMovieType(item));
             }
         }
         return best;
+    }
+
+    private static int candidateTypeScore(String queryTitle, String episode, JSONObject object) {
+        String title = firstString(object, "animeTitle", "title", "name");
+        boolean movieCandidate = isMovieType(object) || isMovieTitle(title);
+        boolean movieQuery = isMovieQuery(queryTitle, episode);
+        if (movieQuery) return movieCandidate ? 500 : -1800;
+        if (movieCandidate) return -2600;
+        if (isSpecialTitle(title)) return -500;
+        return 350;
+    }
+
+    private static boolean isMovieQuery(String queryTitle, String episode) {
+        return containsMovieKeyword(queryTitle) || containsMovieKeyword(episode);
+    }
+
+    private static boolean canUseMovieFallback(String queryTitle, String episode) {
+        if (isMovieQuery(queryTitle, episode)) return true;
+        return TextUtils.isEmpty(episode) || extractEpisodeNumber(episode) <= 0;
+    }
+
+    private static boolean containsMovieKeyword(String text) {
+        if (TextUtils.isEmpty(text)) return false;
+        String value = text.toLowerCase(Locale.ROOT);
+        return value.contains("电影") || value.contains("剧场版") || value.contains("大电影")
+                || value.contains("the movie") || value.contains("movie");
+    }
+
+    private static boolean isMovieTitle(String title) {
+        return containsMovieKeyword(title);
+    }
+
+    private static boolean isSpecialTitle(String title) {
+        if (TextUtils.isEmpty(title)) return false;
+        String value = title.toLowerCase(Locale.ROOT);
+        return value.contains("特别篇") || value.matches(".*(?:^|[^a-z])sp(?:[^a-z]|$).*")
+                || value.matches(".*(?:^|[^a-z])ova(?:[^a-z]|$).*")
+                || value.contains("预告") || value.contains("花絮");
     }
 
     private static boolean isMovieType(JSONObject object) {

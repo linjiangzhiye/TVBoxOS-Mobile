@@ -143,8 +143,8 @@ public class VodController extends BaseController {
     public SimpleSubtitleView mSubtitleView;
     public TextView mZimuBtn;
     public TextView mAudioTrackBtn;
-    public TextView mDanmuSwitchBtn;
-    public TextView mDanmuSettingBtn;
+    public ImageView mDanmuSwitchBtn;
+    public ImageView mDanmuSettingBtn;
     public TextView mLandscapePortraitBtn;
     private ImageView mIvPlayStatus;
     private View mChooseSeries;
@@ -229,8 +229,8 @@ public class VodController extends BaseController {
         mSubtitleView = findViewById(R.id.subtitle_view);
         mZimuBtn = findViewById(R.id.zimu_select);
         mAudioTrackBtn = findViewById(R.id.audio_track_select);
-        mDanmuSwitchBtn = findViewById(R.id.danmu_switch);
-        mDanmuSettingBtn = findViewById(R.id.danmu_setting);
+        mDanmuSwitchBtn = findViewById(R.id.danmaku_toggle);
+        mDanmuSettingBtn = findViewById(R.id.danmaku_settings);
         mLandscapePortraitBtn = findViewById(R.id.landscape_portrait);
         mIvPlayStatus = findViewById(R.id.play_status);
         mChooseSeries = findViewById(R.id.choose_series);
@@ -734,7 +734,10 @@ public class VodController extends BaseController {
     }
 
     public void setDanmuEnabled(boolean enabled) {
-        if (mDanmuSwitchBtn != null) mDanmuSwitchBtn.setText(enabled ? "弹幕开" : "弹幕关");
+        if (mDanmuSwitchBtn != null) {
+            mDanmuSwitchBtn.setImageResource(enabled ? R.drawable.ic_danmaku_on : R.drawable.ic_danmaku_off);
+            mDanmuSwitchBtn.setContentDescription(enabled ? "关闭弹幕" : "开启弹幕");
+        }
     }
 
     public void setTitle(String playTitleInfo) {

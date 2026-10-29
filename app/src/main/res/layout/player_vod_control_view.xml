@@ -309,6 +309,28 @@
                 />
 
             <androidx.appcompat.widget.AppCompatImageView
+                android:id="@+id/danmaku_toggle"
+                android:layout_width="34dp"
+                android:layout_height="34dp"
+                android:layout_marginLeft="4dp"
+                android:contentDescription="弹幕开关"
+                android:focusable="true"
+                android:padding="6dp"
+                android:scaleType="centerInside"
+                android:src="@drawable/ic_danmaku_on" />
+
+            <androidx.appcompat.widget.AppCompatImageView
+                android:id="@+id/danmaku_settings"
+                android:layout_width="34dp"
+                android:layout_height="34dp"
+                android:layout_marginLeft="2dp"
+                android:contentDescription="弹幕设置"
+                android:focusable="true"
+                android:padding="6dp"
+                android:scaleType="centerInside"
+                android:src="@drawable/ic_danmaku_settings" />
+
+            <androidx.appcompat.widget.AppCompatImageView
                 android:id="@+id/iv_fullscreen"
                 android:layout_width="34dp"
                 android:layout_height="34dp"
@@ -496,34 +518,6 @@
                         android:paddingVertical="4dp"
                         android:text="音轨"
                         />
-                    <TextView
-                        android:id="@+id/danmu_switch"
-                        android:singleLine="true"
-                        android:layout_width="wrap_content"
-                        android:layout_height="wrap_content"
-                        android:layout_marginEnd="@dimen/dp_5"
-                        android:layout_marginRight="@dimen/dp_5"
-                        android:textColor="@color/white"
-                        android:focusable="true"
-                        android:paddingHorizontal="10dp"
-                        android:paddingVertical="4dp"
-                        android:text="弹幕开"
-                        />
-
-                    <TextView
-                        android:id="@+id/danmu_setting"
-                        android:singleLine="true"
-                        android:layout_width="wrap_content"
-                        android:layout_height="wrap_content"
-                        android:layout_marginEnd="@dimen/dp_5"
-                        android:layout_marginRight="@dimen/dp_5"
-                        android:textColor="@color/white"
-                        android:focusable="true"
-                        android:paddingHorizontal="10dp"
-                        android:paddingVertical="4dp"
-                        android:text="弹幕设置"
-                        />
-
                     <TextView
                         android:id="@+id/landscape_portrait"
                         android:singleLine="true"
