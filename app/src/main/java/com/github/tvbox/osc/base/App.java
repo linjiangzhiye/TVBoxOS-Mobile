@@ -28,6 +28,7 @@ import com.whl.quickjs.android.QuickJSLoader;
 import java.util.ArrayList;
 import java.util.List;
 
+import cat.ereza.customactivityoncrash.CrashLogStore;
 import cat.ereza.customactivityoncrash.config.CaocConfig;
 import me.jessyan.autosize.AutoSizeConfig;
 import me.jessyan.autosize.unit.Subunits;
@@ -155,6 +156,7 @@ public class App extends MultiDexApplication {
                 .errorDrawable(R.drawable.app_icon) //错误图标
                 .restartActivity(MainActivity.class) //重新启动后的activity
                 .apply();
+        CrashLogStore.install(getApplicationContext());
     }
 
 }

@@ -49,7 +49,7 @@ class SubscriptionActivity : BaseVbActivity<ActivitySubscriptionBinding>() {
     override fun init() {
         isLiveSubscription = intent?.getBooleanExtra(EXTRA_LIVE, false) ?: false
         mBeforeUrl = Hawk.get(if (isLiveSubscription) HawkConfig.LIVE_URL else HawkConfig.API_URL, "")
-        mSubscriptions = Hawk.get(
+        mSubscriptions = Hawk.get<MutableList<Subscription>>(
             if (isLiveSubscription) HawkConfig.LIVE_SUBSCRIPTIONS else HawkConfig.SUBSCRIPTIONS,
             ArrayList()
         )
