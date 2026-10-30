@@ -18,7 +18,7 @@ import kotlin.system.exitProcess
 
 class MainActivity : BaseVbActivity<ActivityMainBinding>() {
 
-    var fragments = listOf(HomeFragment(), LiveFragment(), MyFragment())
+    var fragments: List<Fragment> = listOf(HomeFragment(), LiveFragment(), MyFragment())
     var useCacheConfig = false
     private var exitTime = 0L
 
