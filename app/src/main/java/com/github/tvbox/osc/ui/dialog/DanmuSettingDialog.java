@@ -2,8 +2,10 @@ package com.github.tvbox.osc.ui.dialog;
 
 import android.content.Context;
 import android.view.View;
+import android.widget.EditText;
 import android.widget.SeekBar;
 import android.widget.TextView;
+import android.widget.Toast;
 
 import androidx.annotation.NonNull;
 import androidx.appcompat.widget.SwitchCompat;
@@ -25,6 +27,8 @@ public class DanmuSettingDialog extends CenterPopupView {
         void onPickLocalFile();
 
         void onOpenSourceList();
+
+        void onSendDanmaku(String text);
     }
 
     private final Listener listener;
@@ -117,6 +121,17 @@ public class DanmuSettingDialog extends CenterPopupView {
         bindSeekBar(opacityView);
         bindSeekBar(sizeView);
         bindSeekBar(speedView);
+
+        EditText inputView = findViewById(R.id.danmu_input);
+        findViewById(R.id.danmu_send).setOnClickListener(view -> {
+            String text = inputView.getText() == null ? "" : inputView.getText().toString().trim();
+            if (text.isEmpty()) {
+                Toast.makeText(getContext(), "请输入弹幕内容", Toast.LENGTH_SHORT).show();
+                return;
+            }
+            if (listener != null) listener.onSendDanmaku(text);
+            inputView.setText("");
+        });
 
         findViewById(R.id.danmu_close).setOnClickListener(view -> dismiss());
         findViewById(R.id.danmu_local_file).setOnClickListener(view -> {

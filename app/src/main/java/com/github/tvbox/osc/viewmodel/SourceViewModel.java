@@ -1,8 +1,11 @@
 package com.github.tvbox.osc.viewmodel;
 
+import android.os.Handler;
+import android.os.Looper;
 import android.text.TextUtils;
 
 import android.util.Base64;
+import android.util.LruCache;
 import androidx.lifecycle.MutableLiveData;
 import androidx.lifecycle.ViewModel;
 
@@ -50,6 +53,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
+import java.util.concurrent.atomic.AtomicInteger;
 
 /**
  * @author pj567
@@ -74,6 +78,12 @@ public class SourceViewModel extends ViewModel {
     }
 
     public static final ExecutorService spThreadPool = Executors.newSingleThreadExecutor();
+    private static final ExecutorService playThreadPool = Executors.newFixedThreadPool(2);
+    private static final Handler playHandler = new Handler(Looper.getMainLooper());
+    private static final long PLAY_TIMEOUT = 12_000L;
+    private static final long PLAY_CACHE_TTL = 5 * 60 * 1000L;
+    private static final LruCache<String, CachedPlayResult> playCache = new LruCache<>(32);
+    private final AtomicInteger playGeneration = new AtomicInteger();
 
     // homeContent
     public void getSort(String sourceKey) {
@@ -642,25 +652,39 @@ public class SourceViewModel extends ViewModel {
     }
     // playerContent
     public void getPlay(String sourceKey, String playFlag, String progressKey, String url, String subtitleKey) {
+        final int generation = playGeneration.incrementAndGet();
+        playHandler.postDelayed(() -> {
+            if (playGeneration.compareAndSet(generation, generation + 1)) {
+                playResult.postValue(null);
+            }
+        }, PLAY_TIMEOUT);
+
         SourceBean sourceBean = ApiConfig.get().getSource(sourceKey);
+        if (sourceBean == null) {
+            if (generation == playGeneration.get()) playResult.postValue(null);
+            return;
+        }
+        final String cacheKey = sourceKey + "|" + playFlag + "|" + url;
         int type = sourceBean.getType();
         if (type == 3) {
-            spThreadPool.execute(new Runnable() {
+            CachedPlayResult cached = getCachedPlay(cacheKey);
+            if (cached != null) {
+                postPlayResult(cached.json, url, progressKey, subtitleKey, playFlag, generation);
+                return;
+            }
+            playThreadPool.execute(new Runnable() {
                 @Override
                 public void run() {
+                    if (generation != playGeneration.get()) return;
                     Spider sp = ApiConfig.get().getCSP(sourceBean);
                     try {
                         String json = sp.playerContent(playFlag, url, ApiConfig.get().getVipParseFlags());
-                        JSONObject result = new JSONObject(json);
-                        result.put("key", url);
-                        result.put("proKey", progressKey);
-                        result.put("subtKey", subtitleKey);
-                        if (!result.has("flag"))
-                            result.put("flag", playFlag);
-                        playResult.postValue(result);
+                        if (generation != playGeneration.get()) return;
+                        putCachedPlay(cacheKey, json);
+                        postPlayResult(json, url, progressKey, subtitleKey, playFlag, generation);
                     } catch (Throwable th) {
                         th.printStackTrace();
-                        playResult.postValue(null);
+                        if (playGeneration.compareAndSet(generation, generation + 1)) playResult.postValue(null);
                     }
                 }
             });
@@ -680,52 +704,86 @@ public class SourceViewModel extends ViewModel {
                 result.put("subtKey", subtitleKey);
                 result.put("playUrl", playUrl);
                 result.put("flag", playFlag);
-                playResult.postValue(result);
+                if (playGeneration.compareAndSet(generation, generation + 1)) playResult.postValue(result);
             } catch (Throwable th) {
                 th.printStackTrace();
-                playResult.postValue(null);
+                if (playGeneration.compareAndSet(generation, generation + 1)) playResult.postValue(null);
             }
         } else if (type == 4) {
+            CachedPlayResult cached = getCachedPlay(cacheKey);
+            if (cached != null) {
+                postPlayResult(cached.json, url, progressKey, subtitleKey, playFlag, generation);
+                return;
+            }
+            OkGo.getInstance().cancelTag("play");
             OkGo.<String>get(sourceBean.getApi())
                 .params("play", url)
-                .params("flag" ,playFlag)
+                .params("flag", playFlag)
                 .tag("play")
                 .execute(new AbsCallback<String>() {
                     @Override
                     public String convertResponse(okhttp3.Response response) throws Throwable {
                         if (response.body() != null) {
                             return response.body().string();
-                        } else {
-                            throw new IllegalStateException("网络请求错误");
                         }
+                        throw new IllegalStateException("网络请求错误");
                     }
 
                     @Override
                     public void onSuccess(Response<String> response) {
                         String json = response.body();
                         LOG.i(json);
-                        try {
-                            JSONObject result = new JSONObject(json);
-                            result.put("key", url);
-                            result.put("proKey", progressKey);
-                            result.put("subtKey", subtitleKey);
-                            if (!result.has("flag"))
-                                result.put("flag", playFlag);
-                            playResult.postValue(result);
-                        } catch (Throwable th) {
-                            th.printStackTrace();
-                            playResult.postValue(null);
-                        }
+                        if (generation != playGeneration.get()) return;
+                        putCachedPlay(cacheKey, json);
+                        postPlayResult(json, url, progressKey, subtitleKey, playFlag, generation);
                     }
 
                     @Override
                     public void onError(Response<String> response) {
                         super.onError(response);
-                        playResult.postValue(null);
+                        if (playGeneration.compareAndSet(generation, generation + 1)) playResult.postValue(null);
                     }
                 });
-        }else {
-            playResult.postValue(null);
+        } else {
+            if (playGeneration.compareAndSet(generation, generation + 1)) playResult.postValue(null);
+        }
+    }
+
+    private void postPlayResult(String json, String url, String progressKey, String subtitleKey, String playFlag, int generation) {
+        if (generation != playGeneration.get()) return;
+        try {
+            JSONObject result = new JSONObject(json);
+            result.put("key", url);
+            result.put("proKey", progressKey);
+            result.put("subtKey", subtitleKey);
+            if (!result.has("flag")) result.put("flag", playFlag);
+            if (playGeneration.compareAndSet(generation, generation + 1)) playResult.postValue(result);
+        } catch (Throwable th) {
+            th.printStackTrace();
+            if (playGeneration.compareAndSet(generation, generation + 1)) playResult.postValue(null);
+        }
+    }
+
+    private CachedPlayResult getCachedPlay(String key) {
+        CachedPlayResult cached = playCache.get(key);
+        if (cached == null) return null;
+        if (System.currentTimeMillis() - cached.savedAt > PLAY_CACHE_TTL) {
+            playCache.remove(key);
+            return null;
+        }
+        return cached;
+    }
+
+    private void putCachedPlay(String key, String json) {
+        if (!TextUtils.isEmpty(json)) playCache.put(key, new CachedPlayResult(json));
+    }
+
+    private static final class CachedPlayResult {
+        final String json;
+        final long savedAt = System.currentTimeMillis();
+
+        CachedPlayResult(String json) {
+            this.json = json;
         }
     }
 

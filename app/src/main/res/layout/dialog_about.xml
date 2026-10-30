@@ -2,124 +2,134 @@
 <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
     android:layout_width="match_parent"
     android:layout_height="wrap_content"
-    xmlns:app="http://schemas.android.com/apk/res-auto"
-    xmlns:tools="http://schemas.android.com/tools"
-    android:layout_gravity="center"
     android:background="@drawable/bg_bottom_dialog"
     android:orientation="vertical"
     android:paddingHorizontal="20dp"
-    android:paddingTop="20dp"
-    android:paddingBottom="30dp">
+    android:paddingTop="18dp"
+    android:paddingBottom="24dp">
 
     <LinearLayout
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        android:gravity="center_vertical">
-
-        <TextView
-            android:id="@+id/title"
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:text="关于"
-            android:textColor="@color/text_foreground"
-            android:textStyle="bold"
-            android:textSize="18sp"/>
-
-        <Space
-            android:layout_width="0dp"
-            android:layout_height="wrap_content"
-            android:layout_weight="1"/>
-        <ImageView
-            android:id="@+id/iv_close"
-            android:layout_width="50dp"
-            android:layout_height="50dp"
-            android:src="@drawable/ic_close_24"
-            android:padding="10dp"/>
-        <LinearLayout
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:layout_marginTop="18dp"
         android:gravity="center_vertical"
         android:orientation="horizontal">
+
         <TextView
             android:layout_width="0dp"
             android:layout_height="wrap_content"
             android:layout_weight="1"
-            android:text="错误日志"
+            android:text="关于"
             android:textColor="@color/text_foreground"
-            android:textSize="16sp"
+            android:textSize="20sp"
             android:textStyle="bold" />
-        <TextView
-            android:id="@+id/btn_clear_log"
-            android:layout_width="wrap_content"
-            android:layout_height="wrap_content"
-            android:padding="8dp"
-            android:text="清空"
-            android:textColor="@color/text_sub_foreground"
-            android:textSize="13sp" />
+
+        <ImageView
+            android:id="@+id/iv_close"
+            android:layout_width="48dp"
+            android:layout_height="48dp"
+            android:contentDescription="关闭"
+            android:padding="12dp"
+            android:src="@drawable/ic_close_24" />
     </LinearLayout>
 
-    <TextView
-        android:id="@+id/tv_error_log"
+    <ScrollView
         android:layout_width="match_parent"
-        android:layout_height="190dp"
-        android:layout_marginTop="6dp"
-        android:background="@drawable/bg_large_round_gray"
-        android:fontFamily="monospace"
-        android:gravity="top|start"
-        android:padding="10dp"
-        android:scrollbars="vertical"
-        android:text="暂无错误日志"
-        android:textColor="@color/text_sub_foreground"
-        android:textIsSelectable="true"
-        android:textSize="11sp" />
-</LinearLayout>
+        android:layout_height="500dp"
+        android:fillViewport="true"
+        android:overScrollMode="never"
+        android:scrollbars="none">
 
-    <TextView
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:layout_marginTop="10dp"
-        android:lineSpacingExtra="10dp"
-        android:text="@string/about"
-        android:textColor="@color/text_foreground"
-         />
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical">
 
-    <TextView
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:layout_marginTop="20dp"
-        android:text="项目地址"
-        android:textColor="@color/text_foreground"
-        />
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="12dp"
+                android:lineSpacingExtra="8dp"
+                android:text="@string/about"
+                android:textColor="@color/text_foreground"
+                android:textSize="15sp" />
 
-    <TextView
-        android:layout_width="wrap_content"
-        android:layout_height="wrap_content"
-        android:text="https://github.com/XiaoRanLiu3119/TVBoxOS-Mobile"
-        android:textIsSelectable="true"
-        android:textColor="@color/text_sub_foreground"
-        android:layout_marginTop="4dp"/>
-    <TextView
-        android:layout_width="match_parent"
-        android:layout_height="wrap_content"
-        android:layout_marginTop="20dp"
-        android:text="修改自"
-        android:textColor="@color/text_foreground"
-        />
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="20dp"
+                android:text="项目地址"
+                android:textColor="@color/text_foreground"
+                android:textSize="15sp"
+                android:textStyle="bold" />
 
-    <TextView
-        android:layout_width="wrap_content"
-        android:layout_height="wrap_content"
-        android:lineSpacingExtra="4dp"
-        android:layout_marginVertical="4dp"
-        android:textIsSelectable="true"
-        android:textColor="@color/text_sub_foreground"
-        android:text="https://github.com/q215613905/TVBoxOS"/>
-    <TextView
-        android:layout_width="wrap_content"
-        android:layout_height="wrap_content"
-        android:textIsSelectable="true"
-        android:textColor="@color/text_sub_foreground"
-        android:text="https://github.com/CatVodTVOfficial/TVBoxOSC"/>
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="4dp"
+                android:text="https://github.com/linjiangzhiye/TVBoxOS-Mobile"
+                android:textColor="@color/text_sub_foreground"
+                android:textIsSelectable="true"
+                android:textSize="13sp" />
 
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="18dp"
+                android:text="参考项目"
+                android:textColor="@color/text_foreground"
+                android:textSize="15sp"
+                android:textStyle="bold" />
+
+            <TextView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="4dp"
+                android:lineSpacingExtra="4dp"
+                android:text="https://github.com/q215613905/TVBoxOS&#10;https://github.com/CatVodTVOfficial/TVBoxOSC&#10;https://github.com/FongMi/TV&#10;https://github.com/Sle2p/AniCh"
+                android:textColor="@color/text_sub_foreground"
+                android:textIsSelectable="true"
+                android:textSize="13sp" />
+
+            <LinearLayout
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="22dp"
+                android:gravity="center_vertical"
+                android:orientation="horizontal">
+
+                <TextView
+                    android:layout_width="0dp"
+                    android:layout_height="wrap_content"
+                    android:layout_weight="1"
+                    android:text="错误日志"
+                    android:textColor="@color/text_foreground"
+                    android:textSize="15sp"
+                    android:textStyle="bold" />
+
+                <TextView
+                    android:id="@+id/btn_clear_log"
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:padding="8dp"
+                    android:text="清空"
+                    android:textColor="@color/text_sub_foreground"
+                    android:textSize="13sp" />
+            </LinearLayout>
+
+            <TextView
+                android:id="@+id/tv_error_log"
+                android:layout_width="match_parent"
+                android:layout_height="210dp"
+                android:layout_marginTop="6dp"
+                android:background="@drawable/bg_large_round_gray"
+                android:fontFamily="monospace"
+                android:gravity="top|start"
+                android:padding="10dp"
+                android:scrollbars="vertical"
+                android:text="暂无错误日志"
+                android:textColor="@color/text_sub_foreground"
+                android:textIsSelectable="true"
+                android:textSize="11sp" />
+        </LinearLayout>
+    </ScrollView>
 </LinearLayout>

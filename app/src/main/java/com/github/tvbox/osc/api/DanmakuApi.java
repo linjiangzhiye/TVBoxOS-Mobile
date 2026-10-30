@@ -491,7 +491,8 @@ public class DanmakuApi {
     private static String normalizeBuiltinQuery(String name) {
         String original = Trans.t2s(name == null ? "" : name).trim();
         String title = original.replaceAll("[（(\\[【].*?[）)\\]】]", " ");
-        title = title.replaceAll("(?i)(国语版?|粤语版?|日语版?|中字|高清|蓝光|tv版|电视剧版)", " ");
+        title = title.replaceAll("(?i)(国语版?|粤语版?|日语版?|中字|高清|蓝光|tv版|电视剧版|未删减|无删减|完整版|合集|全\\d{1,4}集|更新至\\d{1,4}集|连载中|已完结|4k|8k|2160p|1080p|720p|hdr10?|杜比视界|dolby\\s*vision)", " ");
+        title = title.replaceAll("[-_.]+", " ");
         title = title.replaceAll("\\s+", " ").trim();
         return title.isEmpty() ? original : title;
     }
@@ -544,7 +545,7 @@ public class DanmakuApi {
                 bestId = id;
             }
         }
-        return bestScore >= 800 ? bestId : "";
+        return bestScore >= 650 ? bestId : "";
     }
 
     private static EpisodeMatch findEpisode(String body, String episode) throws Exception {
@@ -793,6 +794,8 @@ public class DanmakuApi {
     private static int extractEpisodeNumber(String text) {
         if (TextUtils.isEmpty(text)) return -1;
         String value = Trans.t2s(text);
+        value = value.replaceAll("(?i)(2160p|1080p|720p|480p|4k|8k|hdr10?|60帧|高码率|蓝光|高清)", " ");
+        value = value.replaceAll("(?:19|20)\\d{2}", " ");
         Matcher cn = Pattern.compile("第\\s*(\\d{1,4})\\s*[集话期]").matcher(value);
         if (cn.find()) return safeInt(cn.group(1));
         Matcher latin = Pattern.compile("(?i)(?:episode|ep|e)\\s*[._ -]?\\s*(\\d{1,4})").matcher(value);
@@ -813,12 +816,14 @@ public class DanmakuApi {
 
     private static String normalizeEpisodeLabel(String text) {
         if (TextUtils.isEmpty(text)) return "";
-        return Trans.t2s(text).toLowerCase()
+        String value = Trans.t2s(text).toLowerCase()
+                .replaceAll("(?i)(2160p|1080p|720p|480p|4k|8k|hdr10?|60帧|高码率|蓝光|高清)", "")
+                .replaceAll("(?:19|20)\\d{2}", "")
                 .replaceAll("第", "")
                 .replaceAll("[集话期]", "")
                 .replaceAll("(?i)(episode|ep|e)\\s*[._ -]?", "")
-                .replaceAll("[^0-9a-z\u4e00-\u9fa5]", "")
-                .replaceFirst("^0+(?=\\d)", "");
+                .replaceAll("[^0-9a-z\\u4e00-\\u9fa5]", "");
+        return value.replaceFirst("^0+(?=\\d)", "");
     }
 
     private static boolean isPreviewTitle(String title) {
@@ -860,7 +865,7 @@ public class DanmakuApi {
         String text = Trans.t2s(title).toLowerCase(Locale.ROOT);
         text = text.replaceAll("[（(\\[【].*?[）)\\]】]", "");
         text = text.replaceAll("(?i)from\\s+[a-z0-9_]+", "");
-        text = text.replaceAll("(?i)(腾讯视频|爱奇艺|优酷|芒果tv|哔哩哔哩|bilibili|腾讯|qq|电视剧|动漫|电影|综艺|纪录片|高清|蓝光|国语|普通话|粤语|中字)", "");
+        text = text.replaceAll("(?i)(腾讯视频|爱奇艺|优酷|芒果tv|哔哩哔哩|bilibili|腾讯|qq|电视剧|动漫|电影|综艺|纪录片|高清|蓝光|国语|普通话|粤语|中字|未删减|无删减|完整版|合集|全\\d{1,4}集|更新至\\d{1,4}集|4k|8k|2160p|1080p|720p|hdr10?|杜比视界|dolby\\s*vision)", "");
         return text.replaceAll("[^0-9a-z\u4e00-\u9fa5]", "");
     }
 

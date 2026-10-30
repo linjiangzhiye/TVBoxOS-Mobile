@@ -85,6 +85,43 @@
         <TextView android:id="@+id/danmu_speed_label" style="@style/DanmuValueLabel" android:text="滚动速度：150%" />
         <SeekBar android:id="@+id/danmu_speed" style="@style/DanmuSeekBar" android:max="250" />
 
+        <TextView style="@style/DanmuSectionTitle" android:text="发送弹幕" />
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:gravity="center_vertical"
+            android:orientation="horizontal"
+            android:paddingVertical="8dp">
+
+            <EditText
+                android:id="@+id/danmu_input"
+                android:layout_width="0dp"
+                android:layout_height="46dp"
+                android:layout_weight="1"
+                android:background="@drawable/bg_large_round_gray"
+                android:hint="输入弹幕内容"
+                android:inputType="text"
+                android:maxLines="1"
+                android:paddingHorizontal="14dp"
+                android:textColor="@color/text_foreground"
+                android:textColorHint="@color/text_sub_foreground"
+                android:textSize="14sp" />
+
+            <TextView
+                android:id="@+id/danmu_send"
+                android:layout_width="wrap_content"
+                android:layout_height="46dp"
+                android:layout_marginStart="8dp"
+                android:background="@drawable/bg_r_common_solid_primary"
+                android:gravity="center"
+                android:minWidth="72dp"
+                android:paddingHorizontal="16dp"
+                android:text="发送"
+                android:textColor="@color/white"
+                android:textSize="14sp" />
+        </LinearLayout>
+
         <TextView style="@style/DanmuSectionTitle" android:text="弹幕源" />
 
         <LinearLayout android:id="@+id/danmu_local_file" style="@style/DanmuActionRow">

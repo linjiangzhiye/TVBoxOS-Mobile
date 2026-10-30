@@ -335,8 +335,19 @@ public class PlayFragment extends BaseLazyFragment {
                     public void onOpenSourceList() {
                         openDanmuSourceList();
                     }
+
+                    @Override
+                    public void onSendDanmaku(String text) {
+                        if (danmuLoadController == null || !danmuLoadController.addDanmaku(text)) {
+                            ToastUtils.showShort("弹幕尚未准备好，请稍后再试");
+                        }
+                    }
                 });
-                new XPopup.Builder(requireContext()).asCustom(dialog).show();
+                new XPopup.Builder(requireContext())
+                        .isDarkTheme(false)
+                        .autoFocusEditText(false)
+                        .asCustom(dialog)
+                        .show();
             }
 
             @Override
@@ -1130,6 +1141,9 @@ public class PlayFragment extends BaseLazyFragment {
 
     private void initDanmuView() {
         mDanmuView = findViewById(R.id.danmaku);
+        mDanmuView.setClickable(false);
+        mDanmuView.setFocusable(false);
+        mDanmuView.setOnTouchListener((view, event) -> false);
         danmuLoadController = new DanmuLoadController(mVideoView, mDanmuView);
     }
 
@@ -1207,7 +1221,11 @@ public class PlayFragment extends BaseLazyFragment {
         DanmuSearchDialog dialog = new DanmuSearchDialog(requireContext(), title, episode, danmu -> {
             if (danmuLoadController != null) danmuLoadController.check(danmu, title, episode, null);
         });
-        new XPopup.Builder(requireContext()).asCustom(dialog).show();
+        new XPopup.Builder(requireContext())
+                .isDarkTheme(false)
+                .autoFocusEditText(false)
+                .asCustom(dialog)
+                .show();
     }
 
     private void setDanmakuEnabled(boolean enabled) {
@@ -1217,6 +1235,7 @@ public class PlayFragment extends BaseLazyFragment {
         if (enabled && danmuLoadController != null && !danmuLoadController.hasDanmaku()) {
             checkDanmu("");
         }
+        ToastUtils.showShort(enabled ? "弹幕已开启" : "弹幕已关闭");
     }
 
     void initPlayerCfg() {

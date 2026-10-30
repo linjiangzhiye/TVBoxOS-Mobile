@@ -55,7 +55,7 @@ import com.github.tvbox.osc.ui.widget.PlayerMenuView;
 import com.github.tvbox.osc.ui.widget.PlayerTitleView;
 import com.github.tvbox.osc.util.FastClickCheckUtil;
 import com.github.tvbox.osc.util.HawkConfig;
-import com.github.tvbox.osc.util.live.TxtSubscribe;
+import com.github.tvbox.osc.util.live.LiveSourceRepository;
 import com.google.gson.JsonArray;
 import com.gyf.immersionbar.BarHide;
 import com.gyf.immersionbar.ImmersionBar;
@@ -813,51 +813,27 @@ public class LiveActivity extends BaseActivity {
     }
 
     public void loadProxyLives(String input) {
-        String url = input;
-        try {
-            Uri parsedUrl = Uri.parse(input);
-            String ext = parsedUrl.getQueryParameter("ext");
-            if (ext != null && input.startsWith("http://127.0.0.1")) {
-                url = new String(Base64.decode(ext, Base64.DEFAULT | Base64.URL_SAFE | Base64.NO_WRAP), "UTF-8");
-            }
-            if (TextUtils.isEmpty(url)) throw new IllegalArgumentException("empty live url");
-        } catch (Throwable th) {
-            Toast.makeText(App.getInstance(), "直播源地址无效", Toast.LENGTH_SHORT).show();
-            finish();
-            return;
-        }
         showLoading();
-        OkGo.<String>get(url).execute(new AbsCallback<String>() {
-
+        LiveSourceRepository.load(input, new LiveSourceRepository.Callback0() {
             @Override
-            public String convertResponse(okhttp3.Response response) throws Throwable {
-                return response.body().string();
-            }
-
-            @Override
-            public void onSuccess(Response<String> response) {
-                JsonArray livesArray;
-                LinkedHashMap<String, LinkedHashMap<String, ArrayList<String>>> linkedHashMap = new LinkedHashMap<>();
-                TxtSubscribe.parse(linkedHashMap, response.body());
-                livesArray = TxtSubscribe.live2JsonArray(linkedHashMap);
-
-                ApiConfig.get().loadLives(livesArray);
-                List<LiveChannelGroup> list = ApiConfig.get().getChannelGroupList();
-                if (list.isEmpty()) {
+            public void onSuccess(List<LiveChannelGroup> list, boolean fromCache) {
+                if (isFinishing() || isDestroyed()) return;
+                if (list == null || list.isEmpty()) {
                     Toast.makeText(App.getInstance(), "频道列表为空", Toast.LENGTH_SHORT).show();
                     finish();
                     return;
                 }
                 liveChannelGroupList.clear();
                 liveChannelGroupList.addAll(list);
+                showSuccess();
+                initLiveState();
+            }
 
-                mHandler.post(new Runnable() {
-                    @Override
-                    public void run() {
-                        LiveActivity.this.showSuccess();
-                        initLiveState();
-                    }
-                });
+            @Override
+            public void onError(String message) {
+                if (isFinishing() || isDestroyed()) return;
+                Toast.makeText(App.getInstance(), "直播源加载失败：" + message, Toast.LENGTH_SHORT).show();
+                finish();
             }
         });
     }

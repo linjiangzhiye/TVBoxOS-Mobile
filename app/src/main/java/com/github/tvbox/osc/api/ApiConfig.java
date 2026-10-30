@@ -617,25 +617,35 @@ public class ApiConfig {
 
     public void loadLives(JsonArray livesArray) {
         liveChannelGroupList.clear();
+        liveChannelGroupList.addAll(parseLives(livesArray));
+    }
+
+    public static List<LiveChannelGroup> parseLives(JsonArray livesArray) {
+        List<LiveChannelGroup> groups = new ArrayList<>();
+        if (livesArray == null) return groups;
         int groupIndex = 0;
-        int channelIndex = 0;
         int channelNum = 0;
         for (JsonElement groupElement : livesArray) {
+            if (groupElement == null || !groupElement.isJsonObject()) continue;
+            JsonObject groupObject = groupElement.getAsJsonObject();
+            String groupName = jsonString(groupObject, "group");
+            if (TextUtils.isEmpty(groupName)) groupName = "未分组";
             LiveChannelGroup liveChannelGroup = new LiveChannelGroup();
             liveChannelGroup.setLiveChannels(new ArrayList<LiveChannelItem>());
             liveChannelGroup.setGroupIndex(groupIndex++);
-            String groupName = ((JsonObject) groupElement).get("group").getAsString().trim();
             String[] splitGroupName = groupName.split("_", 2);
             liveChannelGroup.setGroupName(splitGroupName[0]);
-            if (splitGroupName.length > 1)
-                liveChannelGroup.setGroupPassword(splitGroupName[1]);
-            else
-                liveChannelGroup.setGroupPassword("");
-            channelIndex = 0;
-            for (JsonElement channelElement : ((JsonObject) groupElement).get("channels").getAsJsonArray()) {
-                JsonObject obj = (JsonObject) channelElement;
+            liveChannelGroup.setGroupPassword(splitGroupName.length > 1 ? splitGroupName[1] : "");
+            JsonArray channels = groupObject.getAsJsonArray("channels");
+            if (channels == null) continue;
+            int channelIndex = 0;
+            for (JsonElement channelElement : channels) {
+                if (channelElement == null || !channelElement.isJsonObject()) continue;
+                JsonObject obj = channelElement.getAsJsonObject();
+                String channelName = jsonString(obj, "name");
+                if (TextUtils.isEmpty(channelName)) continue;
                 LiveChannelItem liveChannelItem = new LiveChannelItem();
-                liveChannelItem.setChannelName(obj.get("name").getAsString().trim());
+                liveChannelItem.setChannelName(channelName);
                 liveChannelItem.setChannelIndex(channelIndex++);
                 liveChannelItem.setChannelNum(++channelNum);
                 ArrayList<String> urls = DefaultConfig.safeJsonStringList(obj, "urls");
@@ -643,20 +653,26 @@ public class ApiConfig {
                 ArrayList<String> sourceUrls = new ArrayList<>();
                 int sourceIndex = 1;
                 for (String url : urls) {
+                    if (TextUtils.isEmpty(url)) continue;
                     String[] splitText = url.split("\\$", 2);
                     sourceUrls.add(splitText[0]);
-                    if (splitText.length > 1)
-                        sourceNames.add(splitText[1]);
-                    else
-                        sourceNames.add("源" + Integer.toString(sourceIndex));
+                    sourceNames.add(splitText.length > 1 ? splitText[1] : "源" + sourceIndex);
                     sourceIndex++;
                 }
+                if (sourceUrls.isEmpty()) continue;
                 liveChannelItem.setChannelSourceNames(sourceNames);
                 liveChannelItem.setChannelUrls(sourceUrls);
                 liveChannelGroup.getLiveChannels().add(liveChannelItem);
             }
-            liveChannelGroupList.add(liveChannelGroup);
+            if (!liveChannelGroup.getLiveChannels().isEmpty()) groups.add(liveChannelGroup);
         }
+        return groups;
+    }
+
+    private static String jsonString(JsonObject object, String key) {
+        if (object == null || !object.has(key)) return "";
+        JsonElement value = object.get(key);
+        return value == null || value.isJsonNull() || !value.isJsonPrimitive() ? "" : value.getAsString().trim();
     }
 
     public String getSpider() {
