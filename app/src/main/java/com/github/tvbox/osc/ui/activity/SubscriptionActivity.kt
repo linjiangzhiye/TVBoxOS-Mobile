@@ -19,6 +19,7 @@ import com.github.tvbox.osc.ui.dialog.SubsciptionDialog
 import com.github.tvbox.osc.ui.dialog.SubsciptionDialog.OnSubsciptionListener
 import com.github.tvbox.osc.util.HawkConfig
 import com.github.tvbox.osc.util.Utils
+import com.google.gson.JsonArray
 import com.google.gson.JsonObject
 import com.google.gson.JsonParser
 import com.hjq.permissions.OnPermissionCallback
@@ -34,14 +35,25 @@ import java.util.function.Consumer
 
 class SubscriptionActivity : BaseVbActivity<ActivitySubscriptionBinding>() {
 
-    private var mBeforeUrl = Hawk.get(HawkConfig.API_URL, "")
+    companion object {
+        const val EXTRA_LIVE = "live_subscription"
+    }
+
+    private var isLiveSubscription = false
+    private var mBeforeUrl = ""
     private var mSelectedUrl = ""
-    private var mSubscriptions: MutableList<Subscription> = Hawk.get(HawkConfig.SUBSCRIPTIONS, ArrayList())
+    private var mSubscriptions: MutableList<Subscription> = ArrayList()
     private var mSubscriptionAdapter = SubscriptionAdapter()
     private val mSources: MutableList<Source> = ArrayList()
 
     override fun init() {
-
+        isLiveSubscription = intent?.getBooleanExtra(EXTRA_LIVE, false) ?: false
+        mBeforeUrl = Hawk.get(if (isLiveSubscription) HawkConfig.LIVE_URL else HawkConfig.API_URL, "")
+        mSubscriptions = Hawk.get(
+            if (isLiveSubscription) HawkConfig.LIVE_SUBSCRIPTIONS else HawkConfig.SUBSCRIPTIONS,
+            ArrayList()
+        )
+        mBinding.titleBar.setTitle(if (isLiveSubscription) "直播订阅" else "订阅管理")
         mBinding.rv.setAdapter(mSubscriptionAdapter)
         mSubscriptions.forEach(Consumer { item: Subscription ->
             if (item.isChecked) {
@@ -245,58 +257,40 @@ class SubscriptionActivity : BaseVbActivity<ActivitySubscriptionBinding>() {
                     override fun onSuccess(response: Response<String?>) {
                         dismissLoadingDialog()
                         try {
-                            val json = JsonParser.parseString(response.body()).asJsonObject
-                            // 多线路?
-                            val urls = json["urls"]
-                            // 多仓?
-                            val storeHouse = json["storeHouse"]
-                            if (urls != null && urls.isJsonArray) { // 多线路
-                                if (checked) {
-                                    ToastUtils.showLong("多条线路请主动选择")
-                                }
-                                val urlList = urls.asJsonArray
-                                if (urlList != null && urlList.size() > 0 && urlList[0].isJsonObject
-                                    && urlList[0].asJsonObject.has("url")
-                                    && urlList[0].asJsonObject.has("name")
-                                ) { //多线路格式
-                                    for (i in 0 until urlList.size()) {
-                                        val obj = urlList[i] as JsonObject
-                                        val name = obj["name"].asString.trim { it <= ' ' }
-                                            .replace("<|>|《|》|-".toRegex(), "")
-                                        val url = obj["url"].asString.trim { it <= ' ' }
-                                        mSubscriptions.add(Subscription(name, url))
+                            val bodyText = response.body().orEmpty().trim()
+                            val json = JsonParser.parseString(bodyText).asJsonObject
+                            val urlsValue = json.get("urls")
+                            val urls = if (urlsValue != null && urlsValue.isJsonArray) urlsValue.asJsonArray else null
+                            val storeHouse = findRepoArray(json)
+
+                            if (urls != null && urls.size() > 0) {
+                                val entries = parseSourceEntries(urls, arrayOf("name", "title", "sourceName"), arrayOf("url", "api", "sourceUrl"))
+                                if (entries.isNotEmpty()) {
+                                    if (checked) ToastUtils.showLong("已展开多条线路")
+                                    entries.forEachIndexed { index, entry ->
+                                        addSub2List(entry.first, entry.second, checked && index == 0)
                                     }
+                                } else {
+                                    addSub2List(name, url, checked)
                                 }
-                            } else if (storeHouse != null && storeHouse.isJsonArray) { // 多仓
-                                val storeHouseList = storeHouse.asJsonArray
-                                if (storeHouseList != null && storeHouseList.size() > 0 && storeHouseList[0].isJsonObject
-                                    && storeHouseList[0].asJsonObject.has("sourceName")
-                                    && storeHouseList[0].asJsonObject.has("sourceUrl")
-                                ) { //多仓格式
+                            } else if (storeHouse != null && storeHouse.size() > 0) {
+                                val sources = parseSourceEntries(storeHouse, arrayOf("sourceName", "name", "title"), arrayOf("sourceUrl", "url", "api"))
+                                if (sources.isEmpty()) {
+                                    addSub2List(name, url, checked)
+                                } else {
                                     mSources.clear()
-                                    for (i in 0 until storeHouseList.size()) {
-                                        val obj = storeHouseList[i] as JsonObject
-                                        val name = obj["sourceName"].asString.trim { it <= ' ' }
-                                            .replace("<|>|《|》|-".toRegex(), "")
-                                        val url = obj["sourceUrl"].asString.trim { it <= ' ' }
-                                        mSources.add(Source(name, url))
-                                    }
-                                    XPopup.Builder(this@SubscriptionActivity)
-                                        .asCustom(
-                                            ChooseSourceDialog(
-                                                this@SubscriptionActivity,
-                                                mSources
-                                            ) { position: Int, _: String? ->
-                                                // 再根据多线路格式获取配置,如果仓内是正常多线路模式,name没用,直接使用线路的命名
-                                                addSubscription(
-                                                    mSources[position].sourceName,
-                                                    mSources[position].sourceUrl,
-                                                    checked
-                                                )
+                                    sources.forEach { mSources.add(Source(it.first, it.second)) }
+                                    if (mSources.size == 1) {
+                                        addSubscription(mSources[0].sourceName, mSources[0].sourceUrl, checked)
+                                    } else {
+                                        XPopup.Builder(this@SubscriptionActivity)
+                                            .asCustom(ChooseSourceDialog(this@SubscriptionActivity, mSources) { position: Int, _: String? ->
+                                                addSubscription(mSources[position].sourceName, mSources[position].sourceUrl, checked)
                                             })
-                                        .show()
+                                            .show()
+                                    }
                                 }
-                            } else { // 单线路/其余
+                            } else {
                                 addSub2List(name, url, checked)
                             }
                         } catch (th: Throwable) {
@@ -327,6 +321,46 @@ class SubscriptionActivity : BaseVbActivity<ActivitySubscriptionBinding>() {
      * @param url
      * @param checkNewest
      */
+    private fun findRepoArray(json: JsonObject): JsonArray? {
+        for (key in arrayOf("storeHouse", "storehouse", "storeHouses", "repositories", "repos", "sources")) {
+            val value = json.get(key)
+            if (value != null && value.isJsonArray) return value.asJsonArray
+        }
+        return null
+    }
+
+    private fun parseSourceEntries(array: JsonArray, nameKeys: Array<String>, urlKeys: Array<String>): MutableList<Pair<String, String>> {
+        val result = mutableListOf<Pair<String, String>>()
+        for (element in array) {
+            var entryName = ""
+            var entryUrl = ""
+            if (element.isJsonObject) {
+                val obj = element.asJsonObject
+                for (key in nameKeys) {
+                    val value = obj.get(key)
+                    if (value != null && value.isJsonPrimitive) {
+                        entryName = value.asString.trim()
+                        if (entryName.isNotEmpty()) break
+                    }
+                }
+                for (key in urlKeys) {
+                    val value = obj.get(key)
+                    if (value != null && value.isJsonPrimitive) {
+                        entryUrl = value.asString.trim()
+                        if (entryUrl.isNotEmpty()) break
+                    }
+                }
+            } else if (element.isJsonPrimitive) {
+                entryUrl = element.asString.trim()
+            }
+            if (entryUrl.isNotEmpty()) {
+                if (entryName.isEmpty()) entryName = "订阅 " + (result.size + 1)
+                if (result.none { it.second == entryUrl }) result.add(entryName to entryUrl)
+            }
+        }
+        return result
+    }
+
     private fun addSub2List(name: String, url: String, checkNewest: Boolean) {
         if (checkNewest) { //选中最新的,清除以前的选中订阅
             for (subscription in mSubscriptions) {
@@ -343,14 +377,17 @@ class SubscriptionActivity : BaseVbActivity<ActivitySubscriptionBinding>() {
 
     override fun onPause() {
         super.onPause()
-        // 更新缓存
-        Hawk.put(HawkConfig.API_URL, mSelectedUrl)
-        Hawk.put<List<Subscription>?>(HawkConfig.SUBSCRIPTIONS, mSubscriptions)
+        if (isLiveSubscription) {
+            Hawk.put(HawkConfig.LIVE_URL, mSelectedUrl)
+            Hawk.put<List<Subscription>?>(HawkConfig.LIVE_SUBSCRIPTIONS, mSubscriptions)
+        } else {
+            Hawk.put(HawkConfig.API_URL, mSelectedUrl)
+            Hawk.put<List<Subscription>?>(HawkConfig.SUBSCRIPTIONS, mSubscriptions)
+        }
     }
 
     override fun finish() {
-        //切换了订阅地址
-        if (!TextUtils.isEmpty(mSelectedUrl) && mBeforeUrl != mSelectedUrl) {
+        if (!isLiveSubscription && !TextUtils.isEmpty(mSelectedUrl) && mBeforeUrl != mSelectedUrl) {
             val intent = Intent(this, MainActivity::class.java)
             intent.setFlags(Intent.FLAG_ACTIVITY_CLEAR_TASK)
             startActivity(intent)

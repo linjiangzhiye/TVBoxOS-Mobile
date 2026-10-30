@@ -74,6 +74,12 @@ public class MyFragment extends BaseVbFragment<FragmentMyBinding> {
 
         mBinding.llSubscription.setOnClickListener(v -> jumpActivity(SubscriptionActivity.class));
 
+        mBinding.llLiveSubscription.setOnClickListener(v -> {
+            Intent intent = new Intent(mContext, SubscriptionActivity.class);
+            intent.putExtra(SubscriptionActivity.EXTRA_LIVE, true);
+            startActivity(intent);
+        });
+
         mBinding.llAbout.setOnClickListener(v -> {
             new XPopup.Builder(mActivity)
                     .asCustom(new AboutDialog(mActivity))

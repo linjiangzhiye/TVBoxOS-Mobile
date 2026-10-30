@@ -60,7 +60,7 @@ public class DanmuLoadController {
             return;
         }
         HashMap<Integer, Integer> maxLines = new HashMap<>();
-        int maxLine = DanmuHelper.getMaxLine();
+        int maxLine = calculateMaxLine();
         maxLines.put(BaseDanmaku.TYPE_FIX_TOP, maxLine);
         maxLines.put(BaseDanmaku.TYPE_SCROLL_RL, maxLine);
         maxLines.put(BaseDanmaku.TYPE_SCROLL_LR, maxLine);
@@ -71,9 +71,23 @@ public class DanmuLoadController {
                 .setScaleTextSize(DanmuHelper.getSizeScale());
         danmakuContext.setDanmakuStyle(IDisplayer.DANMAKU_STYLE_STROKEN, 3)
                 .setDanmakuMargin(8);
+        float density = danmuView.getResources().getDisplayMetrics().density;
+        danmuView.setPadding(0, Math.round(DanmuHelper.getTopMargin() * density),
+                0, Math.round(DanmuHelper.getBottomMargin() * density));
         if (reload && !TextUtils.isEmpty(danmuText) && DanmuHelper.isOpen()) {
             prepare(danmuText);
         }
+    }
+
+    private int calculateMaxLine() {
+        float density = danmuView == null ? 1f : danmuView.getResources().getDisplayMetrics().density;
+        int height = danmuView == null ? 0 : danmuView.getHeight();
+        if (height <= 0) height = Math.round(720 * density);
+        int lineHeight = Math.max(1, Math.round(25f * DanmuHelper.getSizeScale() * density * 1.6f));
+        int available = Math.round(height * DanmuHelper.getDisplayArea() / 100f);
+        int lineCount = Math.max(1, available / lineHeight);
+        lineCount = Math.round(lineCount * DanmuHelper.getDensity() / 100f);
+        return Math.max(1, Math.min(lineCount, 20));
     }
 
     public void check(String danmu) {

@@ -305,6 +305,7 @@ public class ApiConfig {
 
     private void parseJson(String apiUrl, String jsonStr) {
         JsonObject infoJson = new Gson().fromJson(jsonStr, JsonObject.class);
+        if (infoJson == null) return;
         // spider
         spider = DefaultConfig.safeJsonString(infoJson, "spider", "");
         // danmaku service
@@ -315,30 +316,34 @@ public class ApiConfig {
         SourceBean firstSite = null;
         if (sourceBeanList!= null)
             sourceBeanList.clear();
-        for (JsonElement opt : infoJson.get("sites").getAsJsonArray()) {
-            JsonObject obj = (JsonObject) opt;
-            SourceBean sb = new SourceBean();
-            String siteKey = obj.get("key").getAsString().trim();
-            sb.setKey(siteKey);
-            sb.setName(obj.get("name").getAsString().trim());
-            sb.setType(obj.get("type").getAsInt());
-            sb.setApi(obj.get("api").getAsString().trim());
-            sb.setSearchable(DefaultConfig.safeJsonInt(obj, "searchable", 1));
-            sb.setQuickSearch(DefaultConfig.safeJsonInt(obj, "quickSearch", 1));
-            sb.setFilterable(DefaultConfig.safeJsonInt(obj, "filterable", 1));
-            sb.setPlayerUrl(DefaultConfig.safeJsonString(obj, "playUrl", ""));
-            if(obj.has("ext") && (obj.get("ext").isJsonObject() || obj.get("ext").isJsonArray())){
-                sb.setExt(obj.get("ext").toString());
-            }else {
-                sb.setExt(DefaultConfig.safeJsonString(obj, "ext", ""));
+        JsonElement sitesElement = infoJson.get("sites");
+        if (sitesElement != null && sitesElement.isJsonArray()) {
+            for (JsonElement opt : sitesElement.getAsJsonArray()) {
+                if (opt == null || !opt.isJsonObject()) continue;
+                JsonObject obj = opt.getAsJsonObject();
+                String siteKey = DefaultConfig.safeJsonString(obj, "key", "").trim();
+                if (siteKey.isEmpty()) continue;
+                SourceBean sb = new SourceBean();
+                sb.setKey(siteKey);
+                String siteName = DefaultConfig.safeJsonString(obj, "name", "").trim();
+                sb.setName(siteName.isEmpty() ? siteKey : siteName);
+                sb.setType(DefaultConfig.safeJsonInt(obj, "type", 0));
+                sb.setApi(DefaultConfig.safeJsonString(obj, "api", "").trim());
+                sb.setSearchable(DefaultConfig.safeJsonInt(obj, "searchable", 1));
+                sb.setQuickSearch(DefaultConfig.safeJsonInt(obj, "quickSearch", 1));
+                sb.setFilterable(DefaultConfig.safeJsonInt(obj, "filterable", 1));
+                sb.setPlayerUrl(DefaultConfig.safeJsonString(obj, "playUrl", ""));
+                JsonElement extElement = obj.get("ext");
+                if (extElement == null || extElement.isJsonNull()) sb.setExt("");
+                else if (extElement.isJsonPrimitive()) sb.setExt(extElement.getAsString());
+                else sb.setExt(extElement.toString());
+                sb.setJar(DefaultConfig.safeJsonString(obj, "jar", ""));
+                sb.setPlayerType(DefaultConfig.safeJsonInt(obj, "playerType", -1));
+                sb.setCategories(DefaultConfig.safeJsonStringList(obj, "categories"));
+                sb.setClickSelector(DefaultConfig.safeJsonString(obj, "click", ""));
+                if (firstSite == null) firstSite = sb;
+                sourceBeanList.put(siteKey, sb);
             }
-            sb.setJar(DefaultConfig.safeJsonString(obj, "jar", ""));
-            sb.setPlayerType(DefaultConfig.safeJsonInt(obj, "playerType", -1));
-            sb.setCategories(DefaultConfig.safeJsonStringList(obj, "categories"));
-            sb.setClickSelector(DefaultConfig.safeJsonString(obj, "click", ""));
-            if (firstSite == null)
-                firstSite = sb;
-            sourceBeanList.put(siteKey, sb);
         }
         if (sourceBeanList != null && sourceBeanList.size() > 0) {
             String home = Hawk.get(HawkConfig.HOME_API, "");
@@ -352,15 +357,19 @@ public class ApiConfig {
         vipParseFlags = DefaultConfig.safeJsonStringList(infoJson, "flags");
         // 解析地址
         parseBeanList.clear();
-        if(infoJson.has("parses")){
-            JsonArray parses = infoJson.get("parses").getAsJsonArray();
-            for (JsonElement opt : parses) {
-                JsonObject obj = (JsonObject) opt;
+        JsonElement parsesElement = infoJson.get("parses");
+        if (parsesElement != null && parsesElement.isJsonArray()) {
+            for (JsonElement opt : parsesElement.getAsJsonArray()) {
+                if (opt == null || !opt.isJsonObject()) continue;
+                JsonObject obj = opt.getAsJsonObject();
+                String parseName = DefaultConfig.safeJsonString(obj, "name", "").trim();
+                String parseUrl = DefaultConfig.safeJsonString(obj, "url", "").trim();
+                if (parseUrl.isEmpty()) continue;
                 ParseBean pb = new ParseBean();
-                pb.setName(obj.get("name").getAsString().trim());
-                pb.setUrl(obj.get("url").getAsString().trim());
-                String ext = obj.has("ext") ? obj.get("ext").getAsJsonObject().toString() : "";
-                pb.setExt(ext);
+                pb.setName(parseName.isEmpty() ? parseUrl : parseName);
+                pb.setUrl(parseUrl);
+                JsonElement extElement = obj.get("ext");
+                pb.setExt(extElement == null || extElement.isJsonNull() ? "" : extElement.toString());
                 pb.setType(DefaultConfig.safeJsonInt(obj, "type", 0));
                 parseBeanList.add(pb);
             }

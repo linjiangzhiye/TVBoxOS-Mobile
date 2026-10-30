@@ -33,6 +33,7 @@ import androidx.appcompat.app.AlertDialog;
 import androidx.appcompat.app.AppCompatActivity;
 import androidx.core.content.res.ResourcesCompat;
 
+import cat.ereza.customactivityoncrash.CrashLogStore;
 import cat.ereza.customactivityoncrash.CustomActivityOnCrash;
 import cat.ereza.customactivityoncrash.R;
 import cat.ereza.customactivityoncrash.config.CaocConfig;
@@ -43,6 +44,10 @@ public final class DefaultErrorActivity extends AppCompatActivity {
     @Override
     protected void onCreate(@Nullable Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+        try {
+            CrashLogStore.append(this, CustomActivityOnCrash.getAllErrorDetailsFromIntent(this, getIntent()));
+        } catch (Throwable ignored) {
+        }
 
         //This is needed to avoid a crash if the developer has not specified
         //an app-level theme that extends Theme.AppCompat

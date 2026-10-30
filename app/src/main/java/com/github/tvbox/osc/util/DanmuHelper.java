@@ -51,6 +51,62 @@ public class DanmuHelper {
         Hawk.put(HawkConfig.DANMU_SIZE_SCALE, Math.max(0.6f, Math.min(scale, 2.0f)));
     }
 
+    public static boolean showScroll() {
+        return Hawk.get(HawkConfig.DANMU_SHOW_SCROLL, true);
+    }
+
+    public static void setShowScroll(boolean show) {
+        Hawk.put(HawkConfig.DANMU_SHOW_SCROLL, show);
+    }
+
+    public static boolean showTop() {
+        return Hawk.get(HawkConfig.DANMU_SHOW_TOP, true);
+    }
+
+    public static void setShowTop(boolean show) {
+        Hawk.put(HawkConfig.DANMU_SHOW_TOP, show);
+    }
+
+    public static boolean showBottom() {
+        return Hawk.get(HawkConfig.DANMU_SHOW_BOTTOM, true);
+    }
+
+    public static void setShowBottom(boolean show) {
+        Hawk.put(HawkConfig.DANMU_SHOW_BOTTOM, show);
+    }
+
+    public static int getDisplayArea() {
+        return Math.max(10, Math.min(Hawk.get(HawkConfig.DANMU_DISPLAY_AREA, 100), 100));
+    }
+
+    public static void setDisplayArea(int area) {
+        Hawk.put(HawkConfig.DANMU_DISPLAY_AREA, Math.max(10, Math.min(area, 100)));
+    }
+
+    public static int getDensity() {
+        return Math.max(10, Math.min(Hawk.get(HawkConfig.DANMU_DENSITY, 100), 100));
+    }
+
+    public static void setDensity(int density) {
+        Hawk.put(HawkConfig.DANMU_DENSITY, Math.max(10, Math.min(density, 100)));
+    }
+
+    public static int getTopMargin() {
+        return Math.max(0, Math.min(Hawk.get(HawkConfig.DANMU_TOP_MARGIN, 10), 100));
+    }
+
+    public static void setTopMargin(int margin) {
+        Hawk.put(HawkConfig.DANMU_TOP_MARGIN, Math.max(0, Math.min(margin, 100)));
+    }
+
+    public static int getBottomMargin() {
+        return Math.max(0, Math.min(Hawk.get(HawkConfig.DANMU_BOTTOM_MARGIN, 0), 100));
+    }
+
+    public static void setBottomMargin(int margin) {
+        Hawk.put(HawkConfig.DANMU_BOTTOM_MARGIN, Math.max(0, Math.min(margin, 100)));
+    }
+
     public static boolean useRandomColor() {
         return Hawk.get(HawkConfig.DANMU_RANDOM_COLOR, false);
     }

@@ -89,6 +89,8 @@ import xyz.doikki.videoplayer.player.VideoView;
  * @description:
  */
 public class LiveActivity extends BaseActivity {
+    public static final String EXTRA_GROUP_INDEX = "live_group_index";
+    public static final String EXTRA_CHANNEL_INDEX = "live_channel_index";
     public static Context context;
     private VideoView mVideoView;
     private TextView tvChannelInfo;
@@ -113,6 +115,8 @@ public class LiveActivity extends BaseActivity {
     private int currentLiveChangeSourceTimes = 0;
     private int liveSwitchGeneration = 0;
     private int scheduledSwitchGeneration = 0;
+    private int pendingGroupIndex = -1;
+    private int pendingChannelIndex = -1;
     private LiveChannelItem currentLiveChannelItem = null;
     private LivePlayerManager livePlayerManager = new LivePlayerManager();
     private ArrayList<Integer> channelGroupPasswordConfirmed = new ArrayList<>();
@@ -158,6 +162,10 @@ public class LiveActivity extends BaseActivity {
                 .hideBar(BarHide.FLAG_HIDE_NAVIGATION_BAR)
                 .init();
         context = this;
+        if (getIntent() != null) {
+            pendingGroupIndex = getIntent().getIntExtra(EXTRA_GROUP_INDEX, -1);
+            pendingChannelIndex = getIntent().getIntExtra(EXTRA_CHANNEL_INDEX, -1);
+        }
         epgStringAddress = Hawk.get(HawkConfig.EPG_URL,"");
         if(epgStringAddress == null || epgStringAddress.length()<5)
             epgStringAddress = "http://epg.51zmt.top:8000/api/diyp/";
@@ -782,8 +790,13 @@ public class LiveActivity extends BaseActivity {
 
     private void initLiveChannelList() {
         List<LiveChannelGroup> list = ApiConfig.get().getChannelGroupList();
+        String liveSubscription = Hawk.get(HawkConfig.LIVE_URL, "");
+        if (!TextUtils.isEmpty(liveSubscription)) {
+            loadProxyLives(liveSubscription);
+            return;
+        }
         if (list.isEmpty()) {
-            Toast.makeText(App.getInstance(), "频道列表为空", Toast.LENGTH_SHORT).show();
+            Toast.makeText(App.getInstance(), "请先在“直播订阅”中添加直播源", Toast.LENGTH_SHORT).show();
             finish();
             return;
         }
@@ -799,12 +812,17 @@ public class LiveActivity extends BaseActivity {
         }
     }
 
-    public void loadProxyLives(String url) {
+    public void loadProxyLives(String input) {
+        String url = input;
         try {
-            Uri parsedUrl = Uri.parse(url);
-            url = new String(Base64.decode(parsedUrl.getQueryParameter("ext"), Base64.DEFAULT | Base64.URL_SAFE | Base64.NO_WRAP), "UTF-8");
+            Uri parsedUrl = Uri.parse(input);
+            String ext = parsedUrl.getQueryParameter("ext");
+            if (ext != null && input.startsWith("http://127.0.0.1")) {
+                url = new String(Base64.decode(ext, Base64.DEFAULT | Base64.URL_SAFE | Base64.NO_WRAP), "UTF-8");
+            }
+            if (TextUtils.isEmpty(url)) throw new IllegalArgumentException("empty live url");
         } catch (Throwable th) {
-            Toast.makeText(App.getInstance(), "频道列表为空", Toast.LENGTH_SHORT).show();
+            Toast.makeText(App.getInstance(), "直播源地址无效", Toast.LENGTH_SHORT).show();
             finish();
             return;
         }
@@ -859,7 +877,11 @@ public class LiveActivity extends BaseActivity {
             }
             if (lastChannelGroupIndex != -1) break;
         }
-        if (lastChannelGroupIndex == -1) {
+        if (pendingGroupIndex >= 0 && pendingGroupIndex < liveChannelGroupList.size()) {
+            lastChannelGroupIndex = pendingGroupIndex;
+            lastLiveChannelIndex = pendingChannelIndex;
+            if (lastLiveChannelIndex < 0) lastLiveChannelIndex = 0;
+        } else if (lastChannelGroupIndex == -1) {
             lastChannelGroupIndex = getFirstNoPasswordChannelGroup();
             if (lastChannelGroupIndex == -1)
                 lastChannelGroupIndex = 0;

@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
-    android:layout_width="340dp"
+    android:layout_width="360dp"
     android:layout_height="wrap_content"
     android:fillViewport="true"
     android:scrollbars="none">
@@ -10,134 +10,105 @@
         android:layout_height="wrap_content"
         android:background="@drawable/shape_danmu_setting_bg"
         android:orientation="vertical"
-        android:padding="18dp">
+        android:padding="20dp">
 
         <LinearLayout
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:gravity="center_vertical"
             android:orientation="horizontal">
-
             <TextView
                 android:layout_width="0dp"
                 android:layout_height="wrap_content"
                 android:layout_weight="1"
                 android:text="弹幕设置"
-                android:textColor="@color/white"
-                android:textSize="18sp"
+                android:textColor="#202124"
+                android:textSize="20sp"
                 android:textStyle="bold" />
-
             <TextView
                 android:id="@+id/danmu_close"
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:padding="6dp"
-                android:text="关闭"
-                android:textColor="#CCFFFFFF"
-                android:textSize="14sp" />
+                android:layout_width="44dp"
+                android:layout_height="44dp"
+                android:gravity="center"
+                android:text="×"
+                android:textColor="#202124"
+                android:textSize="28sp" />
         </LinearLayout>
+
+        <TextView style="@style/DanmuSectionTitle" android:text="显示" />
 
         <androidx.appcompat.widget.SwitchCompat
             android:id="@+id/danmu_open"
-            android:layout_width="match_parent"
-            android:layout_height="48dp"
-            android:text="显示弹幕"
-            android:textColor="@color/white"
-            android:textSize="15sp" />
+            style="@style/DanmuSwitchRow"
+            android:text="默认开关" />
 
-        <TextView
-            android:id="@+id/danmu_height_label"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="8dp"
-            android:text="上下高度：3 行"
-            android:textColor="@color/white"
-            android:textSize="14sp" />
+        <androidx.appcompat.widget.SwitchCompat
+            android:id="@+id/danmu_show_scroll"
+            style="@style/DanmuSwitchRow"
+            android:text="滚动弹幕" />
 
-        <SeekBar
-            android:id="@+id/danmu_height"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:max="14" />
+        <androidx.appcompat.widget.SwitchCompat
+            android:id="@+id/danmu_show_top"
+            style="@style/DanmuSwitchRow"
+            android:text="顶部弹幕" />
 
-        <TextView
-            android:id="@+id/danmu_opacity_label"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="6dp"
-            android:text="不透明度：90%"
-            android:textColor="@color/white"
-            android:textSize="14sp" />
-
-        <SeekBar
-            android:id="@+id/danmu_opacity"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:max="90" />
-
-        <TextView
-            android:id="@+id/danmu_size_label"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="6dp"
-            android:text="字体大小：0.8x"
-            android:textColor="@color/white"
-            android:textSize="14sp" />
-
-        <SeekBar
-            android:id="@+id/danmu_size"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:max="14" />
-
-        <TextView
-            android:id="@+id/danmu_speed_label"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="6dp"
-            android:text="滚动速度：1.5x"
-            android:textColor="@color/white"
-            android:textSize="14sp" />
-
-        <SeekBar
-            android:id="@+id/danmu_speed"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:max="200" />
+        <androidx.appcompat.widget.SwitchCompat
+            android:id="@+id/danmu_show_bottom"
+            style="@style/DanmuSwitchRow"
+            android:text="底部弹幕" />
 
         <androidx.appcompat.widget.SwitchCompat
             android:id="@+id/danmu_random_color"
-            android:layout_width="match_parent"
-            android:layout_height="48dp"
-            android:layout_marginTop="4dp"
-            android:text="随机颜色"
-            android:textColor="@color/white"
-            android:textSize="15sp" />
+            style="@style/DanmuSwitchRow"
+            android:text="随机颜色" />
 
-        <EditText
-            android:id="@+id/danmu_text"
-            android:layout_width="match_parent"
-            android:layout_height="44dp"
-            android:layout_marginTop="4dp"
-            android:background="@drawable/input_dialog_api_input"
-            android:hint="输入一条本地弹幕"
-            android:maxLines="1"
-            android:paddingStart="12dp"
-            android:paddingEnd="12dp"
-            android:singleLine="true"
-            android:textColor="@color/white"
-            android:textColorHint="#99FFFFFF"
-            android:textSize="14sp" />
+        <TextView style="@style/DanmuSectionTitle" android:text="范围与样式" />
 
-        <TextView
-            android:id="@+id/danmu_send"
-            android:layout_width="match_parent"
-            android:layout_height="42dp"
-            android:layout_marginTop="12dp"
-            android:background="@drawable/button_primary_r25"
-            android:gravity="center"
-            android:text="发送到当前播放位置"
-            android:textColor="@color/white"
-            android:textSize="15sp" />
+        <TextView android:id="@+id/danmu_area_label" style="@style/DanmuValueLabel" android:text="显示区域：100%" />
+        <SeekBar android:id="@+id/danmu_area" style="@style/DanmuSeekBar" android:max="90" />
+
+        <TextView android:id="@+id/danmu_density_label" style="@style/DanmuValueLabel" android:text="弹幕密度：100%" />
+        <SeekBar android:id="@+id/danmu_density" style="@style/DanmuSeekBar" android:max="90" />
+
+        <TextView android:id="@+id/danmu_top_margin_label" style="@style/DanmuValueLabel" android:text="顶部边距：10" />
+        <SeekBar android:id="@+id/danmu_top_margin" style="@style/DanmuSeekBar" android:max="100" />
+
+        <TextView android:id="@+id/danmu_bottom_margin_label" style="@style/DanmuValueLabel" android:text="底部边距：0" />
+        <SeekBar android:id="@+id/danmu_bottom_margin" style="@style/DanmuSeekBar" android:max="100" />
+
+        <TextView android:id="@+id/danmu_opacity_label" style="@style/DanmuValueLabel" android:text="不透明度：90%" />
+        <SeekBar android:id="@+id/danmu_opacity" style="@style/DanmuSeekBar" android:max="90" />
+
+        <TextView android:id="@+id/danmu_size_label" style="@style/DanmuValueLabel" android:text="字体大小：80%" />
+        <SeekBar android:id="@+id/danmu_size" style="@style/DanmuSeekBar" android:max="14" />
+
+        <TextView android:id="@+id/danmu_speed_label" style="@style/DanmuValueLabel" android:text="滚动速度：150%" />
+        <SeekBar android:id="@+id/danmu_speed" style="@style/DanmuSeekBar" android:max="250" />
+
+        <TextView style="@style/DanmuSectionTitle" android:text="弹幕源" />
+
+        <LinearLayout android:id="@+id/danmu_local_file" style="@style/DanmuActionRow">
+            <LinearLayout
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:orientation="vertical">
+                <TextView style="@style/DanmuActionTitle" android:text="本地弹幕" />
+                <TextView style="@style/DanmuActionSubtitle" android:text="选择本地弹幕文件 .xml / .ass" />
+            </LinearLayout>
+            <TextView style="@style/DanmuArrow" android:text="›" />
+        </LinearLayout>
+
+        <LinearLayout android:id="@+id/danmu_source_list" style="@style/DanmuActionRow">
+            <LinearLayout
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:orientation="vertical">
+                <TextView style="@style/DanmuActionTitle" android:text="弹幕列表" />
+                <TextView style="@style/DanmuActionSubtitle" android:text="重新搜索并选择匹配的弹幕源" />
+            </LinearLayout>
+            <TextView style="@style/DanmuArrow" android:text="›" />
+        </LinearLayout>
     </LinearLayout>
 </ScrollView>

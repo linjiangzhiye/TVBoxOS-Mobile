@@ -11,6 +11,7 @@ public class HawkConfig {
     public static final String EPG_URL = "epg_url";
     public static final String SHOW_PREVIEW = "show_preview";
     public static final String SUBSCRIPTIONS = "api_history";
+    public static final String LIVE_SUBSCRIPTIONS = "live_subscriptions";
     public static final String LIVE_HISTORY = "live_history";
     public static final String EPG_HISTORY = "epg_history";
     public static final String HOME_API = "home_api";
@@ -74,4 +75,11 @@ public class HawkConfig {
     public static final String DANMU_SIZE_SCALE = "danmu_size_scale";
     public static final String DANMU_RANDOM_COLOR = "danmu_random_color";
     public static final String DANMU_API = "danmu_api";
+    public static final String DANMU_SHOW_SCROLL = "danmu_show_scroll";
+    public static final String DANMU_SHOW_TOP = "danmu_show_top";
+    public static final String DANMU_SHOW_BOTTOM = "danmu_show_bottom";
+    public static final String DANMU_DISPLAY_AREA = "danmu_display_area";
+    public static final String DANMU_DENSITY = "danmu_density";
+    public static final String DANMU_TOP_MARGIN = "danmu_top_margin";
+    public static final String DANMU_BOTTOM_MARGIN = "danmu_bottom_margin";
 }

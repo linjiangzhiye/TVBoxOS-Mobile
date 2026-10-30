@@ -12,12 +12,13 @@ import com.github.tvbox.osc.constant.IntentKey
 import com.github.tvbox.osc.databinding.ActivityMainBinding
 import com.github.tvbox.osc.ui.fragment.GridFragment
 import com.github.tvbox.osc.ui.fragment.HomeFragment
+import com.github.tvbox.osc.ui.fragment.LiveFragment
 import com.github.tvbox.osc.ui.fragment.MyFragment
 import kotlin.system.exitProcess
 
 class MainActivity : BaseVbActivity<ActivityMainBinding>() {
 
-    var fragments = listOf(HomeFragment(),MyFragment())
+    var fragments = listOf(HomeFragment(), LiveFragment(), MyFragment())
     var useCacheConfig = false
     private var exitTime = 0L
 
@@ -47,7 +48,7 @@ class MainActivity : BaseVbActivity<ActivityMainBinding>() {
     }
 
     override fun onBackPressed() {
-        if (mBinding.vp.currentItem == 1) {
+        if (mBinding.vp.currentItem != 0) {
             mBinding.vp.currentItem = 0
             return
         }

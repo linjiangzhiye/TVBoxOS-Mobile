@@ -66,6 +66,7 @@ import com.github.tvbox.osc.server.RemoteServer;
 import com.github.tvbox.osc.ui.activity.DetailActivity;
 import com.github.tvbox.osc.ui.adapter.ParseAdapter;
 import com.github.tvbox.osc.ui.adapter.SelectDialogAdapter;
+import com.github.tvbox.osc.ui.dialog.DanmuSearchDialog;
 import com.github.tvbox.osc.ui.dialog.DanmuSettingDialog;
 import com.github.tvbox.osc.ui.dialog.PlayingControlDialog;
 import com.github.tvbox.osc.ui.dialog.PlayingControlRightDialog;
@@ -326,8 +327,13 @@ public class PlayFragment extends BaseLazyFragment {
                     }
 
                     @Override
-                    public boolean onSendDanmaku(String text) {
-                        return danmuLoadController != null && danmuLoadController.addDanmaku(text);
+                    public void onPickLocalFile() {
+                        pickLocalDanmuFile();
+                    }
+
+                    @Override
+                    public void onOpenSourceList() {
+                        openDanmuSourceList();
                     }
                 });
                 new XPopup.Builder(requireContext()).asCustom(dialog).show();
@@ -1176,6 +1182,33 @@ public class PlayFragment extends BaseLazyFragment {
 
     private void startDanmuIfReady() {
         if (danmuLoadController != null) danmuLoadController.startIfReady();
+    }
+
+    private void pickLocalDanmuFile() {
+        if (getActivity() == null || danmuLoadController == null) return;
+        new ChooserDialog(getActivity(), R.style.FileChooser)
+                .withFilter(false, false, "xml", "ass")
+                .withStartFile("/storage/emulated/0/Download")
+                .withChosenListener((dialog, pathFile) -> {
+                    dialog.dismiss();
+                    if (danmuLoadController == null) return;
+                    setDanmakuEnabled(true);
+                    danmuLoadController.check(pathFile.getAbsolutePath(),
+                            mVodInfo == null ? "" : mVodInfo.name, getCurrentSeriesName(), null);
+                })
+                .build()
+                .show();
+    }
+
+    private void openDanmuSourceList() {
+        if (mVodInfo == null || danmuLoadController == null) return;
+        setDanmakuEnabled(true);
+        String title = mVodInfo.name;
+        String episode = getCurrentSeriesName();
+        DanmuSearchDialog dialog = new DanmuSearchDialog(requireContext(), title, episode, danmu -> {
+            if (danmuLoadController != null) danmuLoadController.check(danmu, title, episode, null);
+        });
+        new XPopup.Builder(requireContext()).asCustom(dialog).show();
     }
 
     private void setDanmakuEnabled(boolean enabled) {

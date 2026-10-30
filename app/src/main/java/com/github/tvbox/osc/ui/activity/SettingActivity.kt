@@ -15,7 +15,6 @@ import com.github.tvbox.osc.databinding.ActivitySettingBinding
 import com.github.tvbox.osc.ui.adapter.SelectDialogAdapter
 import com.github.tvbox.osc.ui.adapter.SelectDialogAdapter.SelectDialogInterface
 import com.github.tvbox.osc.ui.dialog.BackupDialog
-import com.github.tvbox.osc.ui.dialog.LiveApiDialog
 import com.github.tvbox.osc.ui.dialog.SelectDialog
 import com.github.tvbox.osc.util.FastClickCheckUtil
 import com.github.tvbox.osc.util.FileUtils
@@ -42,7 +41,6 @@ class SettingActivity : BaseVbActivity<ActivitySettingBinding>() {
 
     private var homeRec = Hawk.get(HawkConfig.HOME_REC, 0)
     private var dnsOpt = Hawk.get(HawkConfig.DOH_URL, 0)
-    private var currentLiveApi = Hawk.get(HawkConfig.LIVE_URL, "")
     override fun init() {
 
         mBinding.titleBar.leftView.setOnClickListener { onBackPressed() }
@@ -62,13 +60,6 @@ class SettingActivity : BaseVbActivity<ActivitySettingBinding>() {
             val newConfig = !Hawk.get(HawkConfig.PRIVATE_BROWSING, false)
             mBinding.switchPrivateBrowsing.setChecked(newConfig)
             Hawk.put(HawkConfig.PRIVATE_BROWSING, newConfig)
-        }
-
-        mBinding.llLiveApi.setOnClickListener {
-            XPopup.Builder(mContext)
-                .autoFocusEditText(false)
-                .asCustom(LiveApiDialog(this))
-                .show()
         }
 
         val defaultBgPlayTypePos = Hawk.get(HawkConfig.BACKGROUND_PLAY_TYPE, 0)
@@ -434,16 +425,11 @@ class SettingActivity : BaseVbActivity<ActivitySettingBinding>() {
         if (homeRec != Hawk.get(HawkConfig.HOME_REC, 0) || dnsOpt != Hawk.get(
                 HawkConfig.DOH_URL,
                 0
-            ) || currentLiveApi != Hawk.get(HawkConfig.LIVE_URL, "")
-        ) { // 首页类型/dns/doh/直播源有更改,需重载页面
-            //AppManager.getInstance().finishAllActivity()
-            if (currentLiveApi == Hawk.get(HawkConfig.LIVE_URL, "")) { //未更改直播源,不需重载api等
-                val bundle = Bundle()
-                bundle.putBoolean(IntentKey.CACHE_CONFIG_CHANGED, true)
-                jumpActivity(MainActivity::class.java, bundle)
-            } else {
-                jumpActivity(MainActivity::class.java)
-            }
+            )
+        ) { // 首页类型/dns/doh有更改,需重载页面
+            val bundle = Bundle()
+            bundle.putBoolean(IntentKey.CACHE_CONFIG_CHANGED, true)
+            jumpActivity(MainActivity::class.java, bundle)
             overridePendingTransition(R.anim.fade_in, R.anim.fade_out)
         } else {
             super.onBackPressed()

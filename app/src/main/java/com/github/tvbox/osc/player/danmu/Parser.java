@@ -96,8 +96,56 @@ public class Parser extends BaseDanmakuParser {
     public Parser(String input, CancelChecker cancelChecker, long initialPosition) {
         this.cancelChecker = cancelChecker;
         this.initialPosition = Math.max(0, initialPosition);
-        this.danmu = Danmu.fromXml(resolveContent(input), this.initialPosition,
+        this.danmu = Danmu.fromXml(normalizeContent(resolveContent(input)), this.initialPosition,
                 cancelChecker == null ? null : cancelChecker::isCancelled);
+    }
+
+    private String normalizeContent(String content) {
+        if (TextUtils.isEmpty(content)) return "";
+        String text = content.trim();
+        if (text.contains("[Events]") && text.contains("Dialogue:")) return assToXml(text);
+        return text;
+    }
+
+    private String assToXml(String content) {
+        StringBuilder xml = new StringBuilder("<i>");
+        try {
+            for (String line : content.split("\r?\n")) {
+                if (!line.trim().startsWith("Dialogue:")) continue;
+                String value = line.substring(line.indexOf("Dialogue:") + 9).trim();
+                String[] parts = value.split(",", 10);
+                if (parts.length < 10) continue;
+                long start = parseAssTime(parts[1]);
+                if (start < 0) continue;
+                String text = parts[9].replaceAll("\\{[^}]*\\}", "")
+                        .replace("\\N", " ").replace("\\n", " ")
+                        .replaceAll("\\s+", " ").trim();
+                if (TextUtils.isEmpty(text)) continue;
+                xml.append("<d p=\"")
+                        .append(start / 1000f).append(",1,25,16777215\">")
+                        .append(escapeXmlText(text)).append("</d>");
+            }
+        } catch (Throwable ignored) {
+        }
+        xml.append("</i>");
+        return xml.toString();
+    }
+
+    private long parseAssTime(String value) {
+        try {
+            String[] parts = value.trim().split(":");
+            if (parts.length < 3) return -1;
+            int hours = Integer.parseInt(parts[0]);
+            int minutes = Integer.parseInt(parts[1]);
+            float seconds = Float.parseFloat(parts[2]);
+            return Math.round((hours * 3600f + minutes * 60f + seconds) * 1000f);
+        } catch (Throwable ignored) {
+            return -1;
+        }
+    }
+
+    private String escapeXmlText(String value) {
+        return value.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;");
     }
 
     public int getDanmuCount() {
@@ -315,6 +363,10 @@ public class Parser extends BaseDanmakuParser {
             String[] values = data.getParam().split(",", 5);
             if (values.length < 4) return null;
             int type = Integer.parseInt(values[1]);
+            if ((type == BaseDanmaku.TYPE_SCROLL_RL || type == BaseDanmaku.TYPE_SCROLL_LR
+                    || type == BaseDanmaku.TYPE_SPECIAL) && !DanmuHelper.showScroll()) return null;
+            if (type == BaseDanmaku.TYPE_FIX_TOP && !DanmuHelper.showTop()) return null;
+            if (type == BaseDanmaku.TYPE_FIX_BOTTOM && !DanmuHelper.showBottom()) return null;
             BaseDanmaku item = mContext.mDanmakuFactory.createDanmaku(type, mContext);
             if (item == null) return null;
             long time = (long) (Float.parseFloat(values[0]) * 1000);
