@@ -1189,8 +1189,7 @@ public class PlayFragment extends BaseLazyFragment {
         new ChooserDialog(getActivity(), R.style.FileChooser)
                 .withFilter(false, false, "xml", "ass")
                 .withStartFile("/storage/emulated/0/Download")
-                .withChosenListener((dialog, pathFile) -> {
-                    dialog.dismiss();
+                .withChosenListener((path, pathFile) -> {
                     if (danmuLoadController == null) return;
                     setDanmakuEnabled(true);
                     danmuLoadController.check(pathFile.getAbsolutePath(),

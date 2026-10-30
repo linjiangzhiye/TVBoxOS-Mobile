@@ -57,7 +57,7 @@ public class DanmuSearchDialog extends CenterPopupView {
                 helper.setText(R.id.tv_url, item.getUrl());
             }
         };
-        adapter.setOnItemClickListener((adapter, view, position) -> load(adapter.getItem(position)));
+        adapter.setOnItemClickListener((adapter, view, position) -> load((DanmuSearchResult) adapter.getItem(position)));
         listView.setAdapter(adapter);
         findViewById(R.id.danmu_search_close).setOnClickListener(view -> dismiss());
         search();
