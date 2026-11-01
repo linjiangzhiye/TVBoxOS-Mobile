@@ -79,7 +79,7 @@ public class ApiConfig implements com.github.tvbox.osc.spiderapi.SourceConfigApi
         appContext = context == null ? null : context.getApplicationContext();
         com.github.catvod.crawler.JarLoader.setContext(context);
         com.github.catvod.crawler.JsLoader.setContext(context);
-        pyLoader.setContext(context);
+        get().pyLoader.setContext(context);
         com.github.tvbox.osc.util.FileUtils.setContext(context);
         com.github.tvbox.osc.util.UA.setContext(context);
         com.github.tvbox.osc.util.js.local.setContext(context);
