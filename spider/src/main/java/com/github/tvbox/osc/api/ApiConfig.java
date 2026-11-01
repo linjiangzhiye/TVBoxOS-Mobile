@@ -35,6 +35,7 @@ import com.google.gson.Gson;
 import com.google.gson.JsonArray;
 import com.google.gson.JsonElement;
 import com.google.gson.JsonObject;
+import com.google.gson.JsonParser;
 
 import org.apache.commons.lang3.StringUtils;
 import org.json.JSONObject;
@@ -247,29 +248,97 @@ public class ApiConfig implements com.github.tvbox.osc.spiderapi.SourceConfigApi
         try {
             // 去掉 BOM 与开头的 // 注释行(部分源配置带注释,Gson 不支持注释)
             content = stripJsonNoise(content);
-            if (AES.isJson(content)) return content;
-            Pattern pattern = Pattern.compile("[A-Za-z0]{8}\\*\\*");
-            Matcher matcher = pattern.matcher(content);
-            if(matcher.find()){
-                content=content.substring(content.indexOf(matcher.group()) + 10);
-                content = new String(Base64.decode(content, Base64.DEFAULT));
-            }
-            if (content.startsWith("2423")) {
-                String data = content.substring(content.indexOf("2324") + 4, content.length() - 26);
-                content = new String(AES.toBytes(content)).toLowerCase();
-                String key = AES.rightPadding(content.substring(content.indexOf("$#") + 2, content.indexOf("#$")), "0", 16);
-                String iv = AES.rightPadding(content.substring(content.length() - 13), "0", 16);
-                json = AES.CBC(data, key, iv);
-            }else if (configKey !=null && !AES.isJson(content)) {
-                json = AES.ECB(content, configKey);
-            }
-            else{
+            if (AES.isJson(content)) {
                 json = content;
+            } else {
+                Pattern pattern = Pattern.compile("[A-Za-z0]{8}\\*\\*");
+                Matcher matcher = pattern.matcher(content);
+                if (matcher.find()) {
+                    content = content.substring(content.indexOf(matcher.group()) + 10);
+                    content = new String(Base64.decode(content, Base64.DEFAULT));
+                }
+                if (content.startsWith("2423")) {
+                    String data = content.substring(content.indexOf("2324") + 4, content.length() - 26);
+                    content = new String(AES.toBytes(content)).toLowerCase();
+                    String key = AES.rightPadding(content.substring(content.indexOf("$#") + 2, content.indexOf("#$")), "0", 16);
+                    String iv = AES.rightPadding(content.substring(content.length() - 13), "0", 16);
+                    json = AES.CBC(data, key, iv);
+                } else if (configKey != null && !AES.isJson(content)) {
+                    json = AES.ECB(content, configKey);
+                } else {
+                    json = content;
+                }
             }
+            json = unwrapConfigEnvelope(json);
         } catch (Exception e) {
             LogStore.fail(Category.SUBSCRIPTION, "订阅: 配置解码失败 (" + exceptionType(e) + ")");
         }
         return json;
+    }
+
+    /** 兼容 TVBox/EasyBox 常见的 {code,data:{sites...}}、字符串包裹 JSON、裸 sites 数组。 */
+    private static String unwrapConfigEnvelope(String raw) {
+        String candidate = extractJsonDocument(raw);
+        if (candidate.isEmpty()) return raw;
+        try {
+            try {
+                JsonElement direct = JsonParser.parseString(raw == null ? "" : raw.trim());
+                if (direct.isJsonPrimitive() && direct.getAsJsonPrimitive().isString()) {
+                    String text = direct.getAsString().trim();
+                    String unwrapped = unwrapConfigEnvelope(text);
+                    if (!unwrapped.equals(text)) return unwrapped;
+                }
+            } catch (Throwable ignored) {
+            }
+            JsonElement root = JsonParser.parseString(candidate);
+            if (root.isJsonArray()) {
+                String wrapped = CmsApiRules.wrapSiteJson(candidate);
+                return wrapped == null || wrapped.isEmpty() ? raw : wrapped;
+            }
+            if (!root.isJsonObject()) return raw;
+            JsonObject object = root.getAsJsonObject();
+            if (hasConfigShape(object)) return object.toString();
+            String[] keys = {"data", "result", "config", "content", "configJson", "response"};
+            for (String key : keys) {
+                JsonElement nested = object.get(key);
+                if (nested == null || nested.isJsonNull()) continue;
+                if (nested.isJsonObject() || nested.isJsonArray()) {
+                    String unwrapped = unwrapConfigEnvelope(nested.toString());
+                    if (!unwrapped.equals(nested.toString())) return unwrapped;
+                    if (nested.isJsonObject() && hasConfigShape(nested.getAsJsonObject())) return nested.toString();
+                    if (nested.isJsonArray()) {
+                        String wrapped = CmsApiRules.wrapSiteJson(nested.toString());
+                        if (wrapped != null && !wrapped.isEmpty()) return wrapped;
+                    }
+                } else if (nested.isJsonPrimitive() && nested.getAsJsonPrimitive().isString()) {
+                    String text = nested.getAsString().trim();
+                    if (text.startsWith("{") || text.startsWith("[") || text.startsWith("2423")) {
+                        String unwrapped = unwrapConfigEnvelope(text);
+                        if (!unwrapped.equals(text)) return unwrapped;
+                    }
+                }
+            }
+        } catch (Throwable ignored) {
+        }
+        return raw;
+    }
+
+    private static boolean hasConfigShape(JsonObject object) {
+        return object.has("sites") || object.has("urls") || object.has("storeHouse");
+    }
+
+    private static String extractJsonDocument(String raw) {
+        if (raw == null) return "";
+        String text = stripJsonNoise(raw).trim();
+        if (text.startsWith("{") || text.startsWith("[")) return text;
+        int objectStart = text.indexOf('{');
+        int arrayStart = text.indexOf('[');
+        int start = objectStart < 0 ? arrayStart : arrayStart < 0 ? objectStart : Math.min(objectStart, arrayStart);
+        if (start < 0) return "";
+        int objectEnd = text.lastIndexOf('}');
+        int arrayEnd = text.lastIndexOf(']');
+        int end = Math.max(objectEnd, arrayEnd);
+        return end > start ? text.substring(start, end + 1) : "";
     }
 
     /** 剥离配置开头的 BOM 与 // 注释行 */
@@ -377,6 +446,9 @@ public class ApiConfig implements com.github.tvbox.osc.spiderapi.SourceConfigApi
                 CONFIG_EXECUTOR.execute(() -> {
                     if (configLoadEpoch.get() != epoch) return;
                     try {
+                        if (CmsApiRules.isClosedSourceResponse(content)) {
+                            throw new IllegalStateException("影视源已关闭，请更换有效订阅");
+                        }
                         String result = FindResult(content, configKey);
                         if (apiUrl.startsWith("clan")) {
                             result = clanContentFix(clanToAddress(apiUrl), result);

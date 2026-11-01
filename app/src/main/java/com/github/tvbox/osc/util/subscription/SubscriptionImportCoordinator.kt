@@ -1189,6 +1189,13 @@ class SubscriptionImportCoordinator(
      */
     private fun handleSubscriptionBody(name: String, url: String, body: String, checked: Boolean,
                                        onComplete: (() -> Unit)? = null) {
+        if (CmsApiRules.isClosedSourceResponse(body)) {
+            dismissImportLoading()
+            LogStore.fail(Category.SUBSCRIPTION, "订阅: 影视源已关闭 (" + logSource(url) + ")")
+            showImportToast("该影视源已关闭，请更换有效订阅")
+            onComplete?.invoke()
+            return
+        }
         if (SubscriptionImportRules.isAccessDeniedResponse(body)) {
             dismissImportLoading()
             LogStore.fail(Category.SUBSCRIPTION, "订阅: 地址拒绝访问 (" + logSource(url) + ")")

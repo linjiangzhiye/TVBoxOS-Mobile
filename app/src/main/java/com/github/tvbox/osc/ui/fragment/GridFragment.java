@@ -291,7 +291,7 @@ public class GridFragment extends BaseLazyFragment {
         if (mGridView != null) return; // 唯一视图/适配器只需初始化一次(initView 会被多次调用)
         mGridView = findViewById(R.id.mGridView);
         // 列数自适应:单卡宽度不超过 GRID_CARD_MAX_WIDTH_DP,屏幕越宽列数越多
-        mGridView.setLayoutManager(new V7GridLayoutManager(this.mContext, Utils.getAdaptiveGridSpan(Utils.GRID_CARD_MAX_WIDTH_DP)));
+        mGridView.setLayoutManager(new V7GridLayoutManager(this.mContext, 3));
         gridAdapter = new GridAdapter(); // 单适配器:所有层级复用,层级数据通过 setNewData 进出
         mGridView.setAdapter(gridAdapter);
 
@@ -731,7 +731,7 @@ public class GridFragment extends BaseLazyFragment {
     @Override
     public void onConfigurationChanged(@NonNull Configuration newConfig) {
         super.onConfigurationChanged(newConfig);
-        int span = Utils.getAdaptiveGridSpan(Utils.GRID_CARD_MAX_WIDTH_DP);
+        int span = 3;
         // 所有层级共用同一个网格视图:只需更新一次跨度;返回旧层时会按新跨度自动重排
         updateGridSpan(mGridView, span);
     }

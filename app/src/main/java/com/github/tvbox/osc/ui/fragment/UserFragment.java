@@ -25,7 +25,6 @@ import com.github.tvbox.osc.ui.activity.CollectActivity;
 import com.github.tvbox.osc.ui.activity.DetailActivity;
 import com.github.tvbox.osc.ui.activity.FastSearchActivity;
 import com.github.tvbox.osc.ui.activity.HistoryActivity;
-import com.github.tvbox.osc.ui.activity.LiveActivity;
 import com.github.tvbox.osc.ui.activity.MainActivity;
 
 import com.github.tvbox.osc.ui.activity.SettingActivity;
@@ -83,22 +82,6 @@ public class UserFragment extends BaseLazyFragment {
         super.onFragmentResume();
 
         updateGridSpan();
-        // 回到主页再校正一次:期间可能换过订阅/改过直播源,频道列表有无会变
-        syncLiveButton();
-    }
-
-    /**
-     * 直播悬浮钮的显隐:<b>频道列表为空就不显示</b> —— 那种情况点进去只会弹一句"频道列表为空"然后退出
-     * (见 {@code LiveActivity.initLiveChannelList}),留着是个死按钮。
-     * 列表在源配置解析时确定(ApiConfig.parseJson):优先用户在设置里配的直播源,没配才用订阅源自带的直播,
-     * 两者都没有就是空 → 不显示。进主页时已就绪;换源/回前台再校正一次。
-     */
-    private void syncLiveButton() {
-        View btn = findViewById(R.id.btn_live);
-        if (btn == null) return;
-        boolean hasLive = !com.github.tvbox.osc.spiderapi.LiveChannelConfigProviders.get()
-                .getChannelGroupList().isEmpty();
-        btn.setVisibility(hasLive ? View.VISIBLE : View.GONE);
     }
 
     /**
@@ -113,7 +96,7 @@ public class UserFragment extends BaseLazyFragment {
     private void updateGridSpan() {
         if (tvHotList1 != null && tvHotList1.getLayoutManager() instanceof GridLayoutManager) {
             GridLayoutManager manager = (GridLayoutManager) tvHotList1.getLayoutManager();
-            int span = Utils.getAdaptiveGridSpan(Utils.GRID_CARD_MAX_WIDTH_DP);
+            int span = 3;
             if (manager.getSpanCount() != span) manager.setSpanCount(span);
         }
     }
@@ -129,10 +112,7 @@ public class UserFragment extends BaseLazyFragment {
         tvHotList1.setHasFixedSize(true);
         // 布局管理器只在首次初始化时创建，切回主页复用它的滚动位置。
         tvHotList1.setLayoutManager(new GridLayoutManager(mContext,
-                Utils.getAdaptiveGridSpan(Utils.GRID_CARD_MAX_WIDTH_DP)));
-        // 主页右下角直播悬浮按钮(无频道列表时隐藏,见 syncLiveButton)
-        findViewById(R.id.btn_live).setOnClickListener(view -> jumpActivity(LiveActivity.class));
-        syncLiveButton();
+                3));
         homeHotVodAdapter = new GridAdapter();
         homeHotVodAdapter.setOnItemClickListener(new BaseQuickAdapter.OnItemClickListener() {
             @Override

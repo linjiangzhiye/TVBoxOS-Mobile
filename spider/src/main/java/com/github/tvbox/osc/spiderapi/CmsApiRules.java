@@ -4,6 +4,7 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Locale;
 import java.nio.charset.StandardCharsets;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
@@ -23,6 +24,15 @@ import java.util.regex.Pattern;
 public final class CmsApiRules {
 
     private CmsApiRules() {
+    }
+
+    /** 失效分享页/验证页不是资源站，继续嗅探只会让导入流程长时间转圈。 */
+    public static boolean isClosedSourceResponse(String body) {
+        if (body == null) return false;
+        String text = body.toLowerCase(Locale.ROOT);
+        if (text.length() > 64 * 1024) return false;
+        return (text.contains("站点已关闭") || text.contains("江湖路远，有缘再会"))
+                && (text.contains("<title>验证</title>") || text.contains("checkcode()"));
     }
 
     /**

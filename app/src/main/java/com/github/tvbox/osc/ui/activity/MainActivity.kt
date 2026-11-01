@@ -454,14 +454,29 @@ class MainActivity : BaseVbActivity<ActivityMainBinding>(), UserStartupGate {
         // BaseActivity 的第二轮兼容换肤扫描已在 init() 后执行；开屏退场时补扫新挂载的视图。
         com.github.tvbox.osc.theme.ThemeSweep.apply(shell.root)
         shell.bottomNav.setOnNavigationItemSelectedListener { menuItem: MenuItem ->
-            if (menuItem.order == 0 && shell.vp.currentItem == 0 && homeBackToTop) {
-                // 已经站在首页、列表还离开着顶部:这一下不是"切 tab"(也没页可切),而是「回到顶部」
-                activeHomeFragment()?.scrollToTop()
-            } else {
-                shell.vp.setCurrentItem(menuItem.order, false)
-                updateNavIcons(menuItem.order)
+            when (menuItem.itemId) {
+                R.id.navigation_live -> {
+                    // 直播不做中间页:点底栏中间项直接进入直播播放界面,与 EasyBox 入口一致。
+                    startActivity(Intent(this@MainActivity, LiveActivity::class.java))
+                    syncBottomNavSelection(shell.vp.currentItem)
+                    false
+                }
+                R.id.navigation_home -> {
+                    if (shell.vp.currentItem == 0 && homeBackToTop) {
+                        // 已经站在首页、列表还离开着顶部:这一下不是"切 tab"(也没页可切),而是「回到顶部」
+                        activeHomeFragment()?.scrollToTop()
+                    } else {
+                        shell.vp.setCurrentItem(0, false)
+                        updateNavIcons(0)
+                    }
+                    true
+                }
+                else -> {
+                    shell.vp.setCurrentItem(1, false)
+                    updateNavIcons(1)
+                    true
+                }
             }
-            true
         }
         // 整条底栏(含条目两侧空白)左右滑动 = 切 tab:只认方向,边界由这里挡
         shell.bottomNav.setOnNavSwipeListener { step ->
@@ -475,7 +490,7 @@ class MainActivity : BaseVbActivity<ActivityMainBinding>(), UserStartupGate {
         }
         shell.vp.addOnPageChangeListener(object : SimpleOnPageChangeListener() {
             override fun onPageSelected(position: Int) {
-                shell.bottomNav.menu.getItem(position).setChecked(true)
+                syncBottomNavSelection(position)
                 updateNavIcons(position)
                 syncBackToTopState() // 切回首页时按当前列表位置刷新「回到顶部」
             }
@@ -1006,12 +1021,20 @@ class MainActivity : BaseVbActivity<ActivityMainBinding>(), UserStartupGate {
     /** 底部导航图标: 选中项换"选中"变体(与未选中图形区分), 颜色仍由 itemIconTint 按状态着色 */
     private fun updateNavIcons(position: Int) {
         val menu = mainShellBinding?.bottomNav?.menu ?: return
-        if (menu.size() >= 2) {
-            menu.getItem(1).setIcon(
-                if (position == 1) R.drawable.ic_nav_my_sel else R.drawable.ic_nav_my
-            )
-        }
+        menu.findItem(R.id.navigation_dashboard)?.setIcon(
+            if (position == 1) R.drawable.ic_nav_my_sel else R.drawable.ic_nav_my
+        )
+        menu.findItem(R.id.navigation_live)?.setIcon(R.drawable.ic_live_tv_48)
         applyHomeNavAppearance()
+    }
+
+    private fun syncBottomNavSelection(position: Int) {
+        val menu = mainShellBinding?.bottomNav?.menu ?: return
+        val selectedId = if (position == 0) R.id.navigation_home else R.id.navigation_dashboard
+        for (index in 0 until menu.size()) {
+            val item = menu.getItem(index)
+            item.isChecked = item.itemId == selectedId
+        }
     }
 
     /**
