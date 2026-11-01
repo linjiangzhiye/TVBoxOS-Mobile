@@ -258,6 +258,7 @@ public class ApiConfig implements com.github.tvbox.osc.spiderapi.SourceConfigApi
                     content = new String(Base64.decode(content, Base64.DEFAULT));
                 }
                 if (content.startsWith("2423")) {
+                    content = content.replaceAll("\\s+", "");
                     String data = content.substring(content.indexOf("2324") + 4, content.length() - 26);
                     content = new String(AES.toBytes(content)).toLowerCase();
                     String key = AES.rightPadding(content.substring(content.indexOf("$#") + 2, content.indexOf("#$")), "0", 16);

@@ -1203,6 +1203,16 @@ class SubscriptionImportCoordinator(
             onComplete?.invoke()
             return
         }
+        // 2423... 是 TVBox 的 AES-CBC 自解密配置。这里不能继续按 JSON/资源站嗅探，
+        // 否则会把一份有效配置误判成网页；URL 原样保存，实际配置在加载阶段解密。
+        if (CmsApiRules.subscriptionShape(body) == CmsApiRules.SHAPE_ENCRYPTED) {
+            dismissImportLoading()
+            addSub2List(name, url, checked)
+            LogStore.success(Category.SUBSCRIPTION, "订阅: 加密配置已加入 (" + logSource(url) + ")")
+            showImportToast("加密配置已加入")
+            onComplete?.invoke()
+            return
+        }
         try {
             val json = JsonParser.parseString(body).asJsonObject
             // 多线路?
