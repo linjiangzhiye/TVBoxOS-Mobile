@@ -2,35 +2,40 @@ package com.github.tvbox.osc.ui.activity;
 
 import android.content.Intent;
 import android.content.IntentFilter;
+import android.content.res.Configuration;
 import android.net.Uri;
 import android.os.Bundle;
 import android.os.Handler;
+import android.view.View;
+import android.view.WindowManager;
 
 import com.blankj.utilcode.util.GsonUtils;
-import com.blankj.utilcode.util.SPUtils;
-import com.blankj.utilcode.util.ToastUtils;
+import com.github.tvbox.osc.util.AppBubble;
+import com.github.tvbox.osc.util.LocalVideoConfig;
 import com.github.tvbox.osc.base.BaseVbActivity;
 import com.github.tvbox.osc.bean.ParseBean;
 import com.github.tvbox.osc.bean.VideoInfo;
 import com.github.tvbox.osc.bean.VodInfo;
-import com.github.tvbox.osc.constant.CacheConst;
+import com.github.tvbox.osc.bean.CastVideo;
 import com.github.tvbox.osc.databinding.ActivityLocalPlayBinding;
-import com.github.tvbox.osc.event.RefreshEvent;
 import com.github.tvbox.osc.player.MyVideoView;
+import com.github.tvbox.osc.player.PlayerSession;
+import com.github.tvbox.osc.player.api.PlayConfig;
 import com.github.tvbox.osc.player.controller.LocalVideoController;
-import com.github.tvbox.osc.receiver.BatteryReceiver;
 import com.github.tvbox.osc.ui.dialog.AllLocalSeriesDialog;
-import com.github.tvbox.osc.util.HawkConfig;
+import com.github.tvbox.osc.ui.dialog.CastListDialog;
+import com.github.tvbox.osc.ui.dialog.DialogCoordinator;
+import com.github.tvbox.osc.ui.dialog.PlayingControlRightDialog;
+import com.github.tvbox.osc.util.BroadcastUtils;
+import com.github.tvbox.osc.util.PipHelper;
 import com.github.tvbox.osc.util.PlayerHelper;
+import com.github.tvbox.osc.util.player.SubtitleCoordinator;
+import com.github.tvbox.osc.R;
+import com.gyf.immersionbar.BarHide;
+import com.gyf.immersionbar.ImmersionBar;
 import com.google.common.reflect.TypeToken;
-import com.lxj.xpopup.XPopup;
 import com.lxj.xpopup.core.BasePopupView;
-import com.lxj.xpopup.enums.PopupPosition;
-import com.orhanobut.hawk.Hawk;
 
-import org.greenrobot.eventbus.EventBus;
-import org.greenrobot.eventbus.Subscribe;
-import org.greenrobot.eventbus.ThreadMode;
 import org.json.JSONObject;
 
 import java.io.File;
@@ -46,24 +51,55 @@ public class LocalPlayActivity extends BaseVbActivity<ActivityLocalPlayBinding> 
 
     private MyVideoView mVideoView;
     LocalVideoController mController;
+    private PlayerSession mPlaySession;
+    private SubtitleCoordinator mSubtitleCoordinator;
     JSONObject mVodPlayerCfg;
     private List<VideoInfo> mVideoList = new ArrayList<>();
     private int mPosition;
-    BatteryReceiver mBatteryReceiver = new BatteryReceiver();
+    /** 电池百分比订阅(经 SystemStateMonitor,替代 EventBus 电量广播) */
+    private com.github.tvbox.osc.state.SystemStateMonitor.Listener mBatteryListener;
     private BasePopupView mAllSeriesRightDialog;
+    private PipHelper pipHelper;
+    private int automaticErrorRetries;
+    private boolean retryingAfterError;
     @Override
     protected void init() {
-        registerReceiver(mBatteryReceiver,new IntentFilter(Intent.ACTION_BATTERY_CHANGED));
         mVideoView = mBinding.player;
         mVideoView.startFullScreen();
-        Bundle bundle = getIntent().getExtras();
-        String videoListJson =  bundle.getString("videoList");
-        mVideoList = GsonUtils.fromJson(videoListJson, new TypeToken<List<VideoInfo>>(){}.getType());
-        mPosition = bundle.getInt("position", 0);
+        Intent incoming = getIntent();
+        Uri external = incoming == null ? null : incoming.getData();
+        if (external != null) {
+            // 外部「本地视频 - 打开方式」:Intent 只带一个内容 URI,页面自己建单条播放列表
+            mVideoList = buildExternalVideoList(external);
+            mPosition = 0;
+        } else {
+            Bundle bundle = incoming.getExtras();
+            String videoListJson =  bundle.getString("videoList");
+            mVideoList = GsonUtils.fromJson(videoListJson, new TypeToken<List<VideoInfo>>(){}.getType());
+            mPosition = bundle.getInt("position", 0);
+        }
 
         initController();
+        initPipHelper();
         initPlayerCfg();
         mVideoView.setVideoController(mController); //设置控制器
+        // 电池图标:经 SystemStateMonitor 订阅百分比变化(主线程回调)
+        com.github.tvbox.osc.state.SystemStateMonitor monitor = com.github.tvbox.osc.state.SystemStateMonitor.get();
+        if (monitor != null) {
+            mBatteryListener = e -> {
+                if (e != null && com.github.tvbox.osc.state.SystemStateMonitor.TYPE_BATTERY_LEVEL.equals(e.type)
+                        && mController != null && mController.mMyBatteryView != null) {
+                    try {
+                        mController.mMyBatteryView.updateBattery(Integer.parseInt(e.value));
+                    } catch (Throwable ignored) {
+                    }
+                }
+            };
+            monitor.register(mBatteryListener, com.github.tvbox.osc.state.SystemStateMonitor.TYPE_BATTERY_LEVEL);
+            if (mController.mMyBatteryView != null) {
+                mController.mMyBatteryView.updateBattery(monitor.getBatteryPercent());
+            }
+        }
         play(false);
 
         new Handler()
@@ -78,26 +114,74 @@ public class LocalPlayActivity extends BaseVbActivity<ActivityLocalPlayBinding> 
                 },500);
     }
 
-    @Subscribe(threadMode = ThreadMode.MAIN)
-    public void refresh(RefreshEvent event) {
-        if (event.type == RefreshEvent.TYPE_BATTERY_CHANGE && mController.mMyBatteryView!=null){
-            mController.mMyBatteryView.updateBattery((int) event.obj);
-        }
+
+
+    /**
+     * 外部「打开方式」可在冷进程里直接建页:此时没有首页/启动流程,
+     * 由 BaseActivity 把 isNormalStart 标成正常启动,避免被转去开屏重启而丢掉这个文件。
+     */
+    @Override
+    protected boolean allowDirectColdStart() {
+        Intent intent = getIntent();
+        return intent != null && intent.getData() != null;
     }
 
+    /** 外部打开的单文件播放项:路径保留原始 URI(content:// 由播放器内核直接读) */
+    private List<VideoInfo> buildExternalVideoList(Uri data) {
+        String name = resolveExternalDisplayName(data);
+        VideoInfo info = new VideoInfo();
+        info.setDisplayName(name);
+        info.setTitle(name);
+        info.setPath(data.toString());
+        if ("file".equals(data.getScheme()) && data.getPath() != null) {
+            File file = new File(data.getPath());
+            if (file.exists()) info.setSize(file.length());
+        }
+        List<VideoInfo> list = new ArrayList<>();
+        list.add(info);
+        return list;
+    }
+
+    /** 内容 URI 的显示名:先问 Provider,取不到用路径末段,再取不到给通用名(标题栏不能空) */
+    private String resolveExternalDisplayName(Uri data) {
+        String name = null;
+        if ("content".equals(data.getScheme())) {
+            try (android.database.Cursor cursor = getContentResolver().query(
+                    data, new String[]{android.provider.OpenableColumns.DISPLAY_NAME}, null, null, null)) {
+                if (cursor != null && cursor.moveToFirst()) name = cursor.getString(0);
+            } catch (Throwable ignored) {
+            }
+        }
+        if (name == null || name.trim().isEmpty()) name = data.getLastPathSegment();
+        if (name == null || name.trim().isEmpty()) name = "本地视频";
+        return name;
+    }
 
     /**
      * 跳转到上/下一集,需重新播放
      */
     private void play(boolean fromSkip) {
+        if (mSubtitleCoordinator != null) mSubtitleCoordinator.invalidateForPlaybackChange();
+        if (!retryingAfterError) automaticErrorRetries = 0;
+        retryingAfterError = false;
         VideoInfo videoInfo = mVideoList.get(mPosition);
 
         String path = videoInfo.getPath();
+        // 先回到全局默认,再装载该文件曾保存的播放设置(播放器/解码/倍速/缩放/片头片尾偏移),
+        // 避免上一文件的配置残留在会话对象里串到本文件;setPlayerConfig 同时刷新控制器按钮文案
+        fillCfgDefaults();
+        loadSavedCfgForPath(path);
+        if (mController != null) mController.setPlayerConfig(mVodPlayerCfg);
 
         String uri = "";
-        File file = new File(path);
-        if(file.exists()){
-            uri = Uri.parse("file://"+file.getAbsolutePath()).toString();
+        if (path != null && (path.startsWith("content://") || path.startsWith("file://"))) {
+            // 外部「打开方式」给的就是 URI 本身(Media3 的内容通道能直接读 content://)
+            uri = path;
+        } else if (path != null) {
+            File file = new File(path);
+            if(file.exists()){
+                uri = Uri.parse("file://"+file.getAbsolutePath()).toString();
+            }
         }
         mController.setTitle(videoInfo.getDisplayName());
         mVideoView.setUrl(uri); //设置视频地址
@@ -106,13 +190,20 @@ public class LocalPlayActivity extends BaseVbActivity<ActivityLocalPlayBinding> 
             @Override
             public void saveProgress(String url, long progress) {// 就本地视频页面用sp,其余用Hawk
                 //有点本地文件确实总时长,设置下总时长,为什么用path,因为电影列表要通过媒体文件的path获取缓存的时长/进度,存取报纸缓存的key一直
-                SPUtils.getInstance(CacheConst.VIDEO_DURATION_SP).put(path, mVideoView.getDuration());
-                SPUtils.getInstance(CacheConst.VIDEO_PROGRESS_SP).put(path, progress);
+                LocalVideoConfig.saveDuration(path, mVideoView.getDuration());
+                LocalVideoConfig.saveProgress(path, progress);
             }
 
             @Override
             public long getSavedProgress(String url) {
-                return SPUtils.getInstance(CacheConst.VIDEO_PROGRESS_SP).getLong(path);
+                long saved = LocalVideoConfig.getProgress(path, -1L);
+                // "跳过片头":与在线播放一致,起播位置取 保存进度 与 st(片头跳过秒数) 的较大者
+                int st = 0;
+                try {
+                    st = mVodPlayerCfg.getInt("st");
+                } catch (Throwable ignored) {
+                }
+                return Math.max(saved, st * 1000L);
             }
         });
 
@@ -120,8 +211,33 @@ public class LocalPlayActivity extends BaseVbActivity<ActivityLocalPlayBinding> 
 
         if (fromSkip){
             mVideoView.replay(true);
+        } else if (mVideoView.getCurrentPlayState() == VideoView.STATE_ERROR) {
+            mVideoView.replay(false);
         }else {
             mVideoView.start(); //开始播放，不调用则不自动播放
+        }
+    }
+
+    /** 当前正在播放的文件路径 */
+    private String currentPath() {
+        if (mVideoList == null || mPosition < 0 || mPosition >= mVideoList.size()) return null;
+        VideoInfo info = mVideoList.get(mPosition);
+        return info == null ? null : info.getPath();
+    }
+
+    /** 把曾为该文件保存的播放设置合并进当前配置(保持 mVodPlayerCfg 对象同一性) */
+    private void loadSavedCfgForPath(String path) {
+        try {
+            if (path == null || mVodPlayerCfg == null) return;
+            String saved = LocalVideoConfig.getPlayerCfg(path);
+            if (saved == null || saved.isEmpty()) return;
+            JSONObject jo = new JSONObject(saved);
+            java.util.Iterator<String> it = jo.keys();
+            while (it.hasNext()) {
+                String key = it.next();
+                mVodPlayerCfg.put(key, jo.get(key));
+            }
+        } catch (Throwable ignored) {
         }
     }
 
@@ -139,7 +255,7 @@ public class LocalPlayActivity extends BaseVbActivity<ActivityLocalPlayBinding> 
 //                String preProgressKey = progressKey;
 //                LocalPlayActivity.this.playNext(rmProgress);
                 if (mPosition == mVideoList.size() - 1){
-                    ToastUtils.showShort("当前已经是最后一集了");
+                    AppBubble.toast("当前已经是最后一集了");
                 } else {
                     mPosition++;
                     play(true);
@@ -150,7 +266,7 @@ public class LocalPlayActivity extends BaseVbActivity<ActivityLocalPlayBinding> 
             public void playPre() {
                 //playPrevious();
                 if (mPosition == 0){
-                    ToastUtils.showShort("当前已经是第一集了");
+                    AppBubble.toast("当前已经是第一集了");
                 }else {
                     mPosition--;
                     play(true);
@@ -164,32 +280,69 @@ public class LocalPlayActivity extends BaseVbActivity<ActivityLocalPlayBinding> 
 
             @Override
             public void updatePlayerCfg() {
-
+                // 持久化当前播放设置(播放器/解码/倍速/缩放/片头片尾偏移),按本地文件路径保存,
+                // 下次播放同一文件自动恢复(片头片尾调节/重置因此生效)
+                String path = currentPath();
+                if (path != null && mVodPlayerCfg != null) {
+                    LocalVideoConfig.savePlayerCfg(path, mVodPlayerCfg.toString());
+                }
             }
 
             @Override
             public void replay(boolean replay) {
-
+                // 底栏/设置里的 重播 与 刷新:
+                // 重播(clearProgress=true,来自 play_retry)= 从头开始;
+                // 刷新(replay=false,来自 play_refresh / 切换播放器后重新装载)= 重载当前文件按保存进度续播
+                if (replay) {
+                    String path = currentPath();
+                    if (path != null) {
+                        LocalVideoConfig.removeProgress(path);
+                    }
+                }
+                play(replay);
             }
 
             @Override
             public void errReplay() {
-
+                if (automaticErrorRetries >= 2) return;
+                VideoInfo current = mVideoList.get(mPosition);
+                String detail = "本地播放错误: " + current.getDisplayName() + "，内核="
+                        + (mVodPlayerCfg == null ? -1 : mVodPlayerCfg.optInt("pl", -1));
+                com.github.tvbox.osc.log.LogStore.fail(com.github.tvbox.osc.log.Category.PLAYER, detail);
+                android.util.Log.e("MBoxPlayer", detail);
+                if (automaticErrorRetries >= 1) {
+                    automaticErrorRetries = 2;
+                    AppBubble.toast("播放失败，请检查文件或切换播放器");
+                    return;
+                }
+                automaticErrorRetries++;
+                retryingAfterError = true;
+                int failedPosition = mPosition;
+                // 等当前内核的错误回调退出，再重置播放器，避免在回调栈内重入同一个内核。
+                mVideoView.post(() -> {
+                    if (isFinishing() || isDestroyed() || mVideoView == null
+                            || mPosition != failedPosition
+                            || mVideoView.getCurrentPlayState() != VideoView.STATE_ERROR) {
+                        retryingAfterError = false;
+                        return;
+                    }
+                    play(false);
+                });
             }
 
             @Override
             public void selectSubtitle() {
-
+                openLocalSubtitleDialog();
             }
 
             @Override
             public void selectAudioTrack() {
-
+                if (mSubtitleCoordinator != null) mSubtitleCoordinator.openAudioTrackDialog();
             }
 
             @Override
             public void prepared() {
-
+                initLocalSubtitleView();
             }
 
             @Override
@@ -201,56 +354,237 @@ public class LocalPlayActivity extends BaseVbActivity<ActivityLocalPlayBinding> 
             public void exit() {
                 finish();
             }
+
+            @Override
+            public void showSetting() {
+                // 本地播放设置:与在线全屏播放共用播放设置抽屉(功能一致)
+                mController.hideBottom();
+                DialogCoordinator.right(LocalPlayActivity.this,
+                        new PlayingControlRightDialog(LocalPlayActivity.this, mController, mVideoView),
+                        320, true).show();
+            }
+
+            @Override
+            public void cast() {
+                showCastDialog();
+            }
+
+            @Override
+            public void pip() {
+                enterPip();
+            }
         });
 
+        // 本地字幕:与在线全屏共用 SubtitleCoordinator(依赖 SubtitleController 契约,不耦合具体控制器)
+        mPlaySession = new PlayerSession(mVideoView);
+        mSubtitleCoordinator = new SubtitleCoordinator(this, mController, mPlaySession);
+    }
+
+    private void showCastDialog() {
+        if (mPosition < 0 || mPosition >= mVideoList.size()) return;
+        VideoInfo video = mVideoList.get(mPosition);
+        File file = new File(video.getPath());
+        if (!file.isFile()) {
+            AppBubble.toast("当前本地视频文件不存在");
+            return;
+        }
+        CastListDialog dialog = new CastListDialog(this,
+                new CastVideo(video.getDisplayName(), Uri.fromFile(file).toString(),
+                        mVideoView == null ? 0 : mVideoView.getCurrentPosition()),
+                deviceId -> {
+                    if (mVideoView != null) mVideoView.pause();
+                });
+        DialogCoordinator.centerInHostView(this, dialog).show();
+    }
+
+    /** 本地字幕设置弹窗:构造最小 VodInfo(取本地文件名作为搜索词)后交给协调器 */
+    private void openLocalSubtitleDialog() {
+        if (mSubtitleCoordinator == null) return;
+        VodInfo vodInfo = new VodInfo();
+        VideoInfo info = mVideoList.get(mPosition);
+        vodInfo.name = info.getDisplayName();
+        mSubtitleCoordinator.openSubtitleDialog(vodInfo);
+    }
+
+    /** 本地视频 prepared 后:更新字幕上下文并装载(缓存外挂字幕优先,其次内置字幕,显隐随开关) */
+    private void initLocalSubtitleView() {
+        if (mSubtitleCoordinator == null) return;
+        VideoInfo info = mVideoList.get(mPosition);
+        // 以本地文件路径作为字幕缓存键,便于记住为该文件选过的外挂字幕
+        mSubtitleCoordinator.updateSubtitleContext(null, info.getPath());
+        mSubtitleCoordinator.initSubtitleView();
+    }
+
+    /** 初始化画中画(小窗)辅助器:本地播放器复用详情页同一套逻辑 */
+    private void initPipHelper() {
+        pipHelper = new PipHelper(this, new PipHelper.Callback() {
+            @Override
+            public boolean isPlaying() {
+                return mVideoView != null && mVideoView.isPlaying();
+            }
+
+            @Override
+            public void togglePlay() {
+                if (mController != null) {
+                    mController.togglePlay();
+                }
+            }
+
+            @Override
+            public void pause() {
+                if (mVideoView != null) {
+                    mVideoView.pause();
+                }
+            }
+
+            @Override
+            public void playPrevious() {
+                if (mPosition > 0) {
+                    mPosition--;
+                    play(true);
+                }
+            }
+
+            @Override
+            public void playNext() {
+                if (mPosition < mVideoList.size() - 1) {
+                    mPosition++;
+                    play(true);
+                }
+            }
+
+            @Override
+            public boolean isFullscreen() {
+                return true; // 本地播放始终全屏
+            }
+
+            @Override
+            public void enterFullscreen() {
+            }
+
+            @Override
+            public void exitFullscreen() {
+            }
+
+            @Override
+            public int[] getVideoSize() {
+                return mVideoView == null ? null : mVideoView.getVideoSize();
+            }
+
+            @Override
+            public void onClose() {
+                finish();
+                com.github.tvbox.osc.service.PlayService.cancelPlaybackNotification(LocalPlayActivity.this);
+            }
+        });
     }
 
     void initPlayerCfg() {
+        fillCfgDefaults();
+    }
+
+    /** 填入本地播放的全局默认配置(每次 play 前也调用,先复位再叠加该文件存档) */
+    private void fillCfgDefaults() {
         mVodPlayerCfg = new JSONObject();
         try {
-            if (!mVodPlayerCfg.has("pl")) {
-                mVodPlayerCfg.put("pl", Hawk.get(HawkConfig.PLAY_TYPE, 1));
-            }
-            if (!mVodPlayerCfg.has("pr")) {
-                mVodPlayerCfg.put("pr", Hawk.get(HawkConfig.PLAY_RENDER, 0));
-            }
-            if (!mVodPlayerCfg.has("ijk")) {
-                mVodPlayerCfg.put("ijk", Hawk.get(HawkConfig.IJK_CODEC, "硬解码"));
-            }
-            if (!mVodPlayerCfg.has("sc")) {
-                mVodPlayerCfg.put("sc", Hawk.get(HawkConfig.PLAY_SCALE, 0));
-            }
-            if (!mVodPlayerCfg.has("sp")) {
-                mVodPlayerCfg.put("sp", 1.0f);
-            }
-            if (!mVodPlayerCfg.has("st")) {
-                mVodPlayerCfg.put("st", 0);
-            }
-            if (!mVodPlayerCfg.has("et")) {
-                mVodPlayerCfg.put("et", 0);
-            }
-        } catch (Throwable th) {
-
+            mVodPlayerCfg.put("pl", PlayConfig.getPlayType());
+            mVodPlayerCfg.put("pr", PlayConfig.getRenderType());
+            mVodPlayerCfg.put("sc", PlayConfig.getScaleType());
+            mVodPlayerCfg.put("sp", 1.0f);
+            mVodPlayerCfg.put("st", 0);
+            mVodPlayerCfg.put("et", 0);
+        } catch (Throwable ignored) {
         }
         mController.setPlayerConfig(mVodPlayerCfg);
     }
 
     @Override
+    protected void onStart() {
+        super.onStart();
+        if (pipHelper != null) pipHelper.onActivityStarted();
+    }
+
+    @Override
     protected void onPause() {
         super.onPause();
-        mVideoView.pause();
+        // 进入小窗也会触发 onPause,此时不能暂停视频
+        // (PipHelper.isInPip:API 26 方法,低版本按"不在小窗"处理,避免 7.x 上 NoSuchMethodError)
+        if (!PipHelper.isInPip(this)) {
+            mVideoView.pause();
+        }
     }
 
     @Override
     protected void onResume() {
         super.onResume();
+        if (pipHelper != null) pipHelper.onActivityResumed(); // 点X关闭带回前台:立即补暂停
         mVideoView.resume();
     }
 
     @Override
+    public void onPictureInPictureModeChanged(boolean isInPictureInPictureMode) {
+        if (android.os.Build.VERSION.SDK_INT < android.os.Build.VERSION_CODES.O) return;
+        super.onPictureInPictureModeChanged(isInPictureInPictureMode);
+        if (mController != null) mController.setPictureInPicture(isInPictureInPictureMode);
+        if (pipHelper != null) pipHelper.onPictureInPictureModeChanged(isInPictureInPictureMode);
+    }
+
+    @Override
+    public void onConfigurationChanged(Configuration newConfig) {
+        super.onConfigurationChanged(newConfig);
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O && mController != null) {
+            mController.setPictureInPicture(isInPictureInPictureMode());
+        }
+        // 兜底:部分设备点X关闭不触发 onPictureInPictureModeChanged(false),由 PipHelper 延迟判断
+        if (pipHelper != null) pipHelper.onConfigurationChanged();
+        mBinding.getRoot().post(this::restoreFullscreenBars);
+    }
+
+    @Override
+    public void onWindowFocusChanged(boolean hasFocus) {
+        super.onWindowFocusChanged(hasFocus);
+        if (hasFocus) restoreFullscreenBars();
+    }
+
+    private void restoreFullscreenBars() {
+        if (mVideoView == null || !mVideoView.isFullScreen()
+                || (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O
+                && isInPictureInPictureMode())) return;
+        ImmersionBar.with(this)
+                .hideBar(BarHide.FLAG_HIDE_BAR)
+                .navigationBarColor(R.color.black)
+                .fitsSystemWindows(false)
+                .init();
+        // 与在线全屏播放一致，转屏后直接补回状态栏和导航栏的隐藏标志。
+        View decor = getWindow().getDecorView();
+        decor.setSystemUiVisibility(decor.getSystemUiVisibility()
+                | View.SYSTEM_UI_FLAG_FULLSCREEN
+                | View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
+                | View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY);
+        getWindow().setFlags(WindowManager.LayoutParams.FLAG_FULLSCREEN,
+                WindowManager.LayoutParams.FLAG_FULLSCREEN);
+    }
+
+    /** 进入画中画(小窗) */
+    public void enterPip() {
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O && pipHelper != null) {
+            pipHelper.enterPip();
+            mController.hideBottom();
+        }
+    }
+
+    @Override
     protected void onDestroy() {
+        if (mSubtitleCoordinator != null) {
+            mSubtitleCoordinator.release();
+            mSubtitleCoordinator = null;
+        }
         super.onDestroy();
-        unregisterReceiver(mBatteryReceiver);
+        if (mBatteryListener != null) {
+            com.github.tvbox.osc.state.SystemStateMonitor monitor = com.github.tvbox.osc.state.SystemStateMonitor.get();
+            if (monitor != null) monitor.unregister(mBatteryListener);
+            mBatteryListener = null;
+        }
         if (mVideoView != null) {
             mVideoView.release();
             mVideoView = null;
@@ -260,27 +594,19 @@ public class LocalPlayActivity extends BaseVbActivity<ActivityLocalPlayBinding> 
 
     @Override
     public void onBackPressed() {
+        if (DialogCoordinator.dismissSimpleHostPopupOnBack(this)) return;
         if (!mVideoView.onBackPressed()) {
             super.onBackPressed();
         }
     }
 
-    @Override
-    public void finish() {
-        super.finish();
-        EventBus.getDefault().post(new RefreshEvent(RefreshEvent.TYPE_REFRESH, ""));
-    }
-
     public void showAllSeriesDialog(){
-        mAllSeriesRightDialog = new XPopup.Builder(this)
-                .isViewMode(true)//隐藏导航栏(手势条)在dialog模式下会闪一下,改为view模式,但需处理onBackPress的隐藏,下方同理
-                .hasNavigationBar(false)
-                .popupHeight(com.blankj.utilcode.util.ScreenUtils.getScreenHeight())
-                .popupPosition(PopupPosition.Right)
-                .asCustom(new AllLocalSeriesDialog(this, convertLocalVideo(), (position, text) -> {
+        // 右侧抽屉:本地选集列表(全高),与在线选集抽屉一致;固定宽度 300,避免长文件名把抽屉撑宽(文字超出跑马灯滚动)
+        mAllSeriesRightDialog = DialogCoordinator.right(this,
+                new AllLocalSeriesDialog(this, convertLocalVideo(), (position, text) -> {
                     mPosition = position;
                     play(true);
-                }));
+                }), 300, true);
         mAllSeriesRightDialog.show();
     }
 

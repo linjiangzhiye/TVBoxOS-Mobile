@@ -12,6 +12,9 @@
     >
 
     <!-- 定义一个用于显示图像的 ImageView -->
+    <!-- 合集封面(120×72dp):圆角与"本地视频行的小图"同档 radius_thumb(2026-10-01)。
+         以前它跟卡片档(radius_card 16dp)、行内小图跟 radius_thumb(8dp),同一页两种圆角看着不一致
+         (用户口径"本地视频的图片位置的圆角显示怪怪的")。 -->
     <com.lihang.ShadowLayout
         android:id="@+id/iv_container"
         android:layout_width="120dp"
@@ -19,17 +22,27 @@
         android:layout_gravity="center_horizontal"
         android:baselineAlignBottom="true"
         app:clickable="false"
-        app:hl_cornerRadius="10dp"
+        app:hl_cornerRadius="@dimen/radius_thumb"
         app:hl_layoutBackground="@android:color/transparent"
         app:layout_constraintBottom_toBottomOf="parent"
         app:layout_constraintStart_toStartOf="parent"
         app:layout_constraintTop_toTopOf="parent">
 
+        <!-- 封面必须 centerCrop 铺满这个固定 120×72dp 的槽位,且不许"等比缩放留白":
+             缩略图是 MediaMetadataRetriever 取的关键帧,和槽位比例几乎不会一致(竖视频、宽幅视频尤其明显),
+             FIT_CENTER(此前 ImageView 没写 scaleType,走的就是这个默认值)会把画面缩成居中的一条,
+             背景层那份统一占位(灰底+居中图标)就从四周露出来 —— 观感就是"内容明明出来了,占位图还在"
+             (竖视频取到的帧偏宽,留白落在上下,于是成了"底部的占位图都显示出来了")。
+             clipToOutline 让实图跟着占位背景的圆角轮廓一起被裁,圆角卡片里不露直角。
+             src 不再放静态占位图(iv_video):统一占位只有一套,运行时一律由 FolderAdapter 经
+             PicassoLoad 铺在背景层(见 util/PosterPlaceholderDrawable)。 -->
         <ImageView
             android:id="@+id/iv"
             android:layout_width="match_parent"
             android:layout_height="match_parent"
-            android:src="@drawable/iv_video" />
+            android:background="@drawable/bg_thumb_round"
+            android:clipToOutline="true"
+            android:scaleType="centerCrop" />
 
     </com.lihang.ShadowLayout>
 

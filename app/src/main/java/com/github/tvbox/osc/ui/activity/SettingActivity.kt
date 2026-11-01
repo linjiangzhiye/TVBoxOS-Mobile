@@ -1,37 +1,49 @@
 package com.github.tvbox.osc.ui.activity
 
 import android.content.DialogInterface
+import android.content.Intent
 import android.os.Build
-import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.view.View
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.recyclerview.widget.DiffUtil
-import com.blankj.utilcode.util.ToastUtils
+import com.github.tvbox.osc.log.LogConfig
+import com.github.tvbox.osc.player.PlayerTrackHelper
+import com.github.tvbox.osc.player.api.PlayConfig
+import com.github.tvbox.osc.util.AppBubble
+import com.github.tvbox.osc.util.BackgroundPlaySettings
 import com.github.tvbox.osc.R
-import com.github.tvbox.osc.api.ApiConfig
 import com.github.tvbox.osc.base.BaseVbActivity
-import com.github.tvbox.osc.bean.IJKCode
-import com.github.tvbox.osc.constant.IntentKey
+import com.github.tvbox.osc.ui.startup.AppStartupCoordinator
 import com.github.tvbox.osc.databinding.ActivitySettingBinding
+import com.github.tvbox.osc.download.DownloadFacade
+import com.github.tvbox.osc.util.ThrottlePolicy
 import com.github.tvbox.osc.ui.adapter.SelectDialogAdapter
 import com.github.tvbox.osc.ui.adapter.SelectDialogAdapter.SelectDialogInterface
 import com.github.tvbox.osc.ui.dialog.BackupDialog
-import com.github.tvbox.osc.ui.dialog.LiveApiDialog
+import com.github.tvbox.osc.ui.dialog.LoadingAnimPreviewDialog
 import com.github.tvbox.osc.ui.dialog.SelectDialog
+import com.github.tvbox.osc.ui.dialog.TextTipDialog
+import com.github.tvbox.osc.ui.dialog.ThemePickerDialog
+import com.github.tvbox.osc.storage.theme.ThemeStore
 import com.github.tvbox.osc.util.FastClickCheckUtil
-import com.github.tvbox.osc.util.FileUtils
-import com.github.tvbox.osc.util.HawkConfig
+import com.github.tvbox.osc.util.HeavyTaskUtil
+import com.github.tvbox.osc.util.cache.CacheCatalog
+import com.github.tvbox.osc.util.cache.CacheSizeText
 import com.github.tvbox.osc.util.HistoryHelper
+import com.github.tvbox.osc.util.LoadingAnim
 import com.github.tvbox.osc.util.OkGoHelper
 import com.github.tvbox.osc.util.PlayerHelper
+import com.github.tvbox.osc.config.SystemConfig
 import com.github.tvbox.osc.util.Utils
+import com.blankj.utilcode.util.AppUtils
 import com.hjq.permissions.OnPermissionCallback
 import com.hjq.permissions.Permission
 import com.hjq.permissions.XXPermissions
 import com.lxj.xpopup.XPopup
-import com.orhanobut.hawk.Hawk
 import okhttp3.HttpUrl
-import tv.danmaku.ijk.media.player.IjkMediaPlayer
-import java.io.File
+import java.lang.ref.WeakReference
 
 /**
  * @author pj567
@@ -40,81 +52,132 @@ import java.io.File
  */
 class SettingActivity : BaseVbActivity<ActivitySettingBinding>() {
 
-    private var homeRec = Hawk.get(HawkConfig.HOME_REC, 0)
-    private var dnsOpt = Hawk.get(HawkConfig.DOH_URL, 0)
-    private var currentLiveApi = Hawk.get(HawkConfig.LIVE_URL, "")
+    private var homeRec = SystemConfig.getHomeRec()
+    private var dnsOpt = SystemConfig.getDohUrl()
+
+    /** init() 是否已跑完(onResume 刷新显示前要确认控件已就绪) */
+    private var inited = false
+    private var cacheSizeEpoch = 0
+
+    /** 主题颜色弹窗引用(编辑页返回后若它还开着,就地刷新列表) */
+    private var themeDialog: com.github.tvbox.osc.ui.dialog.ThemePickerDialog? = null
+    /** 进过主题编辑页并保存/删除过:弹窗关闭时要提交并重启生效(见 showThemePicker) */
+    private var themeEditedWhileOpen = false
+
+    /** 等着接收外部备份 ZIP 的备份弹窗(弹窗自己拉不了 ActivityResult,由本页代选并回传) */
+    private var pendingExternalBackup: BackupDialog? = null
+
+    /**
+     * 外部备份包只可能是 ZIP:按压缩包过滤,并带上 octet-stream ——
+     * 不少 ROM / 网盘下载下来的 zip 会被报成未知二进制,漏了它文件管理里就"什么都没有"。
+     */
+    private val externalBackupMimeTypes = arrayOf(
+        "application/zip", "application/x-zip-compressed", "application/octet-stream"
+    )
+
+    private val pickExternalBackup =
+        registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+            val dialog = pendingExternalBackup
+            pendingExternalBackup = null
+            // 取消选择:什么都不做,不能顺手拿别的备份顶替
+            if (uri == null) return@registerForActivityResult
+            if (dialog == null) {
+                AppBubble.toast("备份弹窗已关闭，请重新打开后再选择")
+                return@registerForActivityResult
+            }
+            dialog.onExternalBackupPicked(uri)
+        }
+
+    private companion object {
+        /** 主题编辑页请求码 */
+        const val REQ_THEME_EDITOR = 0x0E10
+    }
+
     override fun init() {
 
-        mBinding.titleBar.leftView.setOnClickListener { onBackPressed() }
-        mBinding.tvMediaCodec.text = Hawk.get(HawkConfig.IJK_CODEC, "")
+        // 返回键与系统返回同一口径(统一头部的返回行为在这里接管)
+        mBinding.titleBar.setOnBackClickListener { onBackPressed() }
 
-        mBinding.tvDns.text = OkGoHelper.dnsHttpsList[Hawk.get(HawkConfig.DOH_URL, 0)]
-        mBinding.tvHomeRec.text = getHomeRecName(Hawk.get(HawkConfig.HOME_REC, 0))
+        // 下载设置:下载方式 / 仅WiFi / 并发数 / 限速
+        initDownloadSettings()
+        // 加载动画:默认 / Glowing Fish(全局 LoadSir 加载动画,播放器与下载不受影响)
+        initLoadingAnimSetting()
+
+        // 用 dohLabel 而不是直接下标:老备份/历史版本里 doh_url 可能是 4~6,而当前列表只有 4 项
+        // (直接 dnsHttpsList[getDohUrl()] 会在设置页 IndexOutOfBounds 崩)
+        mBinding.tvDns.text = OkGoHelper.dohLabel(SystemConfig.getDohUrl())
+        mBinding.tvHomeRec.text = getHomeRecName(SystemConfig.getHomeRec())
         mBinding.tvHistoryNum.text =
-            HistoryHelper.getHistoryNumName(Hawk.get(HawkConfig.HISTORY_NUM, 0))
-        mBinding.tvScaleType.text = PlayerHelper.getScaleName(Hawk.get(HawkConfig.PLAY_SCALE, 0))
-        mBinding.tvPlay.text = PlayerHelper.getPlayerName(Hawk.get(HawkConfig.PLAY_TYPE, 0))
+            HistoryHelper.getHistoryNumName(SystemConfig.getHistoryNum())
+        mBinding.tvScaleType.text = PlayerHelper.getScaleName(PlayConfig.getScaleType())
+        mBinding.tvPlay.text = PlayerHelper.getPlayerName(PlayConfig.getPlayType())
         mBinding.tvRenderType.text =
-            PlayerHelper.getRenderName(Hawk.get(HawkConfig.PLAY_RENDER, 0))
+            PlayerHelper.getRenderName(PlayConfig.getRenderType())
 
-        mBinding.switchPrivateBrowsing.setChecked(Hawk.get(HawkConfig.PRIVATE_BROWSING, false))
+        mBinding.switchPrivateBrowsing.setChecked(SystemConfig.isPrivateBrowsing())
         mBinding.llPrivateBrowsing.setOnClickListener { view: View? ->
-            val newConfig = !Hawk.get(HawkConfig.PRIVATE_BROWSING, false)
+            val newConfig = !SystemConfig.isPrivateBrowsing()
             mBinding.switchPrivateBrowsing.setChecked(newConfig)
-            Hawk.put(HawkConfig.PRIVATE_BROWSING, newConfig)
+            SystemConfig.setPrivateBrowsing(newConfig)
         }
 
-        mBinding.llLiveApi.setOnClickListener {
-            XPopup.Builder(mContext)
-                .autoFocusEditText(false)
-                .asCustom(LiveApiDialog(this))
-                .show()
+        // 局域网服务的开关和运行状态统一在管理页显示。
+        mBinding.llLanAddress.setOnClickListener { openLanServicePage() }
+        com.github.tvbox.osc.theme.ThemeSweep.applyImageTint(
+            mBinding.ivLanManageArrow, R.color.text_foreground)
+
+        // 用户自行控制所有网站的证书校验，默认关闭忽略。
+        val ignoreSsl = SystemConfig.isIgnoreSslError()
+        mBinding.switchIgnoreSsl.setChecked(ignoreSsl)
+        mBinding.tvIgnoreSslTitle.setOnLongClickListener {
+            showSettingTip("忽略证书错误", R.string.setting_ignore_ssl_tip)
+            true
+        }
+        mBinding.llIgnoreSsl.setOnClickListener { view: View? ->
+            FastClickCheckUtil.check(view)
+            val newConfig = !SystemConfig.isIgnoreSslError()
+            SystemConfig.setIgnoreSslError(newConfig)
+            mBinding.switchIgnoreSsl.setChecked(newConfig)
+            AppBubble.toast(if (newConfig) "已忽略所有网站的证书错误，网络请求重启应用后生效"
+                else "已恢复证书校验，网络请求重启应用后生效")
         }
 
-        val defaultBgPlayTypePos = Hawk.get(HawkConfig.BACKGROUND_PLAY_TYPE, 0)
-        val bgPlayTypes = ArrayList<String>()
-        bgPlayTypes.add("关闭")
-        bgPlayTypes.add("开启")
-        bgPlayTypes.add("画中画")
-        mBinding.tvBackgroundPlayType.text = bgPlayTypes[defaultBgPlayTypePos]
+        // 直播源已移到「订阅管理 - 直播源」页(订阅自带的跟着订阅走、用户自建的在那儿加),
+        // 设置页不再提供入口,避免两处各配一份(2026-10-01)
+
+        mBinding.tvBackgroundPlayType.text = BackgroundPlaySettings.currentLabel()
         mBinding.llBackgroundPlay.setOnClickListener { view: View? ->
             FastClickCheckUtil.check(view)
+            val currentMode = BackgroundPlaySettings.currentMode()
             val dialog = SelectDialog<String>(this@SettingActivity)
             dialog.setTip("请选择")
             dialog.setAdapter(object : SelectDialogInterface<String?> {
                 override fun click(value: String?, pos: Int) {
-                    mBinding.tvBackgroundPlayType.text = value
-                    Hawk.put(HawkConfig.BACKGROUND_PLAY_TYPE, pos)
+                    BackgroundPlaySettings.select(this@SettingActivity, pos)
+                    mBinding.tvBackgroundPlayType.text = BackgroundPlaySettings.currentLabel()
                 }
 
                 override fun getDisplay(name: String?): String {
                     return name?:""
                 }
-            },SelectDialogAdapter.stringDiff, bgPlayTypes, defaultBgPlayTypePos)
+            },SelectDialogAdapter.stringDiff, BackgroundPlaySettings.MODES, currentMode)
             dialog.show()
         }
 
-        mBinding.tvSpeed.text = Hawk.get(HawkConfig.VIDEO_SPEED, 2.0f).toString()
+        mBinding.tvSpeed.text = "${PlayConfig.getVideoSpeed()}x"
         mBinding.llPressSpeed.setOnClickListener {
-            val types = ArrayList<String>()
-            types.add("2.0")
-            types.add("3.0")
-            types.add("4.0")
-            types.add("5.0")
-            types.add("6.0")
-            types.add("8.0")
-            types.add("10.0")
-            val defaultPos = types.indexOf(Hawk.get(HawkConfig.VIDEO_SPEED, 2.0f).toString())
+            val types = PlayConfig.getVideoSpeedOptions().map { it.toString() }
+            val defaultPos = types.indexOf(PlayConfig.getVideoSpeed().toString())
             val dialog = SelectDialog<String>(this@SettingActivity)
             dialog.setTip("请选择")
             dialog.setAdapter(object : SelectDialogInterface<String?> {
                 override fun click(value: String?, pos: Int) {
-                    Hawk.put(HawkConfig.VIDEO_SPEED, value?.toFloat())
-                    mBinding.tvSpeed.text = value
+                    PlayConfig.setVideoSpeed(value?.toFloat() ?: PlayConfig.DEFAULT_VIDEO_SPEED)
+                    mBinding.tvSpeed.text = "${PlayConfig.getVideoSpeed()}x"
                 }
 
                 override fun getDisplay(name: String?): String {
-                    return name ?: ""
+                    return name?.let { "${it}x" } ?: ""
                 }
             }, SelectDialogAdapter.stringDiff, types, defaultPos)
             dialog.show()
@@ -123,28 +186,26 @@ class SettingActivity : BaseVbActivity<ActivitySettingBinding>() {
         mBinding.llBackup.setOnClickListener { v: View? ->
             FastClickCheckUtil.check(v)
             if (XXPermissions.isGranted(this@SettingActivity, Permission.MANAGE_EXTERNAL_STORAGE)) {
-                val dialog = BackupDialog(this@SettingActivity)
-                dialog.show()
+                showBackupDialog()
             } else {
                 XXPermissions.with(this@SettingActivity)
                     .permission(Permission.MANAGE_EXTERNAL_STORAGE)
                     .request(object : OnPermissionCallback {
                         override fun onGranted(permissions: List<String>, all: Boolean) {
                             if (all) {
-                                val dialog = BackupDialog(this@SettingActivity)
-                                dialog.show()
+                                showBackupDialog()
                             }
                         }
 
                         override fun onDenied(permissions: List<String>, never: Boolean) {
                             if (never) {
-                                ToastUtils.showLong("获取存储权限失败,请在系统设置中开启")
+                                AppBubble.toast("请在系统设置中授予存储权限")
                                 XXPermissions.startPermissionActivity(
                                     this@SettingActivity,
                                     permissions
                                 )
                             } else {
-                                ToastUtils.showShort("获取存储权限失败")
+                                AppBubble.toast("获取存储权限失败")
                             }
                         }
                     })
@@ -153,16 +214,16 @@ class SettingActivity : BaseVbActivity<ActivitySettingBinding>() {
 
         mBinding.llDns.setOnClickListener { v: View? ->
             FastClickCheckUtil.check(v)
-            val dohUrl = Hawk.get(HawkConfig.DOH_URL, 0)
+            val dohUrl = SystemConfig.getDohUrl()
             val dialog = SelectDialog<String>(this@SettingActivity)
             dialog.setTip("请选择安全DNS")
             dialog.setAdapter(object : SelectDialogInterface<String?> {
                 override fun click(value: String?, pos: Int) {
                     mBinding.tvDns.text = OkGoHelper.dnsHttpsList[pos]
-                    Hawk.put(HawkConfig.DOH_URL, pos)
-                    val url = OkGoHelper.getDohUrl(pos)
-                    OkGoHelper.dnsOverHttps.setUrl(if (url.isEmpty()) null else HttpUrl.get(url))
-                    IjkMediaPlayer.toggleDotPort(pos > 0)
+                    SystemConfig.setDohUrl(pos)
+                    // 幂等:门面变更订阅里已复核并重建过一次,这里再调一次只为"设置页自身也直接触发"
+                    // (值未变时 OkGoHelper 内部早退,不会重建连接池)
+                    OkGoHelper.refreshDnsOverHttps()
                 }
 
                 override fun getDisplay(name: String?): String {
@@ -172,44 +233,9 @@ class SettingActivity : BaseVbActivity<ActivitySettingBinding>() {
             dialog.show()
         }
 
-        mBinding.llMediaCodec.setOnClickListener { v: View? ->
-            val ijkCodes = ApiConfig.get().ijkCodes
-            if (ijkCodes == null || ijkCodes.size == 0) return@setOnClickListener
-            FastClickCheckUtil.check(v)
-            var defaultPos = 0
-            val ijkSel = Hawk.get(HawkConfig.IJK_CODEC, "")
-            for (j in ijkCodes.indices) {
-                if (ijkSel == ijkCodes[j].name) {
-                    defaultPos = j
-                    break
-                }
-            }
-            val dialog = SelectDialog<IJKCode>(this@SettingActivity)
-            dialog.setTip("请选择IJK解码")
-            dialog.setAdapter(object : SelectDialogInterface<IJKCode?> {
-                override fun click(value: IJKCode?, pos: Int) {
-                    value?.selected(true)
-                    mBinding.tvMediaCodec.text = value?.name
-                }
-
-                override fun getDisplay(code: IJKCode?): String {
-                    return code?.name ?: ""
-                }
-            }, object : DiffUtil.ItemCallback<IJKCode>() {
-                override fun areItemsTheSame(oldItem: IJKCode, newItem: IJKCode): Boolean {
-                    return oldItem === newItem
-                }
-
-                override fun areContentsTheSame(oldItem: IJKCode, newItem: IJKCode): Boolean {
-                    return oldItem.name.contentEquals(newItem.name)
-                }
-            }, ijkCodes, defaultPos)
-            dialog.show()
-        }
-
         mBinding.llScale.setOnClickListener { v: View? ->
             FastClickCheckUtil.check(v)
-            val defaultPos = Hawk.get(HawkConfig.PLAY_SCALE, 0)
+            val defaultPos = PlayConfig.getScaleType()
             val players = ArrayList<Int>()
             players.add(0)
             players.add(1)
@@ -221,7 +247,7 @@ class SettingActivity : BaseVbActivity<ActivitySettingBinding>() {
             dialog.setTip("请选择画面缩放")
             dialog.setAdapter(object : SelectDialogInterface<Int?> {
                 override fun click(value: Int?, pos: Int) {
-                    Hawk.put(HawkConfig.PLAY_SCALE, value)
+                    PlayConfig.setScaleType(value ?: 0)
                     mBinding.tvScaleType.text = value?.let { PlayerHelper.getScaleName(it) }
                 }
 
@@ -242,7 +268,7 @@ class SettingActivity : BaseVbActivity<ActivitySettingBinding>() {
 
         mBinding.llPlay.setOnClickListener { v: View? ->
             FastClickCheckUtil.check(v)
-            val playerType = Hawk.get(HawkConfig.PLAY_TYPE, 0)
+            val playerType = PlayConfig.getPlayType()
             var defaultPos = 0
             val players = PlayerHelper.getExistPlayerTypes()
             val renders = ArrayList<Int>()
@@ -253,11 +279,11 @@ class SettingActivity : BaseVbActivity<ActivitySettingBinding>() {
                 }
             }
             val dialog = SelectDialog<Int>(this@SettingActivity)
-            dialog.setTip("请选择默认播放器")
+            dialog.setTip("播放器")
             dialog.setAdapter(object : SelectDialogInterface<Int?> {
                 override fun click(value: Int?, pos: Int) {
                     val thisPlayerType = players[pos]
-                    Hawk.put(HawkConfig.PLAY_TYPE, thisPlayerType)
+                    PlayConfig.setPlayType(thisPlayerType)
                     mBinding.tvPlay.text = PlayerHelper.getPlayerName(thisPlayerType)
                     PlayerHelper.init()
                 }
@@ -279,7 +305,7 @@ class SettingActivity : BaseVbActivity<ActivitySettingBinding>() {
 
         mBinding.llRender.setOnClickListener { v: View? ->
             FastClickCheckUtil.check(v)
-            val defaultPos = Hawk.get(HawkConfig.PLAY_RENDER, 0)
+            val defaultPos = PlayConfig.getRenderType()
             val renders = ArrayList<Int>()
             renders.add(0)
             renders.add(1)
@@ -287,7 +313,7 @@ class SettingActivity : BaseVbActivity<ActivitySettingBinding>() {
             dialog.setTip("请选择默认渲染方式")
             dialog.setAdapter(object : SelectDialogInterface<Int?> {
                 override fun click(value: Int?, pos: Int) {
-                    Hawk.put(HawkConfig.PLAY_RENDER, value)
+                    PlayConfig.setRenderType(value ?: 0)
                     mBinding.tvRenderType.text = PlayerHelper.getRenderName(value?:0)
                     PlayerHelper.init()
                 }
@@ -308,7 +334,7 @@ class SettingActivity : BaseVbActivity<ActivitySettingBinding>() {
         }
         mBinding.llHomeRec.setOnClickListener { v: View? ->
             FastClickCheckUtil.check(v)
-            val defaultPos = Hawk.get(HawkConfig.HOME_REC, 0)
+            val defaultPos = SystemConfig.getHomeRec()
             val types = ArrayList<Int>()
             types.add(0)
             types.add(1)
@@ -317,7 +343,7 @@ class SettingActivity : BaseVbActivity<ActivitySettingBinding>() {
             dialog.setTip("主页内容显示")
             dialog.setAdapter(object : SelectDialogInterface<Int?> {
                 override fun click(value: Int?, pos: Int) {
-                    Hawk.put(HawkConfig.HOME_REC, value)
+                    SystemConfig.setHomeRec(value ?: 0)
                     mBinding.tvHomeRec.text = getHomeRecName(value?:0)
                 }
 
@@ -338,7 +364,7 @@ class SettingActivity : BaseVbActivity<ActivitySettingBinding>() {
         
         mBinding.llHistoryNum.setOnClickListener { v: View? ->
             FastClickCheckUtil.check(v)
-            val defaultPos = Hawk.get(HawkConfig.HISTORY_NUM, 0)
+            val defaultPos = SystemConfig.getHistoryNum()
             val types = ArrayList<Int>()
             types.add(0)
             types.add(1)
@@ -347,7 +373,7 @@ class SettingActivity : BaseVbActivity<ActivitySettingBinding>() {
             dialog.setTip("保留历史记录数量")
             dialog.setAdapter(object : SelectDialogInterface<Int?> {
                 override fun click(value: Int?, pos: Int) {
-                    Hawk.put(HawkConfig.HISTORY_NUM, value)
+                    SystemConfig.setHistoryNum(value ?: 0)
                     mBinding.tvHistoryNum.text = HistoryHelper.getHistoryNumName(value?:0)
                 }
 
@@ -366,103 +392,378 @@ class SettingActivity : BaseVbActivity<ActivitySettingBinding>() {
             dialog.show()
         }
         mBinding.llClearCache.setOnClickListener { view: View ->
-            XPopup.Builder(this)
-                .isDarkTheme(Utils.isDarkTheme())
-                .asConfirm("提示", "确定清空吗？") { onClickClearCache(view) }.show()
+            FastClickCheckUtil.check(view)
+            jumpActivity(CacheManagementActivity::class.java)
+        }
+        // 启动时自动检查更新(默认开):开关只记配置,触发时机见 HomeFragment(上次看到气泡消失后)
+        mBinding.switchAutoCheckUpdate.setChecked(SystemConfig.isAutoCheckUpdate())
+        mBinding.llAutoCheckUpdate.setOnClickListener { view: View? ->
+            FastClickCheckUtil.check(view)
+            val newVal = !SystemConfig.isAutoCheckUpdate()
+            SystemConfig.setAutoCheckUpdate(newVal)
+            mBinding.switchAutoCheckUpdate.setChecked(newVal)
         }
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) {
             mBinding.llTheme.visibility = View.GONE
         }
-        val oldTheme = Hawk.get(HawkConfig.THEME_TAG, 0)
-        val themes = arrayOf("跟随系统", "浅色", "深色")
-        mBinding.tvTheme.text = themes[oldTheme]
+        updateThemeValue()
+        // 用法说明放标题长按(横排设置行塞不下长说明,与「忽略证书错误」等同一套口径)
+        mBinding.tvThemeTitle.setOnLongClickListener {
+            showSettingTip("主题颜色", R.string.setting_theme_tip)
+            true
+        }
         mBinding.llTheme.setOnClickListener(View.OnClickListener { view: View? ->
             FastClickCheckUtil.check(view)
-            val types = ArrayList<Int>()
-            types.add(0)
-            types.add(1)
-            types.add(2)
-            val dialog = SelectDialog<Int>(this@SettingActivity)
-            dialog.setTip("请选择")
-            dialog.setAdapter(object : SelectDialogInterface<Int?> {
-                override fun click(value: Int?, pos: Int) {
-                    mBinding.tvTheme.text = themes[value?:0]
-                    Hawk.put(HawkConfig.THEME_TAG, value)
+            showThemePicker()
+        })
+
+        // 背景图设置(二级页):展示当前背景图,支持换图/拖动缩放位置/调遮罩透明度/恢复默认
+        updatePageBackgroundValue()
+        updatePageBackgroundVisibility()
+        mBinding.llPageBackground.setOnClickListener(View.OnClickListener { view: View? ->
+            FastClickCheckUtil.check(view)
+            jumpActivity(BackgroundSettingActivity::class.java)
+        })
+
+        updateVideoPurifyModeUi()
+        mBinding.llVideoPurify.setOnClickListener { v: View? ->
+            FastClickCheckUtil.check(v)
+            val modes = resources.getStringArray(R.array.video_purify_modes).toList()
+            val dialog = SelectDialog<String>(this@SettingActivity)
+            dialog.setTip("广告过滤")
+            dialog.setAdapter(object : SelectDialogInterface<String?> {
+                override fun click(value: String?, pos: Int) {
+                    dialog.cancel()
+                    PlayConfig.setVideoPurifyMode(pos)
+                    updateVideoPurifyModeUi()
                 }
 
-                override fun getDisplay(value: Int?): String {
-                    return themes[value?:0]
-                }
-            }, object : DiffUtil.ItemCallback<Int>() {
-                override fun areItemsTheSame(oldItem: Int, newItem: Int): Boolean {
-                    return oldItem == newItem
+                override fun getDisplay(name: String?): String = name ?: ""
+            }, SelectDialogAdapter.stringDiff, modes, PlayConfig.getVideoPurifyMode())
+            dialog.show()
+        }
+        mBinding.llPlaybackCacheSetting.setOnClickListener { v: View? ->
+            FastClickCheckUtil.check(v)
+            jumpActivity(PlaybackCacheActivity::class.java)
+        }
+        // 业务日志开关(默认关闭):走 LogConfig 配置门面(查询+发通知+订阅)。
+        // 只控 Room 结构化业务日志;错误日志(logcat)常驻记录,不随此开关。
+        mBinding.switchSubscriptionLog.setChecked(LogConfig.isEnabled())
+        mBinding.llSubscriptionLog.setOnClickListener { v: View? ->
+            FastClickCheckUtil.check(v)
+            val newConfig = !LogConfig.isEnabled()
+            mBinding.switchSubscriptionLog.setChecked(newConfig)
+            LogConfig.setEnabled(newConfig) // 内部持久化 + 广播变更
+        }
+        // 查看日志入口常显:错误日志常驻,开关关闭也能看
+        mBinding.llSubscriptionLogView.setOnClickListener { v: View? ->
+            FastClickCheckUtil.check(v)
+            jumpActivity(LogActivity::class.java)
+        }
+        inited = true
+    }
+
+    /** 下载设置分组:下载方式走 SystemConfig；内置下载参数统一走 DownloadFacade。 */
+    private fun initDownloadSettings() {
+        mBinding.switchInternalDownload.setChecked(SystemConfig.isInternalDownloadEnabled())
+        refreshInternalDownloadSettingsVisibility()
+        mBinding.llInternalDownload.setOnClickListener { view: View ->
+            FastClickCheckUtil.check(view)
+            val enabled = !SystemConfig.isInternalDownloadEnabled()
+            SystemConfig.setInternalDownloadEnabled(enabled)
+            mBinding.switchInternalDownload.setChecked(enabled)
+            refreshInternalDownloadSettingsVisibility()
+        }
+        // 磁力/荐片通道开关(默认关闭:涉及伪造设备标识/硬编码凭证/仅 ARM so)
+        mBinding.switchThunderP2p.setChecked(SystemConfig.isThunderP2pEnabled())
+        mBinding.llThunderP2p.setOnClickListener { view: View ->
+            FastClickCheckUtil.check(view)
+            val enabled = !SystemConfig.isThunderP2pEnabled()
+            SystemConfig.setThunderP2pEnabled(enabled)
+            mBinding.switchThunderP2p.setChecked(enabled)
+            AppBubble.toast("磁力/荐片通道已" + if (enabled) "开启" else "关闭")
+        }
+        // 仅 Wi-Fi 下载开关
+        mBinding.switchDlWifiOnly.setChecked(DownloadFacade.get().isWifiOnly())
+        mBinding.llDlWifiOnly.setOnClickListener {
+            val newVal = !DownloadFacade.get().isWifiOnly()
+            DownloadFacade.get().setWifiOnly(newVal)
+            mBinding.switchDlWifiOnly.setChecked(newVal)
+            AppBubble.toast("仅 Wi-Fi 下载已" + if (newVal) "开启" else "关闭")
+        }
+        // 同时下载任务数(**1-3**;2026-10-01 上限由 5 收到 3,与下载页齿轮弹窗同一事实源)
+        val refreshConcurrent = {
+            mBinding.tvDlConcurrent.text = DownloadFacade.get().getMaxConcurrent().toString() + " 个"
+        }
+        refreshConcurrent()
+        mBinding.llDlConcurrent.setOnClickListener {
+            FastClickCheckUtil.check(it)
+            val types = ArrayList<String>()
+            for (i in 1..3) types.add("并发 " + i)
+            val defaultPos = DownloadFacade.get().getMaxConcurrent().coerceIn(1, 3) - 1
+            val dialog = SelectDialog<String>(this@SettingActivity)
+            dialog.setTip("选择同时下载任务数")
+            dialog.setAdapter(object : SelectDialogInterface<String?> {
+                override fun click(value: String?, pos: Int) {
+                    DownloadFacade.get().setMaxConcurrent(pos + 1)
+                    refreshConcurrent()
                 }
 
-                override fun areContentsTheSame(oldItem: Int, newItem: Int): Boolean {
-                    return oldItem == newItem
+                override fun getDisplay(name: String?): String {
+                    return name ?: ""
                 }
-            }, types, oldTheme)
+            }, SelectDialogAdapter.stringDiff, types, defaultPos)
+            dialog.show()
+        }
+        // 下载限速(不限速 / 512KB/s / 1MB/s / 2MB/s / 5MB/s):与下载页齿轮弹窗同一事实源,
+        // 改完对运行中的任务当场生效(见 DownloadPolicy.setSpeedLimitBytesPerSec)
+        val refreshSpeed = {
+            mBinding.tvDlSpeed.text = ThrottlePolicy.label(DownloadFacade.get().getSpeedLimitBytesPerSec())
+        }
+        refreshSpeed()
+        mBinding.llDlSpeed.setOnClickListener {
+            FastClickCheckUtil.check(it)
+            val labels = ArrayList<String>()
+            for (bps in ThrottlePolicy.PRESET_BYTES_PER_SEC) labels.add(ThrottlePolicy.label(bps))
+            val defaultPos = ThrottlePolicy.presetIndex(DownloadFacade.get().getSpeedLimitBytesPerSec())
+            val dialog = SelectDialog<String>(this@SettingActivity)
+            dialog.setTip("选择下载限速(不限速即跑满带宽)")
+            dialog.setAdapter(object : SelectDialogInterface<String?> {
+                override fun click(value: String?, pos: Int) {
+                    val bps = ThrottlePolicy.PRESET_BYTES_PER_SEC[pos]
+                    DownloadFacade.get().setSpeedLimitBytesPerSec(bps)
+                    refreshSpeed()
+                }
+
+                override fun getDisplay(name: String?): String {
+                    return name ?: ""
+                }
+            }, SelectDialogAdapter.stringDiff, labels, defaultPos)
+            dialog.show()
+        }
+    }
+
+    private fun refreshInternalDownloadSettingsVisibility() {
+        val visibility = if (SystemConfig.isInternalDownloadEnabled()) View.VISIBLE else View.GONE
+        mBinding.llDlWifiOnly.visibility = visibility
+        mBinding.llDlConcurrent.visibility = visibility
+        mBinding.llDlSpeed.visibility = visibility
+    }
+
+    /** 加载动画选项:默认 + assets/loading/ 下的动画文件夹(每个文件夹一个动画 + config.json) */
+    private fun initLoadingAnimSetting() {
+        val files = LoadingAnim.getAvailableAnimFiles()
+        val display = ArrayList<String>()
+        for (f in files) display.add(LoadingAnim.displayName(f))
+        val refresh = {
+            mBinding.tvLoadingAnim.text = LoadingAnim.displayName(LoadingAnim.getAnimName())
+        }
+        refresh()
+        mBinding.llLoadingAnim.setOnClickListener {
+            FastClickCheckUtil.check(it)
+            // 当前选中项定位到选项列表(找不到默认第0项)
+            var defaultPos = 0
+            val cur = LoadingAnim.getAnimName()
+            for (i in files.indices) {
+                if (files[i] == cur || LoadingAnim.displayName(files[i]) == LoadingAnim.displayName(cur)) {
+                    defaultPos = i
+                    break
+                }
+            }
+            // 切换前的动画名:弹窗关闭后若有变化,与主题切换一致,重启主页立即生效
+            val oldAnim = LoadingAnim.getAnimName()
+            val dialog = SelectDialog<String>(this@SettingActivity)
+            dialog.setTip("选择加载动画（长按预览）")
+            dialog.setAdapter(object : SelectDialogInterface<String?> {
+                override fun click(value: String?, pos: Int) {
+                    // 存动画文件夹名:默认存空串(回退默认),其余存文件夹名
+                    val selected = files[pos]
+                    SystemConfig.setLoadingAnim(if (selected == LoadingAnim.DEFAULT_NAME) "" else selected)
+                    refresh()
+                }
+
+                override fun getDisplay(name: String?): String {
+                    return name ?: ""
+                }
+            }, SelectDialogAdapter.stringDiff, display, defaultPos)
+            dialog.setOnItemLongClickListener { _, pos, _ ->
+                if (pos !in files.indices) return@setOnItemLongClickListener false
+                LoadingAnimPreviewDialog.show(this@SettingActivity, files[pos], display[pos])
+                true
+            }
+            // 与主题颜色切换同一套"重启"逻辑:值有变化时带缓存配置重载主页,立即生效,不再提示"下次启动生效"
             dialog.setOnDismissListener { dialog1: DialogInterface? ->
-                if (oldTheme != Hawk.get(HawkConfig.THEME_TAG, 0)) {
-                    Utils.initTheme()
-                    val bundle = Bundle()
-                    bundle.putBoolean(IntentKey.CACHE_CONFIG_CHANGED, true)
-                    jumpActivity(MainActivity::class.java, bundle)
+                if (oldAnim != LoadingAnim.getAnimName()) {
+                    AppStartupCoordinator.launchInternalReload(this@SettingActivity, true)
                 }
             }
             dialog.show()
-        })
-
-        mBinding.switchVideoPurify.setChecked(Hawk.get(HawkConfig.VIDEO_PURIFY, true))
-        // toggle purify video -------------------------------------
-        mBinding.llVideoPurify.setOnClickListener { v: View? ->
-            FastClickCheckUtil.check(v)
-            val newConfig = !Hawk.get(HawkConfig.VIDEO_PURIFY, true)
-            mBinding.switchVideoPurify.setChecked(newConfig)
-            Hawk.put(HawkConfig.VIDEO_PURIFY, newConfig)
-        }
-        mBinding.switchIjkCachePlay.setChecked(Hawk.get(HawkConfig.IJK_CACHE_PLAY, false))
-        mBinding.llIjkCachePlay.setOnClickListener { v: View? ->
-            FastClickCheckUtil.check(v)
-            val newConfig = !Hawk.get(HawkConfig.IJK_CACHE_PLAY, false)
-            mBinding.switchIjkCachePlay.setChecked(newConfig)
-            Hawk.put(HawkConfig.IJK_CACHE_PLAY, newConfig)
         }
     }
 
     override fun onBackPressed() {
-        if (homeRec != Hawk.get(HawkConfig.HOME_REC, 0) || dnsOpt != Hawk.get(
-                HawkConfig.DOH_URL,
-                0
-            ) || currentLiveApi != Hawk.get(HawkConfig.LIVE_URL, "")
-        ) { // 首页类型/dns/doh/直播源有更改,需重载页面
-            //AppManager.getInstance().finishAllActivity()
-            if (currentLiveApi == Hawk.get(HawkConfig.LIVE_URL, "")) { //未更改直播源,不需重载api等
-                val bundle = Bundle()
-                bundle.putBoolean(IntentKey.CACHE_CONFIG_CHANGED, true)
-                jumpActivity(MainActivity::class.java, bundle)
-            } else {
-                jumpActivity(MainActivity::class.java)
-            }
+        if (homeRec != SystemConfig.getHomeRec() || dnsOpt != SystemConfig.getDohUrl()
+        ) { // 首页类型/dns/doh 有更改,需重载页面(直播源已移到订阅管理页,不在这里比)
+            AppStartupCoordinator.launchInternalReload(this, true)
             overridePendingTransition(R.anim.fade_in, R.anim.fade_out)
         } else {
             super.onBackPressed()
         }
     }
 
-    private fun onClickClearCache(v: View) {
-        FastClickCheckUtil.check(v)
-        val cachePath = FileUtils.getCachePath()
-        val cacheDir = File(cachePath)
-        if (!cacheDir.exists()) return
-        Thread {
-            try {
-                FileUtils.cleanDirectory(cacheDir)
-            } catch (e: Exception) {
-                e.printStackTrace()
+    override fun onResume() {
+        super.onResume()
+        refreshCacheSize()
+        mBinding.tvBackgroundPlayType.text = BackgroundPlaySettings.currentLabel()
+        updateVideoPurifyModeUi()
+        // 背景图设置页返回后刷新取值(默认/自定义)
+        if (inited) {
+            mBinding.tvSpeed.text = "${PlayConfig.getVideoSpeed()}x"
+            mBinding.switchInternalDownload.setChecked(SystemConfig.isInternalDownloadEnabled())
+            refreshInternalDownloadSettingsVisibility()
+            updatePageBackgroundValue()
+            updatePageBackgroundVisibility()
+            updateThemeValue()
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // 主题颜色:弹窗(列表 + 自定义入口) + 编辑页 + 关闭弹窗后重启生效
+    // ------------------------------------------------------------------
+
+    /** 设置页那一行显示的当前主题名(内置亮/暗显示"浅色/深色",自定义显示主题名) */
+    private fun updateThemeValue() {
+        mBinding.tvTheme.text = ThemeStore.activeDisplayName()
+    }
+
+    /**
+     * 主题颜色弹窗。<b>一切改动都只在弹窗关闭后一次性提交并重启生效</b>(用户口径):
+     * 主题切换本身要重启 App,提前生效会看到"弹窗还开着、界面已经变了"的半生效状态;
+     * 删除正在使用的主题更是必须等选中项一起落定。
+     */
+    private fun showThemePicker() {
+        val dialog = ThemePickerDialog(this)
+        dialog.setListener(object : ThemePickerDialog.Listener {
+            override fun onEditTheme(def: com.github.tvbox.osc.bean.theme.ThemeDef) {
+                startThemeEditor(def.id)
             }
-        }.start()
-        ToastUtils.showLong("缓存已清空")
+
+            override fun onCreateTheme() {
+                startThemeEditor("")
+            }
+        })
+        dialog.setOnDismissListener {
+            val changed = dialog.commitIfDirty()
+            if (changed || themeEditedWhileOpen) {
+                themeEditedWhileOpen = false
+                updateThemeValue()
+                applyThemeAndRestart()
+            }
+        }
+        dialog.show()
+        themeDialog = dialog
+    }
+
+    /** 进主题编辑页(带结果返回:保存/删除过就要重新提交并重启) */
+    private fun startThemeEditor(themeId: String) {
+        val intent = Intent(this, ThemeEditorActivity::class.java)
+        intent.putExtra(ThemeEditorActivity.EXTRA_THEME_ID, themeId)
+        startActivityForResult(intent, REQ_THEME_EDITOR)
+    }
+
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        super.onActivityResult(requestCode, resultCode, data)
+        if (requestCode != REQ_THEME_EDITOR) return
+        updateThemeValue()
+        // 编辑页保存/删除过:主题文件已经落盘,但"生效"要回到这里统一走重启。
+        // 弹窗若还在(XPopup 不会因为跳 Activity 自动关)就地刷新列表;不在了就重新弹一次 ——
+        // 用户口径是"保存后返回上级页面,主题弹窗还在,新主题插在自定义入口前面"。
+        if (resultCode == RESULT_OK) themeEditedWhileOpen = true
+        val popup = themeDialog
+        if (popup != null && popup.isShow) {
+            popup.refreshList()
+        } else if (resultCode == RESULT_OK) {
+            showThemePicker()
+        }
+    }
+
+    /**
+     * 生效:**真重启进程**。
+     *
+     * <p>以前这里是"带标志重载主页"({@code jumpActivity(MainActivity)}),只在**内置浅色/深色**之间切换时才够用 ——
+     * 那条链路靠 AppCompat 夜间模式重建 Activity。而**自定义主题**靠的是运行时换肤层:
+     * 布局里的 {@code @color} 是 inflate 那一刻定下的,进程和所有已建视图都还在时,
+     * 光"重载主页"只会让页面继续按旧调色板画 —— 用户口径就是
+     * "我改了主题、App 也重启了,卡片和弹窗一点变化都没有"(把页面底色改成大红也不变)。
+     * 所以这里改成真重启,与弹窗文案「关闭后会重启应用生效」一致。
+     *
+     * <p>配置不会丢:选择关系在 {@link ThemePickerDialog#commitIfDirty()} 里已**同步落盘**
+     * ({@code PrefsDataStore} 的写是阻塞式),重启后按新配置解析(见 {@code ThemeRuntime.install})。
+     * 主题没有改订阅，只给这次真重启标记一次配置缓存快速路径，避免主页额外等待配置网络拉取。
+     */
+    private fun applyThemeAndRestart() {
+        Utils.initTheme()
+        if (packageManager.getLaunchIntentForPackage(packageName) == null) {
+            AppBubble.toast("主题已保存，自动重启失败，请手动重开应用")
+            return
+        }
+        try {
+            SystemConfig.markInternalRestart()
+            SystemConfig.markThemeRestartUseCache()
+            AppUtils.relaunchApp(true)
+        } catch (failure: Throwable) {
+            android.util.Log.w("MBox-Startup", "主题生效重启失败", failure)
+        }
+        // relaunchApp(true) 成功时结束当前进程；若返回则未完成重启。
+        SystemConfig.clearInternalRestart()
+        SystemConfig.clearThemeRestartUseCache()
+        AppBubble.toast("主题已保存，自动重启失败，请手动重开应用")
+    }
+
+    private fun updateVideoPurifyModeUi() {
+        val label = resources.getStringArray(R.array.video_purify_modes)[PlayConfig.getVideoPurifyMode()]
+        mBinding.tvVideoPurifyMode.text = label
+        mBinding.llVideoPurify.contentDescription = "广告过滤，$label"
+    }
+
+    /** 背景图取值:默认(跟随主题) / 自定义(用户自己设过,含显式纯色) */
+    private fun updatePageBackgroundValue() {
+        mBinding.tvPageBackground.text =
+            if (SystemConfig.isPageBackgroundUserSet()) "自定义" else "默认"
+    }
+
+    /**
+     * 背景图入口只对内置主题(含目录预设)显示:用户主题自带背景(在主题编辑页设),
+     * 生效时盖过全局背景图,全局入口留着只会和主题自己的背景打架。
+     */
+    private fun updatePageBackgroundVisibility() {
+        val active = ThemeStore.resolveActive()
+        mBinding.llPageBackground.visibility =
+            if (active != null && ThemeStore.isUserTheme(active.id)) View.GONE else View.VISIBLE
+    }
+
+    private fun refreshCacheSize() {
+        val epoch = ++cacheSizeEpoch
+        mBinding.tvCacheSize.text = "计算中…"
+        val catalog = CacheCatalog(applicationContext)
+        val pageRef = WeakReference(this)
+        HeavyTaskUtil.getBigTaskExecutorService().execute {
+            val size = runCatching { catalog.scan() }
+            Handler(Looper.getMainLooper()).post {
+                val page = pageRef.get() ?: return@post
+                if (epoch == page.cacheSizeEpoch && !page.isFinishing && !page.isDestroyed) {
+                    page.mBinding.tvCacheSize.text = size.fold(
+                        { if (it.logSizeUnavailable) "部分读取失败" else CacheSizeText.format(it.totalBytes) },
+                        { "读取失败" }
+                    )
+                }
+            }
+        }
+    }
+
+    override fun onDestroy() {
+        cacheSizeEpoch++
+        super.onDestroy()
     }
 
     private fun getHomeRecName(type: Int): String {
@@ -472,4 +773,25 @@ class SettingActivity : BaseVbActivity<ActivitySettingBinding>() {
             else -> "关闭"
         }
     }
+
+    /** 设置项说明:横排设置行塞不下长说明,统一放 tip(观感与「订阅提示」一致),由标题长按调出 */
+    private fun showSettingTip(title: String, contentRes: Int) {
+        XPopup.Builder(this)
+            .asCustom(TextTipDialog(this, title, getString(contentRes)))
+            .show()
+    }
+
+    /** 数据备份还原弹窗:带上"选外部 ZIP"的入口(弹窗不能自己拉 ActivityResult,由本页代选回传) */
+    private fun showBackupDialog() {
+        val dialog = BackupDialog(this, BackupDialog.ExternalBackupHost { target ->
+            pendingExternalBackup = target
+            pickExternalBackup.launch(externalBackupMimeTypes)
+        })
+        dialog.show()
+    }
+
+    private fun openLanServicePage() {
+        jumpActivity(LanServiceActivity::class.java)
+    }
+
 }

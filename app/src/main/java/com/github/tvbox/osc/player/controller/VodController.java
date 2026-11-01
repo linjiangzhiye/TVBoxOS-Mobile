@@ -19,35 +19,29 @@ import android.widget.Toast;
 import androidx.annotation.NonNull;
 import androidx.recyclerview.widget.DiffUtil;
 
-import com.blankj.utilcode.util.ToastUtils;
+import com.github.tvbox.osc.util.AppBubble;
 import com.github.tvbox.osc.R;
-import com.github.tvbox.osc.api.ApiConfig;
-import com.github.tvbox.osc.bean.IJKCode;
 import com.github.tvbox.osc.bean.ParseBean;
-import com.github.tvbox.osc.event.RefreshEvent;
+import com.github.tvbox.osc.player.api.PlayConfig;
 import com.github.tvbox.osc.subtitle.widget.SimpleSubtitleView;
 import com.github.tvbox.osc.ui.adapter.ParseAdapter;
 import com.github.tvbox.osc.ui.adapter.SelectDialogAdapter;
 import com.github.tvbox.osc.ui.dialog.SelectDialog;
+import com.github.tvbox.osc.ui.dialog.DialogCoordinator;
 import com.github.tvbox.osc.ui.widget.MyBatteryView;
 import com.github.tvbox.osc.util.FastClickCheckUtil;
-import com.github.tvbox.osc.util.HawkConfig;
 import com.github.tvbox.osc.util.PlayerHelper;
-import com.github.tvbox.osc.util.ScreenUtils;
 import com.github.tvbox.osc.util.SubtitleHelper;
 import com.github.tvbox.osc.util.Utils;
-import com.orhanobut.hawk.Hawk;
 import com.owen.tvrecyclerview.widget.TvRecyclerView;
 import com.owen.tvrecyclerview.widget.V7LinearLayoutManager;
 
-import org.greenrobot.eventbus.EventBus;
 import org.jetbrains.annotations.NotNull;
 import org.json.JSONException;
 import org.json.JSONObject;
 
 import java.text.SimpleDateFormat;
 import java.util.ArrayList;
-import java.util.List;
 
 import java.util.Date;
 
@@ -56,7 +50,15 @@ import xyz.doikki.videoplayer.util.PlayerUtils;
 
 import static xyz.doikki.videoplayer.util.PlayerUtils.stringForTime;
 
-public class VodController extends BaseController {
+public class VodController extends BaseController implements PlaybackSettingsController, SubtitleController {
+
+    /** 是否成功播放过(详情页下载时用于复用当前集的 finalUrl;未播放过也能下载,走后台解析) */
+    public volatile boolean hasPlayedOnce = false;
+    /** 是否全屏(由 changedLandscape 记录,用于视频加载后校正横竖屏) */
+    private boolean mFullWindows = false;
+    private AdaptiveVodProgressLayout mAdaptiveProgressLayout;
+    /** 用户是否锁定竖屏: 锁定后刷新/重播不得按片源宽高自动转回横屏 */
+    private boolean mPortraitLock = false;
 
     public VodController(@NonNull @NotNull Context context) {
         super(context);
@@ -64,20 +66,28 @@ public class VodController extends BaseController {
             @Override
             public void callback(Message msg) {
                 switch (msg.what) {
-                    case 1000: { // seek 刷新
+                    case 1000: { // seek 刷新(浮层显示中:loading 让位,见 BaseController)
                         mProgressRoot.setVisibility(VISIBLE);
+                        setSeekPanelVisible(true);
                         break;
                     }
-                    case 1001: { // seek 关闭
+                    case 1001: { // seek 关闭(还原 loading:仍缓冲则重新转圈)
                         mProgressRoot.setVisibility(GONE);
+                        setSeekPanelVisible(false);
                         break;
                     }
                     case 1002: { // 显示底部菜单
                         toggleViewShowWithAlpha(mBottomRoot, true);
+                        if (mAdaptiveProgressLayout != null) mAdaptiveProgressLayout.requestUpdate();
                         toggleViewShowWithAlpha(mTopRoot1, true);
                         toggleViewShowWithAlpha(mTopRoot2, true);
                         if (!isLock){// 未上锁,随底部显示
                             toggleViewShowWithAlpha(mLockView, true);
+                            toggleViewShowWithAlpha(mScreenRotateView, true);
+                            // 系统时间与锁定键同步:同一组、同一计时、同样淡入淡出
+                            if (mFullWindows) {
+                                toggleViewShowWithAlpha(mPlayPauseTime, true);
+                            }
                         }
                         mNextBtn.requestFocus();
                         break;
@@ -86,8 +96,13 @@ public class VodController extends BaseController {
                         toggleViewShowWithAlpha(mBottomRoot, false);
                         toggleViewShowWithAlpha(mTopRoot1, false);
                         toggleViewShowWithAlpha(mTopRoot2, false);
+                        toggleViewShowWithAlpha(mScreenRotateView, false);
                         if (!isLock){// 未上锁,随底部显示
                             toggleViewShowWithAlpha(mLockView, false);
+                            // 系统时间与锁定键同步隐藏(锁定态由 lockRunnable 统一管)
+                            if (mFullWindows) {
+                                toggleViewShowWithAlpha(mPlayPauseTime, false);
+                            }
                         }
                         if (listener != null) {
                             listener.onHideBottom();
@@ -111,7 +126,7 @@ public class VodController extends BaseController {
         };
     }
 
-    private LinearLayout mLlSpeed;
+    private android.widget.FrameLayout mLlSpeed;
     TextView mTvSpeedTip;
     SeekBar mSeekBar;
     TextView mCurrentTime;
@@ -132,7 +147,6 @@ public class VodController extends BaseController {
     public TextView mPlayerScaleBtn;
     public TextView mPlayerSpeedBtn;
     public TextView mPlayerBtn;
-    public TextView mPlayerIJKBtn;
     public TextView mPlayerTimeStartEndText;
     public TextView mPlayerTimeStartBtn;
     public TextView mPlayerTimeSkipBtn;
@@ -143,14 +157,20 @@ public class VodController extends BaseController {
     public SimpleSubtitleView mSubtitleView;
     public TextView mZimuBtn;
     public TextView mAudioTrackBtn;
-    public TextView mLandscapePortraitBtn;
     private ImageView mIvPlayStatus;
+    private boolean browserRemote;
+    private long browserPositionMs;
+    private long browserDurationMs;
+    private boolean browserPaused = true;
+    private ImageView mIvFullscreen;
     private View mChooseSeries;
+    private View mChooseDownload;
     public MyBatteryView mMyBatteryView;
     private View mTopRightDeviceInfo;
     public TextView mPlayRetry;
     public TextView mPlayRefresh;
     ImageView mLockView;
+    private ImageView mScreenRotateView;
     Handler myHandle;
     Runnable myRunnable;
     int dismissTimeOperationBar = 5000;//闲置多少毫秒隐藏操作栏(上中下)  默认6秒
@@ -185,6 +205,10 @@ public class VodController extends BaseController {
         public void run() {
             if (isLock){//上锁的才隐藏,非上锁状态随操作栏显示隐藏
                 mLockView.setVisibility(GONE);
+                // 系统时间与锁定键同步:同一计时到点一起隐藏
+                if (mFullWindows) {
+                    mPlayPauseTime.setVisibility(GONE);
+                }
             }
         }
     }
@@ -193,8 +217,9 @@ public class VodController extends BaseController {
     protected void initView() {
         super.initView();
         View pip = findViewById(R.id.pip);
-        pip.setVisibility((Utils.supportsPiPMode() && Hawk.get(HawkConfig.BACKGROUND_PLAY_TYPE, 0) == 2)?VISIBLE:GONE);
-        mMyBatteryView = findViewById(R.id.battery);
+        // 画中画按钮:设备支持小窗就始终显示(手动进入小窗的入口),与"后台播放"设置无关。
+        // "后台播放"设置控制的是按Home切后台时的行为:0关闭/1后台续播/2自动进小窗
+        pip.setVisibility(Utils.supportsPiPMode() ? VISIBLE : GONE);
         mTopRightDeviceInfo = findViewById(R.id.container_top_right_device_info);
         mLlSpeed = findViewById(R.id.ll_speed);
         mTvSpeedTip = findViewById(R.id.tv_speed);
@@ -216,7 +241,6 @@ public class VodController extends BaseController {
         mPlayerScaleBtn = findViewById(R.id.play_scale);
         mPlayerSpeedBtn = findViewById(R.id.play_speed);
         mPlayerBtn = findViewById(R.id.play_player);
-        mPlayerIJKBtn = findViewById(R.id.play_ijk);
         mPlayerTimeStartEndText = findViewById(R.id.play_time_start_end_text);
         mPlayerTimeStartBtn = findViewById(R.id.play_time_start);
         mPlayerTimeSkipBtn = findViewById(R.id.play_time_end);
@@ -227,10 +251,15 @@ public class VodController extends BaseController {
         mSubtitleView = findViewById(R.id.subtitle_view);
         mZimuBtn = findViewById(R.id.zimu_select);
         mAudioTrackBtn = findViewById(R.id.audio_track_select);
-        mLandscapePortraitBtn = findViewById(R.id.landscape_portrait);
         mIvPlayStatus = findViewById(R.id.play_status);
+        mIvFullscreen = findViewById(R.id.iv_fullscreen);
         mChooseSeries = findViewById(R.id.choose_series);
+        mChooseDownload = findViewById(R.id.choose_download);
         mLockView = findViewById(R.id.iv_lock);
+        mScreenRotateView = findViewById(R.id.iv_screen_rotate);
+        positionSystemTime(mPlayPauseTime, mLockView, mBottomRoot);
+        mAdaptiveProgressLayout = new AdaptiveVodProgressLayout(this);
+        mAdaptiveProgressLayout.setAdaptive(false);
 
         initSubtitleInfo();
 
@@ -238,11 +267,14 @@ public class VodController extends BaseController {
 
         mLockView.setOnClickListener(v -> {
             isLock = !isLock;
+            setLocked(isLock);
             if (isLock){// 上了锁
+                clearDoubleTapSeekFeedback();
                 mLockView.setImageResource(R.drawable.ic_lock);
                 hideBottom();
                 mHandler.removeCallbacks(lockRunnable);
                 mHandler.postDelayed(lockRunnable,dismissTimeLock);
+                // 系统时间与锁定键同节奏:上锁时二者都保持可见,到点由 lockRunnable 一起隐藏
             }else {// 解了锁
                 mLockView.setImageResource(R.drawable.ic_unlock);
                 showBottom();
@@ -257,6 +289,10 @@ public class VodController extends BaseController {
                 if (isLock) {
                     if (event.getAction() == MotionEvent.ACTION_UP) {//短暂显示上锁view,lockRunnable统一隐藏上锁view
                         mLockView.setVisibility(VISIBLE);
+                        // 系统时间与锁定键同步:点屏幕一起唤出,到点由 lockRunnable 一起隐藏
+                        if (mFullWindows) {
+                            mPlayPauseTime.setVisibility(VISIBLE);
+                        }
                         mHandler.removeCallbacks(lockRunnable);
                         mHandler.postDelayed(lockRunnable, dismissTimeLock);
                     }
@@ -279,15 +315,15 @@ public class VodController extends BaseController {
         mParseAdapter.setOnItemClickListener((adapter, view, position) -> {
             ParseBean parseBean = mParseAdapter.getItem(position);
             // 当前默认解析需要刷新
-            int currentDefault = mParseAdapter.getData().indexOf(ApiConfig.get().getDefaultParse());
+            int currentDefault = mParseAdapter.getData().indexOf(com.github.tvbox.osc.spiderapi.ParseConfigProviders.get().getDefaultParse());
             mParseAdapter.notifyItemChanged(currentDefault);
-            ApiConfig.get().setDefaultParse(parseBean);
+            com.github.tvbox.osc.spiderapi.ParseConfigProviders.get().setDefaultParse(parseBean);
             mParseAdapter.notifyItemChanged(position);
             listener.changeParse(parseBean);
             hideBottom();
         });
         mGridView.setAdapter(mParseAdapter);
-        mParseAdapter.setNewData(ApiConfig.get().getParseBeanList());
+        mParseAdapter.setNewData(com.github.tvbox.osc.spiderapi.ParseConfigProviders.get().getParseBeanList());
 
         //mParseRoot.setVisibility(VISIBLE);
 
@@ -298,7 +334,7 @@ public class VodController extends BaseController {
                     return;
                 }
 
-                long duration = mControlWrapper.getDuration();
+                long duration = browserRemote ? browserDurationMs : mControlWrapper.getDuration();
                 long newPosition = (duration * progress) / seekBar.getMax();
                 if (mCurrentTime != null)
                     mCurrentTime.setText(stringForTime((int) newPosition));
@@ -307,6 +343,7 @@ public class VodController extends BaseController {
             @Override
             public void onStartTrackingTouch(SeekBar seekBar) {
                 mIsDragging = true;
+                beginSeeking();
                 mControlWrapper.stopProgress();
                 mControlWrapper.stopFadeOut();
             }
@@ -315,16 +352,27 @@ public class VodController extends BaseController {
             public void onStopTrackingTouch(SeekBar seekBar) {
                 myHandle.removeCallbacks(myRunnable);
                 myHandle.postDelayed(myRunnable, dismissTimeOperationBar);
-                long duration = mControlWrapper.getDuration();
+                long duration = browserRemote ? browserDurationMs : mControlWrapper.getDuration();
                 long newPosition = (duration * seekBar.getProgress()) / seekBar.getMax();
-                mControlWrapper.seekTo((int) newPosition);
+                if (browserRemote) {
+                    if (duration > 0 && listener != null
+                            && listener.controlBrowserCast("seek", newPosition)) {
+                        browserPositionMs = newPosition;
+                        renderBrowserRemoteProgress();
+                    }
+                } else {
+                    mControlWrapper.seekTo((int) newPosition);
+                }
                 mIsDragging = false;
+                finishSeeking(true);
                 mControlWrapper.startProgress();
                 mControlWrapper.startFadeOut();
             }
         });
 
-        mTopRoot1.setOnClickListener(view -> listener.exit());
+        // 返回icon退出;标题区域不再整块响应退出(与本地播放一致)
+        mTopRoot1.setOnClickListener(null);
+        findViewById(R.id.iv_title_back).setOnClickListener(view -> listener.exit());
 
         mPlayRetry = findViewById(R.id.play_retry);
         mPlayRetry.setOnClickListener(v -> {
@@ -482,40 +530,12 @@ public class VodController extends BaseController {
                         return oldItem.intValue() == newItem.intValue();
                     }
                 }, renders, defaultPos);
-                dialog.show();
+                DialogCoordinator.centerInHostView(mActivity, dialog).show();
             } catch (JSONException e) {
                 e.printStackTrace();
             }
             return true;
         });
-        mPlayerIJKBtn.setOnClickListener(view -> {
-            myHandle.removeCallbacks(myRunnable);
-            myHandle.postDelayed(myRunnable, dismissTimeOperationBar);
-            try {
-                String ijk = mPlayerConfig.getString("ijk");
-                List<IJKCode> codecs = ApiConfig.get().getIjkCodes();
-                for (int i = 0; i < codecs.size(); i++) {
-                    if (ijk.equals(codecs.get(i).getName())) {
-                        if (i >= codecs.size() - 1)
-                            ijk = codecs.get(0).getName();
-                        else {
-                            ijk = codecs.get(i + 1).getName();
-                        }
-                        break;
-                    }
-                }
-                mPlayerConfig.put("ijk", ijk);
-                updatePlayerCfgView();
-                listener.updatePlayerCfg();
-                listener.replay(false);
-                hideBottom();
-            } catch (JSONException e) {
-                e.printStackTrace();
-            }
-            mPlayerIJKBtn.requestFocus();
-            mPlayerIJKBtn.requestFocusFromTouch();
-        });
-//        增加播放页面片头片尾时间重置
         mPlayerTimeResetBtn.setOnClickListener(v -> {
             myHandle.removeCallbacks(myRunnable);
             myHandle.postDelayed(myRunnable, dismissTimeOperationBar);
@@ -534,7 +554,11 @@ public class VodController extends BaseController {
             try {
                 int current = (int) mControlWrapper.getCurrentPosition();
                 int duration = (int) mControlWrapper.getDuration();
-                if (current > duration / 2) return;
+                if (current > duration / 2) {
+                    // 片头只能在进度前半段取:否则会把"跳过片头"设到片子后半段 —— 给个提示,别让用户以为点了没反应
+                    AppBubble.toast("视频前半段才允许设置跳过片头");
+                    return;
+                }
                 mPlayerConfig.put("st", current / 1000);
                 updatePlayerCfgView();
                 listener.updatePlayerCfg();
@@ -558,7 +582,11 @@ public class VodController extends BaseController {
             try {
                 int current = (int) mControlWrapper.getCurrentPosition();
                 int duration = (int) mControlWrapper.getDuration();
-                if (current < duration / 2) return;
+                if (current < duration / 2) {
+                    // 片尾只能在进度后半段取:提示同上,避免"点了没反应"
+                    AppBubble.toast("视频后半段才允许设置跳过片尾");
+                    return;
+                }
                 mPlayerConfig.put("et", (duration - current) / 1000);
                 updatePlayerCfgView();
                 listener.updatePlayerCfg();
@@ -586,16 +614,26 @@ public class VodController extends BaseController {
             listener.selectAudioTrack();
             hideBottom();
         });
-        mLandscapePortraitBtn.setOnClickListener(view -> {
+        OnClickListener rotateScreenClick = view -> {
             FastClickCheckUtil.check(view);
-            setLandscapePortrait();
+            if (mFullWindows) {
+                setLandscapePortrait();
+            } else {
+                listener.toggleFullScreen();
+            }
             hideBottom();
-        });
+        };
+        mScreenRotateView.setOnClickListener(rotateScreenClick);
         mNextBtn.setNextFocusLeftId(R.id.play_time_start);
         mChooseSeries.setOnClickListener(view -> {
             FastClickCheckUtil.check(view);
             hideBottom();
             listener.chooseSeries();
+        });
+        mChooseDownload.setOnClickListener(view -> {
+            FastClickCheckUtil.check(view);
+            hideBottom();
+            listener.showDownload();
         });
 
         findViewById(R.id.container_playing_setting).setOnTouchListener((v, event) -> {
@@ -633,7 +671,7 @@ public class VodController extends BaseController {
             speed_old = speed;
             mControlWrapper.setSpeed(speed);
         } catch (Exception e) {
-            ToastUtils.showShort("倍速参数异常");
+            AppBubble.toast("倍速参数异常");
             e.printStackTrace();
         }
     }
@@ -656,26 +694,16 @@ public class VodController extends BaseController {
         }
     }
 
-    public void initLandscapePortraitBtnInfo() {
-        if (mControlWrapper != null && mActivity != null) {
-            int width = mControlWrapper.getVideoSize()[0];
-            int height = mControlWrapper.getVideoSize()[1];
-            double screenSqrt = ScreenUtils.getSqrt(mActivity);
-            if (screenSqrt < 10.0 && width < height) {
-                mLandscapePortraitBtn.setVisibility(View.VISIBLE);
-                mLandscapePortraitBtn.setText("竖屏");
-            }
-        }
-    }
-
     /**
-     * 横竖屏切换
+     * 横竖屏切换: 记录是否"用户锁竖屏"(防止刷新/重播按片源宽高自动转回横屏)
      */
     void setLandscapePortrait() {
         if (com.blankj.utilcode.util.ScreenUtils.isPortrait()){
             mActivity.setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE);
+            mPortraitLock = false;
         }else {
             mActivity.setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_SENSOR_PORTRAIT);
+            mPortraitLock = true;
         }
     }
 
@@ -708,15 +736,129 @@ public class VodController extends BaseController {
             int playerType = mPlayerConfig.getInt("pl");
             mPlayerBtn.setText(PlayerHelper.getPlayerName(playerType));
             mPlayerScaleBtn.setText(PlayerHelper.getScaleName(mPlayerConfig.getInt("sc")));
-            mPlayerIJKBtn.setText(mPlayerConfig.getString("ijk"));
-            mPlayerIJKBtn.setVisibility(playerType == 1 ? VISIBLE : GONE);
-            mPlayerScaleBtn.setText(PlayerHelper.getScaleName(mPlayerConfig.getInt("sc")));
             mPlayerSpeedBtn.setText("x" + mPlayerConfig.getDouble("sp"));
             mPlayerTimeStartBtn.setText(PlayerUtils.stringForTime(mPlayerConfig.getInt("st") * 1000));
             mPlayerTimeSkipBtn.setText(PlayerUtils.stringForTime(mPlayerConfig.getInt("et") * 1000));
         } catch (JSONException e) {
             e.printStackTrace();
         }
+    }
+
+    /** 直接设置画面缩放(0默认 1 16:9 2 4:3 3 填充 4 原始 5 裁剪) */
+    public void setScaleType(int scaleType) {
+        try {
+            mPlayerConfig.put("sc", scaleType);
+            updatePlayerCfgView();
+            listener.updatePlayerCfg();
+            mControlWrapper.setScreenScaleType(scaleType);
+        } catch (JSONException e) {
+            e.printStackTrace();
+        }
+    }
+
+    /** 直接设置播放器类型 */
+    public void setPlayerType(int playerType) {
+        try {
+            mPlayerConfig.put("pl", playerType);
+            updatePlayerCfgView();
+            listener.updatePlayerCfg();
+            listener.replay(false);
+            hideBottom();
+        } catch (JSONException e) {
+            e.printStackTrace();
+        }
+    }
+
+    public int getScaleType() {
+        return mPlayerConfig == null ? PlayConfig.getScaleType()
+                : mPlayerConfig.optInt("sc", PlayConfig.getScaleType());
+    }
+
+    public int getPlayerType() {
+        return mPlayerConfig == null ? PlayConfig.getPlayType()
+                : mPlayerConfig.optInt("pl", PlayConfig.getPlayType());
+    }
+
+    @Override
+    public int getRenderType() {
+        return mPlayerConfig == null ? PlayConfig.getRenderType()
+                : mPlayerConfig.optInt("pr", PlayConfig.getRenderType());
+    }
+
+    @Override
+    public void setRenderType(int renderType) {
+        if (renderType != 0 && renderType != 1) return;
+        try {
+            mPlayerConfig.put("pr", renderType);
+            listener.updatePlayerCfg();
+            listener.replay(false);
+            hideBottom();
+        } catch (JSONException e) {
+            e.printStackTrace();
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // PlaybackSettingsController:设置抽屉(在线全屏与本地共用)取控制器按钮/状态
+    @Override public boolean supportsLanPush() { return true; }
+
+    @Override public void requestLanPush() { if (listener != null) listener.cast(); }
+
+    @Override public boolean supportsVideoPurify() { return true; }
+
+    @Override public int getVideoPurifyMode() { return PlayConfig.getVideoPurifyMode(); }
+
+    @Override
+    public void setVideoPurifyMode(int mode) {
+        if (PlayConfig.getVideoPurifyMode() == mode) return;
+        PlayConfig.setVideoPurifyMode(mode);
+        if (listener != null) listener.replay(false);
+    }
+    // ------------------------------------------------------------------
+
+    @Override
+    public TextView settingsPlayerBtn() {
+        return mPlayerBtn;
+    }
+
+    @Override
+    public TextView settingsScaleBtn() {
+        return mPlayerScaleBtn;
+    }
+
+    @Override
+    public TextView settingsTimeStartBtn() {
+        return mPlayerTimeStartBtn;
+    }
+
+    @Override
+    public TextView settingsTimeSkipBtn() {
+        return mPlayerTimeSkipBtn;
+    }
+
+    @Override
+    public TextView settingsTimeResetBtn() {
+        return mPlayerTimeResetBtn;
+    }
+
+    @Override
+    public TextView settingsRetryBtn() {
+        return mPlayRetry;
+    }
+
+    @Override
+    public TextView settingsRefreshBtn() {
+        return mPlayRefresh;
+    }
+
+    @Override
+    public TextView settingsZimuBtn() {
+        return mZimuBtn;
+    }
+
+    @Override
+    public TextView settingsAudioBtn() {
+        return mAudioTrackBtn;
     }
 
     public void setTitle(String playTitleInfo) {
@@ -735,21 +877,47 @@ public class VodController extends BaseController {
      * @param b
      */
     public void changedLandscape(boolean b) {
+        mFullWindows = b;
+        setFullscreenControlSafeArea(b);
+        if (!b) clearDoubleTapSeekFeedback();
         mPlayTitle1.setSelected(true);
+        if (!isLock && isBottomVisible()) {
+            toggleViewShowWithAlpha(mScreenRotateView, true);
+        } else {
+            mScreenRotateView.animate().cancel();
+            mScreenRotateView.setVisibility(GONE);
+        }
+        mScreenRotateView.setContentDescription(getContext().getString(b
+                ? R.string.player_rotate_screen : R.string.player_enter_fullscreen));
+        // 系统时间与锁定键/操作栏同步:全屏且未锁定、操作栏可见时淡入,否则隐藏
+        if (b && !isLock && isBottomVisible()) {
+            toggleViewShowWithAlpha(mPlayPauseTime, true);
+        } else {
+            mPlayPauseTime.animate().cancel();
+            mPlayPauseTime.setVisibility(GONE);
+        }
         if (b) {
+            // 全屏:放大按钮显示"缩小"图标
+            mIvFullscreen.setImageResource(R.drawable.ic_zoom_out);
             mPreBtn.setVisibility(VISIBLE);
             mNextBtn.setVisibility(VISIBLE);
             mChooseSeries.setVisibility(VISIBLE);
-            mTopRightDeviceInfo.setVisibility(VISIBLE);
+            mChooseDownload.setVisibility(VISIBLE);
         } else {
-            mTopRightDeviceInfo.setVisibility(INVISIBLE);
+            // 非全屏(播放详情页):放大按钮显示"聚焦"图标
+            mIvFullscreen.setImageResource(R.drawable.ic_zoom_in);
             mPreBtn.setVisibility(GONE);
             mNextBtn.setVisibility(GONE);
             mChooseSeries.setVisibility(GONE);
+            mChooseDownload.setVisibility(GONE);
         }
+        mAdaptiveProgressLayout.setAdaptive(b);
     }
 
     public interface VodControlListener {
+        /** 本机真正恢复播放后，宿主可撤下手机暂停的提示。 */
+        void onLocalPlaybackStarted();
+
         void chooseSeries();
 
         void playNext(boolean rmProgress);
@@ -763,6 +931,9 @@ public class VodController extends BaseController {
         void updatePlayerCfg();
 
         void replay(boolean replay);
+
+        /** 投屏期间由宿主把手机控制指令发送到已配对的电脑。 */
+        boolean controlBrowserCast(String action, long positionMs);
 
         void errReplay();
 
@@ -785,6 +956,9 @@ public class VodController extends BaseController {
 
         void pip();
 
+        /** 全屏控制栏"下载"按钮:打开下载选择右侧抽屉(不退出全屏) */
+        void showDownload();
+
         void showParseRoot(boolean show,ParseAdapter adapter);
     }
 
@@ -796,8 +970,66 @@ public class VodController extends BaseController {
 
     private boolean skipEnd = true;
 
+    public void setBrowserRemote(boolean active) {
+        browserRemote = active;
+        setBrowserEpisodeControls(true);
+        setGestureEnabled(!active);
+        if (active) {
+            browserPaused = true;
+            browserPositionMs = 0;
+            browserDurationMs = 0;
+            renderBrowserRemoteProgress();
+            if (mControlWrapper != null) mControlWrapper.show();
+        } else if (mSeekBar != null) {
+            mSeekBar.setEnabled(true);
+        }
+    }
+
+    public void setBrowserEpisodeControls(boolean enabled) {
+        if (mNextBtn != null) mNextBtn.setEnabled(enabled);
+        if (mPreBtn != null) mPreBtn.setEnabled(enabled);
+        if (mChooseSeries != null) mChooseSeries.setEnabled(enabled);
+    }
+
+    public void updateBrowserRemote(long positionMs, long durationMs, boolean paused) {
+        if (!browserRemote) return;
+        browserDurationMs = Math.max(0, durationMs);
+        browserPositionMs = Math.max(0, Math.min(positionMs, browserDurationMs > 0
+                ? browserDurationMs : positionMs));
+        browserPaused = paused;
+        renderBrowserRemoteProgress();
+    }
+
+    private void renderBrowserRemoteProgress() {
+        if (!browserRemote || mSeekBar == null || mIsDragging) return;
+        int duration = (int) Math.min(Integer.MAX_VALUE, browserDurationMs);
+        int position = (int) Math.min(Integer.MAX_VALUE, browserPositionMs);
+        updateProgressTimeLabels(mCurrentTime, mTotalTime, duration, position);
+        mSeekBar.setEnabled(duration > 0);
+        mSeekBar.setProgress(duration > 0 ? (int) (position * 1.0 / duration * mSeekBar.getMax()) : 0);
+        mIvPlayStatus.setImageResource(browserPaused ? R.drawable.ic_play : R.drawable.ic_pause);
+    }
+
+    @Override
+    public void togglePlay() {
+        if (!browserRemote) {
+            super.togglePlay();
+            return;
+        }
+        boolean play = browserPaused;
+        if (listener != null && listener.controlBrowserCast(play ? "play" : "pause", 0)) {
+            browserPaused = !play;
+            renderBrowserRemoteProgress();
+        }
+    }
+
     @Override
     protected void setProgress(int duration, int position) {
+
+        if (browserRemote) {
+            renderBrowserRemoteProgress();
+            return;
+        }
 
         if (mIsDragging) {
             return;
@@ -815,8 +1047,7 @@ public class VodController extends BaseController {
                 listener.playNext(true);
             }
         }
-        mCurrentTime.setText(PlayerUtils.stringForTime(position));
-        mTotalTime.setText(PlayerUtils.stringForTime(duration));
+        updateProgressTimeLabels(mCurrentTime, mTotalTime, duration, position);
         if (duration > 0) {
             mSeekBar.setEnabled(true);
             int pos = (int) (position * 1.0 / duration * mSeekBar.getMax());
@@ -839,24 +1070,36 @@ public class VodController extends BaseController {
     public void tvSlideStop() {
         if (!simSlideStart)
             return;
-        mControlWrapper.seekTo(simSeekPosition);
-        if (!mControlWrapper.isPlaying())
+        if (browserRemote) {
+            if (listener != null && listener.controlBrowserCast("seek", simSeekPosition)) {
+                browserPositionMs = simSeekPosition;
+                renderBrowserRemoteProgress();
+            }
+        } else {
+            mControlWrapper.seekTo(simSeekPosition);
+        }
+        finishSeeking(true);
+        if (!browserRemote && !mControlWrapper.isPlaying())
             mControlWrapper.start();
         simSlideStart = false;
         simSeekPosition = 0;
         simSlideOffset = 0;
+        dismissSeekPanel(); // 遥控 seek 结束:浮层立即消失,状态机马上接管 loading
     }
 
     public void tvSlideStart(int dir) {
-        int duration = (int) mControlWrapper.getDuration();
+        int duration = browserRemote ? (int) Math.min(Integer.MAX_VALUE, browserDurationMs)
+                : (int) mControlWrapper.getDuration();
         if (duration <= 0)
             return;
         if (!simSlideStart) {
             simSlideStart = true;
+            beginSeeking();
         }
         // 每次10秒
         simSlideOffset += (10000.0f * dir);
-        int currentPosition = (int) mControlWrapper.getCurrentPosition();
+        int currentPosition = browserRemote ? (int) Math.min(Integer.MAX_VALUE, browserPositionMs)
+                : (int) mControlWrapper.getCurrentPosition();
         int position = (int) (simSlideOffset + currentPosition);
         if (position > duration) position = duration;
         if (position < 0) position = 0;
@@ -867,10 +1110,13 @@ public class VodController extends BaseController {
     @Override
     protected void updateSeekUI(int curr, int seekTo, int duration) {
         super.updateSeekUI(curr, seekTo, duration);
+        // 快进/快退用播放器那对 chevron(ic_seek_right / ic_seek_left,矢量、fillColor 为白),
+        // 再叠一层白色滤镜:保证快退/快进在灰色进度浮层上一律白显
+        mProgressIcon.setColorFilter(0xFFFFFFFF);
         if (seekTo > curr) {
-            mProgressIcon.setImageResource(R.drawable.icon_pre);
+            mProgressIcon.setImageResource(R.drawable.ic_seek_right);
         } else {
-            mProgressIcon.setImageResource(R.drawable.icon_back);
+            mProgressIcon.setImageResource(R.drawable.ic_seek_left);
         }
         mProgressText.setText(PlayerUtils.stringForTime(seekTo) + " / " + PlayerUtils.stringForTime(duration));
         mHandler.sendEmptyMessage(1000);
@@ -881,15 +1127,33 @@ public class VodController extends BaseController {
     @Override
     protected void onPlayStateChanged(int playState) {
         super.onPlayStateChanged(playState);
-        EventBus.getDefault().post(new RefreshEvent(RefreshEvent.TYPE_REFRESH_NOTIFY, null));
+        if (isLock && !isLocked()) setLocked(true);
+        if (browserRemote) {
+            videoPlayState = playState;
+            renderBrowserRemoteProgress();
+            return;
+        }
+        com.github.tvbox.osc.service.PlayService.onPlaybackNotify(null);
         videoPlayState = playState;
         switch (playState) {
             case VideoView.STATE_IDLE:
                 break;
             case VideoView.STATE_PLAYING:
-                initLandscapePortraitBtnInfo();
+                if (listener != null) listener.onLocalPlaybackStarted();
+                hasPlayedOnce = true;
                 startProgress();
                 mIvPlayStatus.setImageResource(R.drawable.ic_pause);
+                // 全屏下视频加载出真实尺寸后校正横竖屏(进全屏时尺寸可能未知,未能切横屏)
+                if (mFullWindows) {
+                    int[] size = mControlWrapper.getVideoSize();
+                    if (size != null && size.length >= 2 && size[0] > 0 && size[1] > 0 && !mPortraitLock) {
+                        if (size[0] > size[1]) {
+                            mActivity.setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE);
+                        } else {
+                            mActivity.setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_PORTRAIT);
+                        }
+                    }
+                }
                 break;
             case VideoView.STATE_PAUSED:
                 mIvPlayStatus.setImageResource(R.drawable.ic_play);
@@ -898,16 +1162,13 @@ public class VodController extends BaseController {
                 listener.errReplay();
                 break;
             case VideoView.STATE_PREPARED:
-                mPlayLoadNetSpeed.setVisibility(GONE);
                 hideLiveAboutBtn();
                 listener.prepared();
                 break;
             case VideoView.STATE_BUFFERED:
-                mPlayLoadNetSpeed.setVisibility(GONE);
                 break;
             case VideoView.STATE_PREPARING:
             case VideoView.STATE_BUFFERING:
-                if (mProgressRoot.getVisibility() == GONE) mPlayLoadNetSpeed.setVisibility(VISIBLE);
                 break;
             case VideoView.STATE_PLAYBACK_COMPLETED:
                 listener.playNext(true);
@@ -943,7 +1204,7 @@ public class VodController extends BaseController {
             myHandle.postDelayed(myRunnable, dismissTimeOperationBar);
             return super.dispatchKeyEvent(event);
         }
-        boolean isInPlayback = isInPlaybackState();
+        boolean isInPlayback = browserRemote || isInPlaybackState();
         if (action == KeyEvent.ACTION_DOWN) {
             if (keyCode == KeyEvent.KEYCODE_DPAD_RIGHT || keyCode == KeyEvent.KEYCODE_DPAD_LEFT) {
                 if (isInPlayback) {
@@ -980,11 +1241,14 @@ public class VodController extends BaseController {
 
     @Override
     public void onLongPress(MotionEvent e) {
+        // 长按倍速:投屏中/锁屏/非播放态/手势关闭/已在倍速中时不触发
+        if (browserRemote || isLock || isLocked() || !isInPlaybackState()
+                || !isGestureEnabled() || fromLongPress) return;
         if (videoPlayState != VideoView.STATE_PAUSED) {
             fromLongPress = true;
             try {
                 speed_old = (float) mPlayerConfig.getDouble("sp");
-                float speed = Hawk.get(HawkConfig.VIDEO_SPEED, 2.0f);
+                float speed = PlayConfig.getVideoSpeed();
                 mPlayerConfig.put("sp", speed);
                 updatePlayerCfgView();
                 listener.updatePlayerCfg();
@@ -999,23 +1263,33 @@ public class VodController extends BaseController {
 
     @SuppressLint("ClickableViewAccessibility")
     @Override
+    public boolean onTouch(View view, MotionEvent event) {
+        boolean handled = super.onTouch(view, event);
+        if (event.getActionMasked() == MotionEvent.ACTION_UP
+                || event.getActionMasked() == MotionEvent.ACTION_CANCEL) finishLongPress();
+        return handled;
+    }
+
+    @SuppressLint("ClickableViewAccessibility")
+    @Override
     public boolean onTouchEvent(MotionEvent e) {
-        if (e.getAction() == MotionEvent.ACTION_UP) {
-            if (fromLongPress) {
-                fromLongPress = false;
-                mLlSpeed.setVisibility(GONE);
-                try {
-                    float speed = speed_old;
-                    mPlayerConfig.put("sp", speed);
-                    updatePlayerCfgView();
-                    listener.updatePlayerCfg();
-                    mControlWrapper.setSpeed(speed);
-                } catch (JSONException f) {
-                    f.printStackTrace();
-                }
-            }
-        }
+        if (e.getActionMasked() == MotionEvent.ACTION_UP
+                || e.getActionMasked() == MotionEvent.ACTION_CANCEL) finishLongPress();
         return super.onTouchEvent(e);
+    }
+
+    private void finishLongPress() {
+        if (!fromLongPress) return;
+        fromLongPress = false;
+        mLlSpeed.setVisibility(GONE);
+        try {
+            mPlayerConfig.put("sp", speed_old);
+            updatePlayerCfgView();
+            listener.updatePlayerCfg();
+            mControlWrapper.setSpeed(speed_old);
+        } catch (JSONException failure) {
+            failure.printStackTrace();
+        }
     }
 
     @Override
@@ -1029,6 +1303,30 @@ public class VodController extends BaseController {
             hideBottom();
         }
         return true;
+    }
+
+    /** 全屏与详情页预览使用同一曲边双击区域，中央保持暂停/播放。 */
+    @Override
+    public boolean onDoubleTap(MotionEvent e) {
+        if (browserRemote) {
+            int direction = DoubleTapSeekPolicy.direction(e.getX(), e.getY(), getWidth(), getHeight());
+            if (direction == 0) togglePlay();
+            else if (browserDurationMs > 0 && listener != null) {
+                long target = Math.max(0, Math.min(browserDurationMs,
+                        browserPositionMs + direction * 10_000L));
+                if (listener.controlBrowserCast("seek", target)) {
+                    browserPositionMs = target;
+                    renderBrowserRemoteProgress();
+                }
+            }
+            return true;
+        }
+        if (isLock || isLocked() || !isInPlaybackState()) return true;
+        // 已展开控件的触摸区域不响应跳转，画面左右侧才交给双击手势。
+        if (mProgressRoot.getVisibility() == VISIBLE) return true;
+        return handleDoubleTapSeek(e, mBottomRoot, mTopRoot1, mTopRoot2,
+                mLockView, mScreenRotateView, mPlayPauseTime)
+                || super.onDoubleTap(e);
     }
 
     @Override
@@ -1045,24 +1343,39 @@ public class VodController extends BaseController {
 
     @Override
     protected void onDetachedFromWindow() {
+        clearDoubleTapSeekFeedback();
+        if (mAdaptiveProgressLayout != null) mAdaptiveProgressLayout.cancelPendingUpdate();
         super.onDetachedFromWindow();
         mHandler.removeCallbacks(myRunnable2);
+        // 两个 handler 的剩余消息必须一起清干净:1004(设速度)在"非播放态"分支会每 100ms 自我重投,
+        // 而 MessageQueue 里的消息持有 Handler → 持有 View → 持有 Activity;起播失败时还会一直 100ms 空转
+        // (myHandle 在 initView 里才创建,视图被提前移除时为 null,故判空)
+        if (myHandle != null) myHandle.removeCallbacksAndMessages(null);
+        if (mHandler != null) mHandler.removeCallbacksAndMessages(null);
+    }
+
+    /** {@link SubtitleController}: 字幕视图(在线全屏与本地播放共用字幕设置弹窗) */
+    @Override
+    public SimpleSubtitleView getSubtitleView() {
+        return mSubtitleView;
     }
 
     public void openSubtitle(boolean open) {
+        // 持久化字幕开关,供字幕设置弹窗显示当前状态
+        PlayConfig.setSubtitleOpen(open);
         if (open) {
             mSubtitleView.setVisibility(VISIBLE);
-            Toast.makeText(getContext(), "字幕已开启", Toast.LENGTH_SHORT).show();
+            AppBubble.toast("字幕已开启");
         } else {
             mSubtitleView.setVisibility(View.GONE);
-            Toast.makeText(getContext(), "字幕已关闭", Toast.LENGTH_SHORT).show();
+            AppBubble.toast("字幕已关闭");
         }
         hideBottom();
     }
 
     public void increaseTime(String type) {
         try {
-            int step = Hawk.get(HawkConfig.PLAY_TIME_STEP, 1);
+            int step = PlayConfig.getTimeStep();
             int time = mPlayerConfig.getInt(type);
             time += step;
             if (time > 30 * 10)
@@ -1077,7 +1390,7 @@ public class VodController extends BaseController {
 
     public void decreaseTime(String type) {
         try {
-            int step = Hawk.get(HawkConfig.PLAY_TIME_STEP, 1);
+            int step = PlayConfig.getTimeStep();
             int time = mPlayerConfig.getInt(type);
             time -= step;
             if (time < 0)

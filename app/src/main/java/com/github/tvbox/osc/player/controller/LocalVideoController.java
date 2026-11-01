@@ -1,4 +1,5 @@
 package com.github.tvbox.osc.player.controller;
+import com.github.tvbox.osc.util.AppBubble;
 
 import static xyz.doikki.videoplayer.util.PlayerUtils.stringForTime;
 
@@ -7,6 +8,7 @@ import android.content.Context;
 import android.content.pm.ActivityInfo;
 import android.os.Handler;
 import android.os.Message;
+import android.text.TextUtils;
 import android.view.KeyEvent;
 import android.view.MotionEvent;
 import android.view.View;
@@ -20,24 +22,20 @@ import androidx.annotation.NonNull;
 import androidx.recyclerview.widget.DiffUtil;
 
 import com.blankj.utilcode.util.LogUtils;
-import com.blankj.utilcode.util.SPUtils;
 import com.chad.library.adapter.base.BaseQuickAdapter;
 import com.github.tvbox.osc.R;
-import com.github.tvbox.osc.api.ApiConfig;
-import com.github.tvbox.osc.bean.IJKCode;
 import com.github.tvbox.osc.bean.ParseBean;
-import com.github.tvbox.osc.constant.CacheConst;
+import com.github.tvbox.osc.player.api.PlayConfig;
 import com.github.tvbox.osc.subtitle.widget.SimpleSubtitleView;
 import com.github.tvbox.osc.ui.adapter.ParseAdapter;
 import com.github.tvbox.osc.ui.adapter.SelectDialogAdapter;
 import com.github.tvbox.osc.ui.dialog.SelectDialog;
+import com.github.tvbox.osc.ui.dialog.DialogCoordinator;
 import com.github.tvbox.osc.ui.widget.MyBatteryView;
 import com.github.tvbox.osc.util.FastClickCheckUtil;
-import com.github.tvbox.osc.util.HawkConfig;
 import com.github.tvbox.osc.util.PlayerHelper;
-import com.github.tvbox.osc.util.ScreenUtils;
 import com.github.tvbox.osc.util.SubtitleHelper;
-import com.orhanobut.hawk.Hawk;
+import com.github.tvbox.osc.util.Utils;
 import com.owen.tvrecyclerview.widget.TvRecyclerView;
 import com.owen.tvrecyclerview.widget.V7LinearLayoutManager;
 
@@ -48,15 +46,14 @@ import org.json.JSONObject;
 import java.text.SimpleDateFormat;
 import java.util.ArrayList;
 import java.util.Date;
-import java.util.List;
 
 import xyz.doikki.videoplayer.player.VideoView;
 import xyz.doikki.videoplayer.util.PlayerUtils;
 
-public class LocalVideoController extends BaseController {
+public class LocalVideoController extends BaseController implements PlaybackSettingsController, SubtitleController {
 
     private TextView mTvSpeedTip;
-    private LinearLayout mLlSpeed;
+    private android.widget.FrameLayout mLlSpeed;
 
     public LocalVideoController(@NonNull @NotNull Context context) {
         super(context);
@@ -64,18 +61,27 @@ public class LocalVideoController extends BaseController {
             @Override
             public void callback(Message msg) {
                 switch (msg.what) {
-                    case 1000: { // seek 刷新
+                    case 1000: { // seek 刷新(浮层显示中:loading 让位,见 BaseController)
                         mProgressRoot.setVisibility(VISIBLE);
+                        setSeekPanelVisible(true);
                         break;
                     }
-                    case 1001: { // seek 关闭
+                    case 1001: { // seek 关闭(还原 loading:仍缓冲则重新转圈)
                         mProgressRoot.setVisibility(GONE);
+                        setSeekPanelVisible(false);
                         break;
                     }
                     case 1002: { // 显示底部菜单
                         mBottomRoot.setVisibility(VISIBLE);
+                        if (mAdaptiveProgressLayout != null) mAdaptiveProgressLayout.requestUpdate();
                         mTopRoot1.setVisibility(VISIBLE);
                         mTopRoot2.setVisibility(VISIBLE);
+                        if (!isLock) {// 未上锁,锁按钮随操作栏显示
+                            mLockView.setVisibility(VISIBLE);
+                            mScreenRotateView.setVisibility(VISIBLE);
+                            // 系统时间与锁定键同步:同一组、同一计时一起显隐
+                            mPlayPauseTime.setVisibility(VISIBLE);
+                        }
                         mNextBtn.requestFocus();
                         break;
                     }
@@ -83,6 +89,12 @@ public class LocalVideoController extends BaseController {
                         mBottomRoot.setVisibility(GONE);
                         mTopRoot1.setVisibility(GONE);
                         mTopRoot2.setVisibility(GONE);
+                        mScreenRotateView.setVisibility(GONE);
+                        if (!isLock) {// 未上锁,锁按钮随操作栏隐藏
+                            mLockView.setVisibility(GONE);
+                            // 系统时间与锁定键同步隐藏(锁定态由 lockRunnable 统一管)
+                            mPlayPauseTime.setVisibility(GONE);
+                        }
                         break;
                     }
                     case 1004: { // 设置速度
@@ -110,29 +122,44 @@ public class LocalVideoController extends BaseController {
     TextView mProgressText;
     ImageView mProgressIcon;
     LinearLayout mBottomRoot;
+    private AdaptiveVodProgressLayout mAdaptiveProgressLayout;
     LinearLayout mTopRoot1;
     View mTopRoot2;
     TextView mPlayTitle1;
     TextView mPlayLoadNetSpeedRightTop;
     ImageView mNextBtn;
     ImageView mPreBtn;
-    TextView mPlayerScaleBtn;
+    public TextView mPlayerScaleBtn;
     public TextView mPlayerSpeedBtn;
-    TextView mPlayerBtn;
-    TextView mPlayerIJKBtn;
+    public TextView mPlayerBtn;
     public TextView mPlayerTimeStartEndText;
     public TextView mPlayerTimeStartBtn;
     public TextView mPlayerTimeSkipBtn;
     public TextView mPlayerTimeResetBtn;
+    public TextView mPlayRetry;
+    public TextView mPlayRefresh;
     TextView mPlayPauseTime;
     TextView mPlayLoadNetSpeed;
     TextView mVideoSize;
     public SimpleSubtitleView mSubtitleView;
     TextView mZimuBtn;
     TextView mAudioTrackBtn;
-    public TextView mLandscapePortraitBtn;
     private ImageView mIvPlayStatus;
     public MyBatteryView mMyBatteryView;
+    private ImageView mLockView;
+    private ImageView mScreenRotateView;
+    private boolean isLock = false;
+    int dismissTimeLock = 2000;//闲置多少毫秒隐藏已上锁按钮
+    private final Runnable lockRunnable = new Runnable() {
+        @Override
+        public void run() {
+            if (isLock) {//上锁的才隐藏,非上锁状态随操作栏显示隐藏
+                mLockView.setVisibility(GONE);
+                // 系统时间与锁定键同步:同一计时到点一起隐藏
+                mPlayPauseTime.setVisibility(GONE);
+            }
+        }
+    };
     Handler myHandle;
     Runnable myRunnable;
     int myHandleSeconds = 4000;//闲置多少毫秒秒关闭底栏  默认6秒
@@ -163,11 +190,10 @@ public class LocalVideoController extends BaseController {
     @Override
     protected void initView() {
         super.initView();
-        findViewById(R.id.pip).setVisibility(GONE);
-        findViewById(R.id.cast).setVisibility(GONE);
-        mMyBatteryView = findViewById(R.id.battery);
-        findViewById(R.id.container_top_right_device_info).setVisibility(VISIBLE);
-        findViewById(R.id.setting).setVisibility(GONE);
+        setFullscreenControlSafeArea(true);
+        View pip = findViewById(R.id.pip);
+        // 画中画按钮:设备支持小窗就显示(与在线播放一致)
+        pip.setVisibility(Utils.supportsPiPMode() ? VISIBLE : GONE);
         mCurrentTime = findViewById(R.id.curr_time);
         mTvSpeedTip = findViewById(R.id.tv_speed);
         mLlSpeed = findViewById(R.id.ll_speed);
@@ -187,7 +213,6 @@ public class LocalVideoController extends BaseController {
         mPlayerScaleBtn = findViewById(R.id.play_scale);
         mPlayerSpeedBtn = findViewById(R.id.play_speed);
         mPlayerBtn = findViewById(R.id.play_player);
-        mPlayerIJKBtn = findViewById(R.id.play_ijk);
         mPlayerTimeStartEndText = findViewById(R.id.play_time_start_end_text);
         mPlayerTimeStartBtn = findViewById(R.id.play_time_start);
         mPlayerTimeSkipBtn = findViewById(R.id.play_time_end);
@@ -198,9 +223,33 @@ public class LocalVideoController extends BaseController {
         mSubtitleView = findViewById(R.id.subtitle_view);
         mZimuBtn = findViewById(R.id.zimu_select);
         mAudioTrackBtn = findViewById(R.id.audio_track_select);
-        mLandscapePortraitBtn = findViewById(R.id.landscape_portrait);
         mIvPlayStatus = findViewById(R.id.play_status);
         initSubtitleInfo();
+
+        // 锁定按钮:上锁后隐藏操作栏并拦截触摸,点按屏幕短暂显示锁按钮
+        mLockView = findViewById(R.id.iv_lock);
+        mScreenRotateView = findViewById(R.id.iv_screen_rotate);
+        positionSystemTime(mPlayPauseTime, mLockView, mBottomRoot);
+        mLockView.setOnClickListener(new OnClickListener() {
+            @Override
+            public void onClick(View view) {
+                isLock = !isLock;
+                setLocked(isLock);
+                if (isLock) {// 上了锁
+                    clearDoubleTapSeekFeedback();
+                    mLockView.setImageResource(R.drawable.ic_lock);
+                    hideBottom();
+                    mHandler.removeCallbacks(lockRunnable);
+                    mHandler.postDelayed(lockRunnable, dismissTimeLock);
+                    // 系统时间与锁定键同节奏:上锁时二者都保持可见,到点由 lockRunnable 一起隐藏
+                } else {// 解了锁
+                    mLockView.setImageResource(R.drawable.ic_unlock);
+                    showBottom();
+                    myHandle.removeCallbacks(myRunnable);
+                    myHandle.postDelayed(myRunnable, myHandleSeconds);
+                }
+            }
+        });
 
         //本地播放没小屏播放,直接显示上下集(后续将本地播放的xml独立)
         mPreBtn.setVisibility(VISIBLE);
@@ -222,12 +271,37 @@ public class LocalVideoController extends BaseController {
         });
         View chooseSeries = findViewById(R.id.choose_series);
         chooseSeries.setVisibility(VISIBLE);
+        mAdaptiveProgressLayout = new AdaptiveVodProgressLayout(this);
+        mAdaptiveProgressLayout.setAdaptive(true);
         chooseSeries.setOnClickListener(new OnClickListener() {
             @Override
             public void onClick(View view) {
                 FastClickCheckUtil.check(view);
                 hideBottom();
                 listener.chooseSeries();
+            }
+        });
+        // 右上角:设置(显示本地播放设置底栏) / 投屏 / 小窗
+        findViewById(R.id.setting).setOnClickListener(new OnClickListener() {
+            @Override
+            public void onClick(View view) {
+                FastClickCheckUtil.check(view);
+                listener.showSetting();
+            }
+        });
+        findViewById(R.id.cast).setOnClickListener(view -> {
+            if (isInPlaybackState()) {
+                listener.cast();
+                hideBottom();
+            }
+        });
+        pip.setOnClickListener(new OnClickListener() {
+            @Override
+            public void onClick(View view) {
+                if (isInPlaybackState()) {
+                    listener.pip();
+                    hideBottom();
+                }
             }
         });
         mSeekBar.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
@@ -246,6 +320,7 @@ public class LocalVideoController extends BaseController {
             @Override
             public void onStartTrackingTouch(SeekBar seekBar) {
                 mIsDragging = true;
+                beginSeeking();
                 mControlWrapper.stopProgress();
                 mControlWrapper.stopFadeOut();
             }
@@ -258,21 +333,26 @@ public class LocalVideoController extends BaseController {
                 long newPosition = (duration * seekBar.getProgress()) / seekBar.getMax();
                 mControlWrapper.seekTo((int) newPosition);
                 mIsDragging = false;
+                finishSeeking(true);
                 mControlWrapper.startProgress();
                 mControlWrapper.startFadeOut();
             }
         });
 
-        mPlayTitle1.setOnClickListener(view -> listener.exit());
+        // 返回icon退出;标题不响应退出(与在线全屏播放一致)
+        mPlayTitle1.setOnClickListener(null);
+        findViewById(R.id.iv_title_back).setOnClickListener(view -> listener.exit());
 
-        findViewById(R.id.play_retry).setOnClickListener(new OnClickListener() {
+        mPlayRetry = findViewById(R.id.play_retry);
+        mPlayRefresh = findViewById(R.id.play_refresh);
+        mPlayRetry.setOnClickListener(new OnClickListener() {
             @Override
             public void onClick(View v) {
                 listener.replay(true);
                 hideBottom();
             }
         });
-        findViewById(R.id.play_refresh).setOnClickListener(new OnClickListener() {
+        mPlayRefresh.setOnClickListener(new OnClickListener() {
             @Override
             public void onClick(View v) {
                 listener.replay(false);
@@ -453,41 +533,11 @@ public class LocalVideoController extends BaseController {
                             return oldItem.intValue() == newItem.intValue();
                         }
                     }, renders, defaultPos);
-                    dialog.show();
+                    DialogCoordinator.centerInHostView(mActivity, dialog).show();
                 } catch (JSONException e) {
                     e.printStackTrace();
                 }
                 return true;
-            }
-        });
-        mPlayerIJKBtn.setOnClickListener(new OnClickListener() {
-            @Override
-            public void onClick(View view) {
-                myHandle.removeCallbacks(myRunnable);
-                myHandle.postDelayed(myRunnable, myHandleSeconds);
-                try {
-                    String ijk = mPlayerConfig.getString("ijk");
-                    List<IJKCode> codecs = ApiConfig.get().getIjkCodes();
-                    for (int i = 0; i < codecs.size(); i++) {
-                        if (ijk.equals(codecs.get(i).getName())) {
-                            if (i >= codecs.size() - 1)
-                                ijk = codecs.get(0).getName();
-                            else {
-                                ijk = codecs.get(i + 1).getName();
-                            }
-                            break;
-                        }
-                    }
-                    mPlayerConfig.put("ijk", ijk);
-                    updatePlayerCfgView();
-                    listener.updatePlayerCfg();
-                    listener.replay(false);
-                    hideBottom();
-                } catch (JSONException e) {
-                    e.printStackTrace();
-                }
-                mPlayerIJKBtn.requestFocus();
-                mPlayerIJKBtn.requestFocusFromTouch();
             }
         });
 //        增加播放页面片头片尾时间重置
@@ -577,12 +627,13 @@ public class LocalVideoController extends BaseController {
         mZimuBtn.setOnLongClickListener(new OnLongClickListener() {
             @Override
             public boolean onLongClick(View view) {
+                PlayConfig.setSubtitleOpen(false);
                 mSubtitleView.setVisibility(View.GONE);
                 mSubtitleView.destroy();
                 mSubtitleView.clearSubtitleCache();
                 mSubtitleView.isInternal = false;
                 hideBottom();
-                Toast.makeText(getContext(), "字幕已关闭", Toast.LENGTH_SHORT).show();
+                AppBubble.toast("字幕已关闭");
                 return true;
             }
         });
@@ -594,14 +645,15 @@ public class LocalVideoController extends BaseController {
                 hideBottom();
             }
         });
-        mLandscapePortraitBtn.setOnClickListener(new OnClickListener() {
+        OnClickListener rotateScreenClick = new OnClickListener() {
             @Override
             public void onClick(View view) {
                 FastClickCheckUtil.check(view);
                 setLandscapePortrait();
                 hideBottom();
             }
-        });
+        };
+        mScreenRotateView.setOnClickListener(rotateScreenClick);
         mNextBtn.setNextFocusLeftId(R.id.play_time_start);
     }
 
@@ -623,25 +675,11 @@ public class LocalVideoController extends BaseController {
         }
     }
 
-    public void initLandscapePortraitBtnInfo() {
-        if (mControlWrapper != null && mActivity != null) {
-            int width = mControlWrapper.getVideoSize()[0];
-            int height = mControlWrapper.getVideoSize()[1];
-            double screenSqrt = ScreenUtils.getSqrt(mActivity);
-            if (screenSqrt < 10.0 && width < height) {
-                mLandscapePortraitBtn.setVisibility(View.VISIBLE);
-                mLandscapePortraitBtn.setText("竖屏");
-            }
-        }
-    }
-
     void setLandscapePortrait() {
         int requestedOrientation = mActivity.getRequestedOrientation();
         if (requestedOrientation == ActivityInfo.SCREEN_ORIENTATION_LANDSCAPE || requestedOrientation == ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE || requestedOrientation == ActivityInfo.SCREEN_ORIENTATION_REVERSE_LANDSCAPE) {
-            mLandscapePortraitBtn.setText("横屏");
             mActivity.setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_SENSOR_PORTRAIT);
         } else if (requestedOrientation == ActivityInfo.SCREEN_ORIENTATION_PORTRAIT || requestedOrientation == ActivityInfo.SCREEN_ORIENTATION_SENSOR_PORTRAIT || requestedOrientation == ActivityInfo.SCREEN_ORIENTATION_REVERSE_PORTRAIT) {
-            mLandscapePortraitBtn.setText("竖屏");
             mActivity.setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE);
         }
     }
@@ -649,6 +687,26 @@ public class LocalVideoController extends BaseController {
     void initSubtitleInfo() {
         int subtitleTextSize = SubtitleHelper.getTextSize(mActivity);
         mSubtitleView.setTextSize(subtitleTextSize);
+    }
+
+    /** {@link SubtitleController}: 字幕视图(本地播放与在线全屏共用字幕设置弹窗) */
+    @Override
+    public SimpleSubtitleView getSubtitleView() {
+        return mSubtitleView;
+    }
+
+    /** {@link SubtitleController}: 字幕开关(持久化配置并显隐字幕视图;与在线 VodController 行为一致) */
+    @Override
+    public void openSubtitle(boolean open) {
+        PlayConfig.setSubtitleOpen(open);
+        if (open) {
+            mSubtitleView.setVisibility(VISIBLE);
+            AppBubble.toast("字幕已开启");
+        } else {
+            mSubtitleView.setVisibility(GONE);
+            AppBubble.toast("字幕已关闭");
+        }
+        hideBottom();
     }
 
     @Override
@@ -668,13 +726,9 @@ public class LocalVideoController extends BaseController {
             int playerType = mPlayerConfig.getInt("pl");
             mPlayerBtn.setText(PlayerHelper.getPlayerName(playerType));
             mPlayerScaleBtn.setText(PlayerHelper.getScaleName(mPlayerConfig.getInt("sc")));
-            mPlayerIJKBtn.setText(mPlayerConfig.getString("ijk"));
-            mPlayerIJKBtn.setVisibility(playerType == 1 ? VISIBLE : GONE);
-            mPlayerScaleBtn.setText(PlayerHelper.getScaleName(mPlayerConfig.getInt("sc")));
             mPlayerSpeedBtn.setText("x" + mPlayerConfig.getDouble("sp"));
             mPlayerTimeStartBtn.setText(PlayerUtils.stringForTime(mPlayerConfig.getInt("st") * 1000));
             mPlayerTimeSkipBtn.setText(PlayerUtils.stringForTime(mPlayerConfig.getInt("et") * 1000));
-            mAudioTrackBtn.setVisibility((playerType == 1) ? VISIBLE : GONE);
         } catch (JSONException e) {
             e.printStackTrace();
         }
@@ -682,6 +736,170 @@ public class LocalVideoController extends BaseController {
 
     public void setTitle(String playTitleInfo) {
         mPlayTitle1.setText(playTitleInfo);
+    }
+
+    // ------------------------------------------------------------------
+    // PlaybackSettingsController:设置抽屉(在线全屏与本地共用)取控制器按钮/状态
+    // ------------------------------------------------------------------
+
+    @Override
+    public TextView settingsPlayerBtn() {
+        return mPlayerBtn;
+    }
+
+    @Override
+    public TextView settingsScaleBtn() {
+        return mPlayerScaleBtn;
+    }
+
+    @Override
+    public TextView settingsTimeStartBtn() {
+        return mPlayerTimeStartBtn;
+    }
+
+    @Override
+    public TextView settingsTimeSkipBtn() {
+        return mPlayerTimeSkipBtn;
+    }
+
+    @Override
+    public TextView settingsTimeResetBtn() {
+        return mPlayerTimeResetBtn;
+    }
+
+    @Override
+    public TextView settingsRetryBtn() {
+        return mPlayRetry;
+    }
+
+    @Override
+    public TextView settingsRefreshBtn() {
+        return mPlayRefresh;
+    }
+
+    @Override
+    public TextView settingsZimuBtn() {
+        return mZimuBtn;
+    }
+
+    @Override
+    public TextView settingsAudioBtn() {
+        return mAudioTrackBtn;
+    }
+
+    /** 设置倍速;speed 为空表示循环切换(与在线播放一致) */
+    @Override
+    public void setSpeed(String speedStr) {
+        myHandle.removeCallbacks(myRunnable);
+        myHandle.postDelayed(myRunnable, myHandleSeconds);
+        try {
+            float speed = (float) mPlayerConfig.getDouble("sp");
+            if (TextUtils.isEmpty(speedStr)) {
+                speed += 0.25f;
+                if (speed > 3) speed = 0.5f;
+            } else {
+                speed = Float.parseFloat(speedStr);
+            }
+            mPlayerConfig.put("sp", speed);
+            updatePlayerCfgView();
+            listener.updatePlayerCfg();
+            mControlWrapper.setSpeed(speed);
+        } catch (Exception e) {
+            AppBubble.toast("倍速参数异常");
+            e.printStackTrace();
+        }
+    }
+
+    @Override
+    public int getScaleType() {
+        try {
+            return mPlayerConfig.getInt("sc");
+        } catch (JSONException e) {
+            return 0;
+        }
+    }
+
+    @Override
+    public void setScaleType(int scaleType) {
+        try {
+            mPlayerConfig.put("sc", scaleType);
+            updatePlayerCfgView();
+            listener.updatePlayerCfg();
+            mControlWrapper.setScreenScaleType(scaleType);
+        } catch (JSONException e) {
+            e.printStackTrace();
+        }
+    }
+
+    @Override
+    public int getPlayerType() {
+        try {
+            return mPlayerConfig.getInt("pl");
+        } catch (JSONException e) {
+            return 0;
+        }
+    }
+
+    @Override
+    public void setPlayerType(int playerType) {
+        try {
+            mPlayerConfig.put("pl", playerType);
+            updatePlayerCfgView();
+            listener.updatePlayerCfg();
+            listener.replay(false);
+            hideBottom();
+        } catch (JSONException e) {
+            e.printStackTrace();
+        }
+    }
+
+    @Override
+    public int getRenderType() {
+        return mPlayerConfig == null ? PlayConfig.getRenderType()
+                : mPlayerConfig.optInt("pr", PlayConfig.getRenderType());
+    }
+
+    @Override
+    public void setRenderType(int renderType) {
+        if (renderType != 0 && renderType != 1) return;
+        try {
+            mPlayerConfig.put("pr", renderType);
+            listener.updatePlayerCfg();
+            listener.replay(false);
+            hideBottom();
+        } catch (JSONException e) {
+            e.printStackTrace();
+        }
+    }
+
+    @Override
+    public void increaseTime(String type) {
+        try {
+            int step = PlayConfig.getTimeStep();
+            int time = mPlayerConfig.getInt(type);
+            time += step;
+            if (time > 30 * 10) time = 0;
+            mPlayerConfig.put(type, time);
+            updatePlayerCfgView();
+            listener.updatePlayerCfg();
+        } catch (JSONException e) {
+            e.printStackTrace();
+        }
+    }
+
+    @Override
+    public void decreaseTime(String type) {
+        try {
+            int step = PlayConfig.getTimeStep();
+            int time = mPlayerConfig.getInt(type);
+            time -= step;
+            if (time < 0) time = (30 * 10);
+            mPlayerConfig.put(type, time);
+            updatePlayerCfgView();
+            listener.updatePlayerCfg();
+        } catch (JSONException e) {
+            e.printStackTrace();
+        }
     }
 
     public void resetSpeed() {
@@ -714,6 +932,15 @@ public class LocalVideoController extends BaseController {
         void toggleFullScreen();
 
         void exit();
+
+        /** 右上角设置按钮:本地播放显示设置底栏 */
+        void showSetting();
+
+        /** 右上角投屏按钮 */
+        void cast();
+
+        /** 右上角画中画按钮 */
+        void pip();
     }
 
     public void setListener(VodControlListener listener) {
@@ -743,8 +970,7 @@ public class LocalVideoController extends BaseController {
                 listener.playNext(true);
             }
         }
-        mCurrentTime.setText(PlayerUtils.stringForTime(position));
-        mTotalTime.setText(PlayerUtils.stringForTime(duration));
+        updateProgressTimeLabels(mCurrentTime, mTotalTime, duration, position);
         if (fromLongPress){
             LogUtils.d("当前获取时间:"+PlayerUtils.stringForTime(duration));
             LogUtils.d("当前播放状态:"+videoPlayState);
@@ -773,11 +999,13 @@ public class LocalVideoController extends BaseController {
         if (!simSlideStart)
             return;
         mControlWrapper.seekTo(simSeekPosition);
+        finishSeeking(true);
         if (!mControlWrapper.isPlaying())
             mControlWrapper.start();
         simSlideStart = false;
         simSeekPosition = 0;
         simSlideOffset = 0;
+        dismissSeekPanel(); // 遥控 seek 结束:浮层立即消失,状态机马上接管 loading
     }
 
     public void tvSlideStart(int dir) {
@@ -786,6 +1014,7 @@ public class LocalVideoController extends BaseController {
             return;
         if (!simSlideStart) {
             simSlideStart = true;
+            beginSeeking();
         }
         // 每次10秒
         simSlideOffset += (10000.0f * dir);
@@ -800,10 +1029,13 @@ public class LocalVideoController extends BaseController {
     @Override
     protected void updateSeekUI(int curr, int seekTo, int duration) {
         super.updateSeekUI(curr, seekTo, duration);
+        // 快进/快退用播放器那对 chevron(ic_seek_right / ic_seek_left,矢量、fillColor 为白),
+        // 再叠一层白色滤镜:保证快退/快进在灰色进度浮层上一律白显
+        mProgressIcon.setColorFilter(0xFFFFFFFF);
         if (seekTo > curr) {
-            mProgressIcon.setImageResource(R.drawable.icon_pre);
+            mProgressIcon.setImageResource(R.drawable.ic_seek_right);
         } else {
-            mProgressIcon.setImageResource(R.drawable.icon_back);
+            mProgressIcon.setImageResource(R.drawable.ic_seek_left);
         }
         mProgressText.setText(PlayerUtils.stringForTime(seekTo) + " / " + PlayerUtils.stringForTime(duration));
         mHandler.sendEmptyMessage(1000);
@@ -814,12 +1046,12 @@ public class LocalVideoController extends BaseController {
     @Override
     protected void onPlayStateChanged(int playState) {
         super.onPlayStateChanged(playState);
+        if (isLock && !isLocked()) setLocked(true);
         videoPlayState = playState;
         switch (playState) {
             case VideoView.STATE_IDLE:
                 break;
             case VideoView.STATE_PLAYING:
-                initLandscapePortraitBtnInfo();
                 startProgress();
                 mIvPlayStatus.setImageResource(R.drawable.ic_pause);
                 break;
@@ -830,16 +1062,13 @@ public class LocalVideoController extends BaseController {
                 listener.errReplay();
                 break;
             case VideoView.STATE_PREPARED:
-                mPlayLoadNetSpeed.setVisibility(GONE);
                 hideLiveAboutBtn();
                 listener.prepared();
                 break;
             case VideoView.STATE_BUFFERED:
-                mPlayLoadNetSpeed.setVisibility(GONE);
                 break;
             case VideoView.STATE_PREPARING:
             case VideoView.STATE_BUFFERING:
-                if (mProgressRoot.getVisibility() == GONE) mPlayLoadNetSpeed.setVisibility(VISIBLE);
                 break;
             case VideoView.STATE_PLAYBACK_COMPLETED:
                 listener.playNext(true);
@@ -851,12 +1080,12 @@ public class LocalVideoController extends BaseController {
         return mBottomRoot.getVisibility() == VISIBLE;
     }
 
-    void showBottom() {
+    public void showBottom() {
         mHandler.removeMessages(1003);
         mHandler.sendEmptyMessage(1002);
     }
 
-    void hideBottom() {
+    public void hideBottom() {
         mHandler.removeMessages(1002);
         mHandler.sendEmptyMessage(1003);
     }
@@ -913,11 +1142,28 @@ public class LocalVideoController extends BaseController {
     public void onLongPress(MotionEvent e) {
         if (videoPlayState != VideoView.STATE_PAUSED) {
             fromLongPress = true;
-            float speed = Hawk.get(HawkConfig.VIDEO_SPEED, 2.0f);
+            float speed = PlayConfig.getVideoSpeed();
             mControlWrapper.setSpeed(speed);
             mLlSpeed.setVisibility(VISIBLE);
             mTvSpeedTip.setText(speed + "x");
         }
+    }
+
+    @SuppressLint("ClickableViewAccessibility")
+    @Override
+    public boolean onTouch(View v, MotionEvent event) {
+        if (isLock) {
+            // 上锁:消费所有触摸(手势/点按全部屏蔽),点按屏幕短暂显示锁按钮
+            if (event.getAction() == MotionEvent.ACTION_UP) {
+                mLockView.setVisibility(VISIBLE);
+                // 系统时间与锁定键同步:点屏幕一起唤出,到点由 lockRunnable 一起隐藏
+                mPlayPauseTime.setVisibility(VISIBLE);
+                mHandler.removeCallbacks(lockRunnable);
+                mHandler.postDelayed(lockRunnable, dismissTimeLock);
+            }
+            return true;
+        }
+        return super.onTouch(v, event);
     }
 
     @SuppressLint("ClickableViewAccessibility")
@@ -951,6 +1197,16 @@ public class LocalVideoController extends BaseController {
     }
 
     @Override
+    public boolean onDoubleTap(MotionEvent e) {
+        if (mControlWrapper == null) return super.onDoubleTap(e);
+        if (isLock || isLocked() || !isInPlaybackState()) return true;
+        if (mProgressRoot.getVisibility() == VISIBLE) return true;
+        return handleDoubleTapSeek(e, mBottomRoot, mTopRoot1, mTopRoot2,
+                mLockView, mScreenRotateView, mPlayPauseTime)
+                || super.onDoubleTap(e);
+    }
+
+    @Override
     public boolean onBackPressed() {
         if (super.onBackPressed()) {
             return true;
@@ -964,7 +1220,14 @@ public class LocalVideoController extends BaseController {
 
     @Override
     protected void onDetachedFromWindow() {
+        clearDoubleTapSeekFeedback();
+        if (mAdaptiveProgressLayout != null) mAdaptiveProgressLayout.cancelPendingUpdate();
         super.onDetachedFromWindow();
         mHandler.removeCallbacks(myRunnable2);
+        // 与 VodController 同一处缺陷:1004(设速度)在"非播放态"分支会每 100ms 自我重投,
+        // MessageQueue 里的消息持有 Handler → 持有 View → 持有 Activity;这里一并清干净
+        // (myHandle 在 initView 里才创建,视图被提前移除时为 null,故判空)
+        if (myHandle != null) myHandle.removeCallbacksAndMessages(null);
+        if (mHandler != null) mHandler.removeCallbacksAndMessages(null);
     }
 }

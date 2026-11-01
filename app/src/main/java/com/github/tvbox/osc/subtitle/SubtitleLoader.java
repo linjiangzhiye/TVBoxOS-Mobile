@@ -25,33 +25,38 @@
 
 package com.github.tvbox.osc.subtitle;
 
-import android.net.Uri;
 import android.text.TextUtils;
 import android.util.Log;
 
 import com.github.tvbox.osc.subtitle.exception.FatalParsingException;
 import com.github.tvbox.osc.subtitle.format.FormatASS;
+import com.github.tvbox.osc.subtitle.format.FormatSCC;
 import com.github.tvbox.osc.subtitle.format.FormatSRT;
 import com.github.tvbox.osc.subtitle.format.FormatSTL;
+import com.github.tvbox.osc.subtitle.format.FormatTTML;
 import com.github.tvbox.osc.subtitle.format.TimedTextFileFormat;
 import com.github.tvbox.osc.subtitle.model.TimedTextObject;
 import com.github.tvbox.osc.subtitle.runtime.AppTaskExecutor;
-import com.github.tvbox.osc.util.FileUtils;
+import com.github.tvbox.osc.util.CharsetUtils;
+import com.github.tvbox.osc.util.HttpClient;
 import com.github.tvbox.osc.util.UnicodeReader;
-import com.lzy.okgo.OkGo;
 
 import org.apache.commons.io.input.ReaderInputStream;
-import org.mozilla.universalchardet.UniversalDetector;
 
 import java.io.ByteArrayInputStream;
+import java.io.ByteArrayOutputStream;
+import java.io.BufferedInputStream;
 import java.io.File;
+import java.io.FileInputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.Reader;
-import java.net.URLDecoder;
 import java.nio.charset.Charset;
+import java.util.HashMap;
+import java.util.Map;
 
 import okhttp3.Response;
+import okhttp3.ResponseBody;
 
 /**
  * @author AveryZhong.
@@ -59,6 +64,7 @@ import okhttp3.Response;
 
 public class SubtitleLoader {
     private static final String TAG = SubtitleLoader.class.getSimpleName();
+    private static final int MAX_SUBTITLE_BYTES = 8 * 1024 * 1024;
 
     private SubtitleLoader() {
         throw new AssertionError("No instance for you.");
@@ -159,7 +165,7 @@ public class SubtitleLoader {
 
     private static SubtitleLoadSuccessResult loadFromRemote(final String remoteSubtitlePath)
             throws IOException, FatalParsingException, Exception {
-        Log.d(TAG, "parseRemote: remoteSubtitlePath = " + remoteSubtitlePath);
+        Log.d(TAG, "parseRemote: loading remote subtitle");
         String referer = "";
         if (remoteSubtitlePath.contains("alicloud") || remoteSubtitlePath.contains("aliyundrive")) {
             referer = "https://www.aliyundrive.com/";
@@ -167,43 +173,31 @@ public class SubtitleLoader {
             referer = "https://secure.assrt.net/";
         }
         String ua = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/94.0.4606.54 Safari/537.36";
-        Response response = OkGo.<String>get(remoteSubtitlePath)
-                .headers("Referer", referer)
-                .headers("User-Agent", ua)
-                .execute();
-        byte[] bytes = response.body().bytes();
-        UniversalDetector detector = new UniversalDetector(null);
-        detector.handleData(bytes, 0, bytes.length);
-        detector.dataEnd();
-        String encoding = detector.getDetectedCharset();
-        String content = new String(bytes, encoding);
-        InputStream is = new ByteArrayInputStream(content.getBytes());
-        String filename = "";
-        String contentDispostion = response.header("content-disposition", "");
-        String[] cd = contentDispostion.split(";");
-        if (cd.length > 1) {
-            String filenameInfo = cd[1];
-            filenameInfo = filenameInfo.trim();
-            if (filenameInfo.startsWith("filename=")) {
-                filename = filenameInfo.replace("filename=", "");
-                filename = filename.replace("\"", "");
-            } else if (filenameInfo.startsWith("filename*=")) {
-                filename = filenameInfo.substring(filenameInfo.lastIndexOf("''")+2);
+        Map<String, String> headers = new HashMap<>();
+        headers.put("Referer", referer);
+        headers.put("User-Agent", ua);
+        Response response = HttpClient.getResponseSync(remoteSubtitlePath, headers);
+        if (response == null) throw new IOException("Subtitle response is empty");
+        try {
+            ResponseBody body = response.body();
+            if (!response.isSuccessful() || body == null) {
+                throw new IOException("Subtitle request failed: HTTP " + response.code());
             }
-            filename = filename.trim();
-            filename = URLDecoder.decode(filename);
+            byte[] bytes = readLimited(body.byteStream(), body.contentLength(), MAX_SUBTITLE_BYTES);
+            // 字符集探测统一走 CharsetUtils(UniversalDetector + 中文常用字回退;探测失败不再 NPE)
+            String content = new String(bytes, CharsetUtils.detect(bytes));
+            InputStream is = new ByteArrayInputStream(content.getBytes());
+            String filename = SubtitleFilePolicy.suggestedName(
+                    response.header("content-disposition", ""), remoteSubtitlePath);
+            SubtitleLoadSuccessResult subtitleLoadSuccessResult = new SubtitleLoadSuccessResult();
+            subtitleLoadSuccessResult.timedTextObject = loadAndParse(is, filename);
+            subtitleLoadSuccessResult.fileName = filename;
+            subtitleLoadSuccessResult.content = content;
+            subtitleLoadSuccessResult.subtitlePath = remoteSubtitlePath;
+            return subtitleLoadSuccessResult;
+        } finally {
+            response.close();
         }
-        String filePath = filename;
-        if (filename == null || filename.length() < 1) {
-            Uri uri = Uri.parse(remoteSubtitlePath);
-            filePath = uri.getPath();
-        }
-        SubtitleLoadSuccessResult subtitleLoadSuccessResult = new SubtitleLoadSuccessResult();
-        subtitleLoadSuccessResult.timedTextObject = loadAndParse(is, filePath);
-        subtitleLoadSuccessResult.fileName = filename;
-        subtitleLoadSuccessResult.content = content;
-        subtitleLoadSuccessResult.subtitlePath = remoteSubtitlePath;
-        return subtitleLoadSuccessResult;
     }
 
     private static SubtitleLoadSuccessResult loadFromLocal(final String localSubtitlePath)
@@ -214,12 +208,12 @@ public class SubtitleLoader {
             Log.d(TAG, "parseLocal: localSubtitlePath = " + localSubtitlePath + " file not exsits");
             return null;
         }
-        byte[] bytes = FileUtils.readSimple(file);
-        UniversalDetector detector = new UniversalDetector(null);
-        detector.handleData(bytes, 0, bytes.length);
-        detector.dataEnd();
-        String encoding = detector.getDetectedCharset();
-        String content = new String(bytes, encoding);
+        byte[] bytes;
+        try (InputStream input = new FileInputStream(file)) {
+            bytes = readLimited(input, file.length(), MAX_SUBTITLE_BYTES);
+        }
+        // 字符集探测统一走 CharsetUtils(UniversalDetector + 中文常用字回退;探测失败不再 NPE)
+        String content = new String(bytes, CharsetUtils.detect(bytes));
         InputStream is = new ByteArrayInputStream(content.getBytes());
         String filePath = file.getPath();
         SubtitleLoadSuccessResult subtitleLoadSuccessResult = new SubtitleLoadSuccessResult();
@@ -240,25 +234,83 @@ public class SubtitleLoader {
         Log.d(TAG, "parse: name = " + fileName + ", ext = " + ext);
         Reader reader = new UnicodeReader(is); //处理有BOM头的utf8
         InputStream newInputStream = new ReaderInputStream(reader, Charset.defaultCharset());
-        if (".srt".equalsIgnoreCase(ext)) {
-            return new FormatSRT().parseFile(fileName, newInputStream);
-        } else if (".ass".equalsIgnoreCase(ext)) {
-            return new FormatASS().parseFile(fileName, newInputStream);
-        } else if (".stl".equalsIgnoreCase(ext)) {
-            return new FormatSTL().parseFile(fileName, newInputStream);
-        } else if (".ttml".equalsIgnoreCase(ext)) {
-            return new FormatSTL().parseFile(fileName, newInputStream);
+        // 先把内容整份读进内存:每种候选格式都喂**独立的**流。
+        // 原实现让 4 个候选共用同一个流,第一个解析器读空/关掉之后,后面的候选只能拿到空内容,
+        // 于是"后缀写错的文件"(如 .txt/.srt 里其实是 ASS)永远解析不出字幕。
+        byte[] bytes = readAll(newInputStream);
+        newInputStream.close();
+        if (bytes.length == 0) {
+            Log.d(TAG, "parse: empty subtitle stream, name = " + fileName);
+            return null;
         }
-        TimedTextFileFormat[] arr = {new FormatSRT(), new FormatASS(), new FormatSTL(), new FormatSTL()};
-        for(TimedTextFileFormat oneFormat : arr) {
+        // 后缀优先;解析不出字幕(或该格式解析异常)时再按内容逐个试其余格式。
+        // 这样既保留"srt/ass/stl/ttml 各走自己解析器"的确定性,又给错后缀/怪后缀兜底。
+        TimedTextObject fallback = null;
+        for (TimedTextFileFormat format : candidateFormats(ext)) {
             try {
-                TimedTextObject obj = oneFormat.parseFile(fileName, newInputStream);
-                return obj;
-            } catch (Exception e) {
-                continue;
+                TimedTextObject tto = format.parseFile(fileName, new ByteArrayInputStream(bytes));
+                if (tto != null && tto.captions != null && !tto.captions.isEmpty()) {
+                    return tto;
+                }
+                if (fallback == null) fallback = tto;
+            } catch (Throwable th) {
+                Log.d(TAG, "parse with " + format.getClass().getSimpleName() + " failed: " + th.getMessage());
             }
         }
-        return null;
+        return fallback;
+    }
+
+    /** 按后缀挑首选解析器,再补上其余格式作为"内容兜底"(顺序稳定,便于复现) */
+    private static TimedTextFileFormat[] candidateFormats(String ext) {
+        TimedTextFileFormat[] all = {new FormatSRT(), new FormatASS(), new FormatTTML(), new FormatSTL(), new FormatSCC()};
+        TimedTextFileFormat preferred = null;
+        if (".srt".equalsIgnoreCase(ext) || ".sub".equalsIgnoreCase(ext)) {
+            preferred = all[0];
+        } else if (".ass".equalsIgnoreCase(ext) || ".ssa".equalsIgnoreCase(ext)) {
+            preferred = all[1];
+        } else if (".ttml".equalsIgnoreCase(ext) || ".xml".equalsIgnoreCase(ext)) {
+            preferred = all[2];
+        } else if (".stl".equalsIgnoreCase(ext)) {
+            preferred = all[3];
+        } else if (".scc".equalsIgnoreCase(ext)) {
+            preferred = all[4];
+        }
+        if (preferred == null) {
+            return all;
+        }
+        TimedTextFileFormat[] order = new TimedTextFileFormat[all.length];
+        order[0] = preferred;
+        int i = 1;
+        for (TimedTextFileFormat f : all) {
+            if (f != preferred) order[i++] = f;
+        }
+        return order;
+    }
+
+    private static byte[] readAll(InputStream in) throws IOException {
+        java.io.ByteArrayOutputStream bos = new java.io.ByteArrayOutputStream();
+        byte[] buf = new byte[8192];
+        int n;
+        while ((n = in.read(buf)) > 0) {
+            bos.write(buf, 0, n);
+        }
+        return bos.toByteArray();
+    }
+
+    static byte[] readLimited(InputStream in, long declaredLength, int maxBytes) throws IOException {
+        BufferedInputStream input = in instanceof BufferedInputStream
+                ? (BufferedInputStream) in : new BufferedInputStream(in);
+        // Identify bitmap subtitles before the size check or any character decoding.
+        SubtitleInputPolicy.requireSupportedContent(input);
+        if (declaredLength > maxBytes) throw new IOException("Subtitle exceeds size limit");
+        ByteArrayOutputStream out = new ByteArrayOutputStream();
+        byte[] buffer = new byte[8192];
+        int count;
+        while ((count = input.read(buffer)) != -1) {
+            if (count > maxBytes - out.size()) throw new IOException("Subtitle exceeds size limit");
+            out.write(buffer, 0, count);
+        }
+        return out.toByteArray();
     }
 
     public interface Callback {

@@ -2,10 +2,7 @@
 <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
     android:layout_width="match_parent"
     android:layout_height="wrap_content"
-    xmlns:app="http://schemas.android.com/apk/res-auto"
-    xmlns:tools="http://schemas.android.com/tools"
     android:layout_gravity="center"
-    android:background="@drawable/bg_bottom_dialog"
     android:orientation="vertical"
     android:paddingHorizontal="20dp"
     android:paddingTop="20dp"
@@ -16,6 +13,9 @@
         android:layout_height="0dp"
         android:layout_weight="1"
         android:scrollbars="none"
+        android:paddingTop="8dp"
+        android:paddingBottom="8dp"
+        android:clipToPadding="false"
         >
 
         <LinearLayout
@@ -61,13 +61,14 @@
         </LinearLayout>
     </ScrollView>
 
+    <!-- 按钮完全走主题按钮样式 BtnPrimary(btn_confirm_bg 填充 / 文字 btn_confirm_text / 圆角 radius_btn 都来自主题):
+         不要再写 android:textColor(以前写死 text_foreground = 页面正文色,在深色主按钮上几乎看不见,等于绕开了主题按钮色板),
+         也不要再单独覆盖 cornerRadius —— 圆角由 btn 主题键统一管 -->
     <com.google.android.material.button.MaterialButton
         android:id="@+id/btn_cancel"
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        app:cornerRadius="20dp"
         android:layout_marginTop="20dp"
-        android:textColor="@color/text_foreground"
-        style="@style/Widget.MaterialComponents.Button.OutlinedButton"
+        style="@style/BtnPrimary"
         android:text="知道了"/>
 </LinearLayout>

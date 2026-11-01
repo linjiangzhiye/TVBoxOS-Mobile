@@ -1,6 +1,7 @@
 package com.github.tvbox.osc.util;
 
 import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 import java.util.concurrent.LinkedBlockingDeque;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
@@ -18,6 +19,31 @@ public class HeavyTaskUtil {
     private static ExecutorService executorService = new ThreadPoolExecutor(CORE_POOL_SIZE, 6,
             10L, TimeUnit.SECONDS, taskQueue);
 
+    /**
+     * 搜索会同步等待各资源站网络响应，独立的模块级有界并发池避免慢源占满通用任务池。
+     * <p>
+     * 并发从 12 一路降到 4：JS/JAR 源每个都要建 QuickJS 运行时/加载 dex，Csp 主 jar 还会拉起
+     * WebView(chromium)，几十个源并发提交会让内存瞬时尖峰触发 lmkd 杀进程
+     * (现象：一搜索 App 就重启，日志 `Sending signal SIG: 9`)。
+     * 4 是内存安全优先的折中：搜索整体稍慢，但能扛住 WebView + 多个 QuickJS 运行时的叠加。
+     */
+    private static final ExecutorService searchExecutorService = new ThreadPoolExecutor(
+            4, 4, 30L, TimeUnit.SECONDS, new LinkedBlockingDeque<>(8192));
+
+    /** 应用级共享串行执行器:适合"必须按提交顺序逐个执行"的后台小任务(如 SP 增量写) */
+    private static final ExecutorService serialExecutorService = Executors.newSingleThreadExecutor();
+
+    /**
+     * 图片解码专用执行器(Picasso executor):与共享大池隔离,固定 4 线程。
+     * 搜索结果/列表大量海报解码不再占用搜索/爬虫用的共享大池,避免几十张图把 6 线程
+     * 大池占满后,排队中的各来源搜索请求被图片任务拖慢(改版后搜索慢的主因之一)。
+     */
+    private static final ExecutorService imageExecutorService = Executors.newFixedThreadPool(4, r -> {
+        Thread t = new Thread(r, "tvbox-img-decode");
+        t.setDaemon(true);
+        return t;
+    });
+
     public static void executeNewTask(Runnable command) {
 //        Log.d(TAG, "executeNewTask: CPU_COUNT=" + CPU_COUNT + ", CORE_POOL_SIZE=" + CORE_POOL_SIZE);
         executorService.execute(command);
@@ -29,6 +55,19 @@ public class HeavyTaskUtil {
 
     public static ExecutorService getBigTaskExecutorService() {
         return executorService;
+    }
+
+    public static ExecutorService getSerialExecutorService() {
+        return serialExecutorService;
+    }
+
+    public static ExecutorService getSearchExecutorService() {
+        return searchExecutorService;
+    }
+
+    /** 图片解码专用池(Picasso/Glide 等图片库 executor 用;与搜索/爬虫共享池隔离) */
+    public static ExecutorService getImageExecutorService() {
+        return imageExecutorService;
     }
 
     public static LinkedBlockingDeque<Runnable> getBigTaskQueue() {

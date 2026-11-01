@@ -1,0 +1,63 @@
+package com.github.tvbox.osc.spiderapi;
+
+import com.github.tvbox.osc.bean.LiveChannelGroup;
+import com.google.gson.JsonArray;
+
+import java.util.Collections;
+import java.util.List;
+
+/**
+ * 直播频道配置服务持有者（App 组合根注入 :spider 实现；默认安全降级：空分组列表）。
+ */
+public final class LiveChannelConfigProviders {
+
+    private static volatile LiveChannelConfigApi impl = new LiveChannelConfigApi() {
+        @Override
+        public List<LiveChannelGroup> getChannelGroupList() {
+            return Collections.emptyList();
+        }
+
+        @Override
+        public List<LiveChannelGroup> getFallbackChannelGroupList() {
+            return Collections.emptyList();
+        }
+
+        @Override
+        public List<LiveChannelConfigApi.SubscribeLiveSource> getSubscribeLiveSources() {
+            return Collections.emptyList();
+        }
+
+        @Override
+        public String getLoadedSubscriptionUrl() {
+            return "";
+        }
+
+        @Override
+        public void previewSubscribeLiveSources(String subscriptionUrl, PreviewCallback callback) {
+            if (callback != null) callback.onResult(Collections.emptyList(), "直播源预览暂不可用");
+        }
+
+        @Override
+        public void reloadLiveSource() {
+            // 注入前无 :spider 实现：无直播配置可重载，空转即可
+        }
+
+        @Override
+        public void loadLivesAsync(JsonArray livesArray, LoadCallback callback) {
+            if (callback != null) callback.onResult(false);
+        }
+    };
+
+    private LiveChannelConfigProviders() {
+    }
+
+    public static void set(LiveChannelConfigApi api) {
+        if (api != null) {
+            impl = api;
+        }
+    }
+
+    public static LiveChannelConfigApi get() {
+        return impl;
+    }
+}

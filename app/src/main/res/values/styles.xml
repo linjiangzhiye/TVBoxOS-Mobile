@@ -1,19 +1,96 @@
-<resources>
+<?xml version="1.0" encoding="utf-8"?>
+<resources xmlns:tools="http://schemas.android.com/tools">
+
+    <!-- ================= 小组件按钮(唯一一份,全局复用) =================
+         日志分类键 / 背景图"调整组件位置"键 / 搜索页历史·热词·联想键 / 播放器设置面板里的键 / JSON 导入的「粘贴」键,
+         全部套这一条:
+           · 底 = selector_widget_btn(未选中只有边框线、选中=纯色按钮的填充,圆角只走 radius_widget_btn);
+           · 字 = widget_btn_text(未选中=文字主色、实心选中=主按钮文字、空心选中=高亮文字);
+           · **高度与半径要配套**:minHeight 为 34dp,radius_widget_btn 默认 12dp;
+             0～15dp 是普通圆角,16dp 接近胶囊,17dp 是标准胶囊,不得用布局裁剪造成不对称圆角。
+         两种交互形态(用户口径,逐页归属也在这里定死,别在页面里各写一套):
+           ① **选择按钮** —— 点击后 `setSelected(true/false)`,底色与文字色一起切到"纯色按钮"那一档
+              (由下面这对 selector 自动完成,代码只切 isSelected)。用它的地方:
+              · 运行日志页的分类/筛选键(业务·错误日志 + 全部/下载/播放/订阅/系统/仅失败);
+              · 设置背景页的「图片位置 / 大小」预设键(8 个);
+              · 播放器设置面板里的**倍速**键(x0.5 ~ x3.0)。
+           ② **点击按钮** —— 点下去整键做一次**透明度 80%** 的点击特效再恢复
+              (见 {@code ui/kit/WidgetPressEffect},用 View alpha 才能连文字与图标一起淡)。用它的地方:
+              · 搜索页的全部按钮:历史记录 / 热门搜索 chip、搜索联想弹窗里的键;
+              · 播放器设置面板里倍速**以外**的键:缩放/播放器/解码/横竖屏/字幕/音轨/重播/刷新/重置;
+              · JSON 导入弹窗里的「粘贴」键。 -->
+    <style name="WidgetBtn">
+        <item name="android:background">@drawable/selector_widget_btn</item>
+        <item name="android:textColor">@color/widget_btn_text</item>
+        <item name="android:minHeight">34dp</item>
+        <item name="android:gravity">center</item>
+        <item name="android:singleLine">true</item>
+        <item name="android:paddingStart">10dp</item>
+        <item name="android:paddingEnd">10dp</item>
+    </style>
+
+    <!-- 背景图设置页的预设 chip:就是小组件按钮(等分宽度 + 12sp 小一号字),底与字都跟 WidgetBtn 同一套。
+         横向内边距比 WidgetBtn 收窄(10dp→6dp):位置那一行有 5 个等分格,每格只有 50 来 dp,
+         4 字标签 + 10dp 内边距在窄屏/大字体下必被 ellipsize 成"全屏铺…";
+         让出的宽度全给文字,配合"尺寸 3 个 / 位置 5 个(2 字标签)"的排法,标签就不会再被截断 -->
+    <style name="PageBgChip" parent="@style/WidgetBtn">
+        <item name="android:layout_width">0dp</item>
+        <item name="android:layout_height">34dp</item>
+        <item name="android:layout_weight">1</item>
+        <item name="android:layout_marginStart">4dp</item>
+        <item name="android:layout_marginEnd">4dp</item>
+        <item name="android:paddingStart">6dp</item>
+        <item name="android:paddingEnd">6dp</item>
+        <item name="android:textSize">12sp</item>
+        <item name="android:ellipsize">end</item>
+    </style>
 
 
-    <style name="AppTheme" parent="Theme.MaterialComponents.Light.NoActionBar">
-        <!--应用的主要色调,actionBar默认使用该颜色,Toolbar导航栏的底色-->
-        <item name="colorPrimary">@color/colorPrimary</item>
-        <!--CheckBox,RadioButton,SwitchCompat等一般控件的选中效果默认采用该颜色-->
-        <item name="colorAccent">@color/colorAccent</item>
-        <!--默认window窗口(activity)背景颜色,根据主题修改该属性可 避免某些情况activity跳转/回跳会白屏(出现与主题相反的颜色)-->
+
+    <style name="AppTheme" parent="Theme.Material3.DayNight.NoActionBar">
+        <!-- 明暗由应用的主题选择解析；系统只提供亮暗信号，不自动重着色页面。 -->
+        <item name="android:forceDarkAllowed" tools:targetApi="29">false</item>
+        <!-- Material 3 色板 -->
+        <item name="colorPrimary">@color/md_primary</item>
+        <item name="colorOnPrimary">@color/md_on_primary</item>
+        <item name="colorPrimaryContainer">@color/md_primary_container</item>
+        <item name="colorOnPrimaryContainer">@color/md_on_primary_container</item>
+        <item name="colorSecondary">@color/md_secondary</item>
+        <item name="colorOnSecondary">@color/md_on_secondary</item>
+        <item name="colorSecondaryContainer">@color/md_secondary_container</item>
+        <item name="colorOnSecondaryContainer">@color/md_on_secondary_container</item>
+        <item name="colorTertiary">@color/md_tertiary</item>
+        <item name="colorOnTertiary">@color/md_on_tertiary</item>
+        <item name="colorTertiaryContainer">@color/md_tertiary_container</item>
+        <item name="colorOnTertiaryContainer">@color/md_on_tertiary_container</item>
+        <item name="colorError">@color/md_error</item>
+        <item name="colorOnError">@color/md_on_error</item>
+        <item name="colorErrorContainer">@color/md_error_container</item>
+        <item name="colorOnErrorContainer">@color/md_on_error_container</item>
+        <item name="colorSurface">@color/md_surface</item>
+        <item name="colorOnSurface">@color/md_on_surface</item>
+        <item name="colorSurfaceVariant">@color/md_surface_variant</item>
+        <item name="colorOnSurfaceVariant">@color/md_on_surface_variant</item>
+        <item name="colorOutline">@color/md_outline</item>
+        <!-- 兼容旧引用 -->
+        <item name="colorAccent">@color/md_primary</item>
+        <item name="colorPrimaryDark">@color/md_primary</item>
+        <!-- 句柄和光标跟随主题文字主色；选区背景为不透明纯色。 -->
+        <item name="colorControlActivated">@color/text_foreground</item>
+        <item name="android:colorControlActivated">@color/text_foreground</item>
+        <item name="android:textColorHighlight">@color/selection_highlight</item>
+        <!--默认window窗口(activity)背景颜色,避免activity跳转/回跳白屏-->
         <item name="android:windowBackground">@color/windowBackground</item>
     </style>
 
     <style name="SplashTheme" parent="AppTheme">
-        <item name="android:windowBackground">@drawable/bg_splash</item>
+        <!-- SplashActivity 立即转到首页；windowBackground 只留纯色，避免系统启动窗口的缩放动画 -->
+        <item name="android:windowBackground">@color/bg_body</item>
         <item name="android:windowFullscreen">true</item>
         <item name="android:windowDrawsSystemBarBackgrounds">false</item>
+        <!-- Android 12+ 系统启动画面:背景跟随主题 + 透明图标,去掉"从小变大"的缩放动画 -->
+        <item name="android:windowSplashScreenBackground" tools:targetApi="31">@color/bg_body</item>
+        <item name="android:windowSplashScreenAnimatedIcon" tools:targetApi="31">@drawable/ic_splash_blank</item>
     </style>
 
     <style name="AppTheme.NoActionBar">
@@ -27,6 +104,109 @@
         <!--        <item name="android:windowBackground">@drawable/main_bg</item>-->
         <item name="android:windowBackground">@android:color/transparent</item>
     </style>
+    <!-- ================= 主题按钮(全局统一,只有三型) =================
+         ① 纯色按钮 BtnPrimary   —— 填充与描边由 btn_confirm_bg 派生:确定/保存/开始下载等主要动作
+         ② 空心按钮 BtnSecondary —— 无底色 + 1dp 描边:取消/重置/下载管理等次要动作;
+                                      按下仍为空心,描边与文字同色
+         ③ 纯文字按钮 BtnGhost   —— 无底色、无描边,只有文字(btn_plain_text):复制/展开/选集下载这类
+         三型**圆角只走 radius_btn**(theme_radii.json),不再有 *Large 变体。
+         "小组件按钮"(日志分类 / 背景图调整键 / 搜索历史·热词·联想 / 播放器设置键)是另一条线:
+         底走 selector_widget_btn(未选中只有边框线、选中=实心按钮背景色填充)、字走 widget_btn_text,圆角只走 **radius_widget_btn**。
+         颜色一律来自主题调色板,布局里不写死色值。 -->
+
+    <!-- ① 纯色按钮:确定/保存/开始下载等主要动作 -->
+    <style name="BtnPrimary" parent="@style/Widget.Material3.Button">
+        <item name="android:textColor">@color/btn_confirm_text</item>
+        <item name="android:textSize">14sp</item>
+        <item name="android:textAllCaps">false</item>
+        <item name="android:insetTop">0dp</item>
+        <item name="android:insetBottom">0dp</item>
+        <item name="android:gravity">center</item>
+        <item name="android:stateListAnimator">@null</item>
+        <!-- 首帧 XML 与运行时 Drawable 都由 theme_shapes.json 的同一条配方生成。 -->
+        <item name="android:background">@drawable/theme_btn_primary</item>
+        <item name="backgroundTint">@null</item>
+    </style>
+
+    <!-- 弹窗右上角关闭键（**全站统一**）:28dp 方框 + 2dp 内边距 ⇒ 图标实际画 24dp。
+         原 40dp+8dp 的 8dp 内边距把 24dp 图标往盒子里缩了一圈,再叠上父容器 padding,
+         图标离弹窗角有双重空隙、看着往里缩;改成 28dp+2dp 后图标几乎贴盒、留白只剩 2dp,
+         视觉上贴右上角(用户口径"对所有弹窗影响没事")。图标仍 24dp 不变。
+         以前每个弹窗各写一套 (50dp+10dp / 40dp+8dp / 32dp+7dp),同一个关闭键在不同弹窗里差一倍;
+         头部那一行再配 android:gravity="center_vertical"(ConstraintLayout 里用
+         constraintTop/Bottom_toXOf="@id/title"),才不会跟标题一高一低。
+         tint 故意**不放进这里**:换肤层 ThemeInflaterFactory 只遍历布局里**内联**写的属性,
+         写进 style 的 app:tint 它看不到 → 自定义主题下关闭键会停在编译期颜色。
+         所以布局里照旧保留一行 app:tint="@color/text_foreground"。 -->
+    <style name="DialogCloseButton">
+        <item name="android:layout_width">@dimen/dialog_close_size</item>
+        <item name="android:layout_height">@dimen/dialog_close_size</item>
+        <item name="android:padding">@dimen/dialog_close_padding</item>
+        <item name="android:src">@drawable/ic_close_24</item>
+    </style>
+
+    <!-- 危险实心按钮:红底 + 白字,用于明确采用实心危险样式的弹窗。
+         普通危险确认使用 BtnDangerGhost(红色描边 + 红字)。 -->
+    <style name="BtnDanger" parent="BtnPrimary">
+        <item name="android:textColor">@color/swipe_red_text</item>
+        <item name="android:background">@drawable/theme_btn_danger</item>
+    </style>
+
+    <!-- 危险空心按钮(无底色 + 红字 + 描边):不可逆动作的入口与普通确认键。
+         口径 = colors.xml 那条"危险入口走无底色的 @color/text_danger":底色透明(不抢眼、不是"确认执行"的重量)。
+         它**不跟**纯文字按钮(BtnGhost)走无描边那一档 —— 危险入口是"要做点什么"的键,留着空心键的描边
+         红色描边才不会跟旁边可点的普通文字混在一起;红字与描边同取危险红,按下仍为空心。
+         用在:主题编辑页「删除」、日志页「清空」及通用危险确认弹窗。 -->
+    <style name="BtnDangerGhost" parent="BtnGhost">
+        <item name="android:textColor">@color/btn_danger_ghost_text</item>
+        <item name="android:background">@drawable/theme_btn_danger_entry</item>
+    </style>
+
+    <!-- ② 空心按钮:取消/重置/下载管理等次要动作。按下仍无填充;
+         描边和文字都走文字主色(btn_plain_text),禁用时都走 text_disable。 -->
+    <style name="BtnSecondary" parent="@style/Widget.Material3.Button">
+        <item name="android:textColor">@color/btn_secondary_text</item>
+        <item name="android:textSize">14sp</item>
+        <item name="android:textAllCaps">false</item>
+        <item name="android:insetTop">0dp</item>
+        <item name="android:insetBottom">0dp</item>
+        <item name="android:gravity">center</item>
+        <item name="android:stateListAnimator">@null</item>
+        <item name="android:background">@drawable/theme_btn_secondary</item>
+        <item name="backgroundTint">@null</item>
+    </style>
+
+    <!-- ③ 纯文字按钮:背景透明、**无描边**,只剩文字(复制/展开/选集下载这类"本质是文字的动作")。
+         文字色 btn_plain_text 派生自 brand(文字主色),随主题走;按下也不显示背景或波纹。 -->
+    <style name="BtnGhost" parent="@style/Widget.Material3.Button.TextButton">
+        <item name="android:textColor">@color/btn_plain_text</item>
+        <item name="android:textSize">14sp</item>
+        <item name="android:textAllCaps">false</item>
+        <item name="android:insetTop">0dp</item>
+        <item name="android:insetBottom">0dp</item>
+        <item name="android:gravity">center</item>
+        <item name="android:stateListAnimator">@null</item>
+        <item name="android:background">@drawable/theme_btn_ghost</item>
+        <item name="backgroundTint">@null</item>
+        <item name="rippleColor">@android:color/transparent</item>
+    </style>
+
+    <!-- 纯文字按钮(TextView 版):给"本质就是一行文字"的键用 —— 复制 / 展开 / 选集 / 下载。
+         与 ③ BtnGhost 同一档观感(无底色、无描边、只有文字),这里补的是裸 TextView 缺的东西:
+         **可点击/聚焦**与**最小可点尺寸/内边距**，点击不显示圆形波纹背景。
+         文字色默认 btn_plain_text(= 文字主色),需要强调的地方(如"复制"走高亮色)在布局里单独覆盖。 -->
+    <style name="TextButton">
+        <item name="android:clickable">true</item>
+        <item name="android:focusable">true</item>
+        <item name="android:background">@android:color/transparent</item>
+        <item name="android:gravity">center</item>
+        <item name="android:minHeight">32dp</item>
+        <item name="android:paddingStart">8dp</item>
+        <item name="android:paddingEnd">8dp</item>
+        <item name="android:textColor">@color/btn_plain_text</item>
+        <item name="android:textSize">14sp</item>
+    </style>
+
     <!-- 自定义dialog样式 -->
     <style name="CustomDialogStyle" parent="@android:style/Theme.Dialog">
         <item name="android:windowBackground">@android:color/transparent</item>
@@ -71,6 +251,47 @@
         <item name="android:windowExitAnimation">@anim/fade_out</item>
     </style>
 
+    <!-- 字幕设置弹窗按钮:显式指定颜色,避免在 CustomDialogStyle 主题下解析 M3 色板属性失败 -->
+    <style name="SubtitleTextButton" parent="Widget.MaterialComponents.Button.TextButton">
+        <item name="backgroundTint">@android:color/transparent</item>
+        <item name="strokeColor">@android:color/transparent</item>
+        <item name="rippleColor">@android:color/transparent</item>
+        <item name="android:textColor">@color/text_foreground</item>
+        <item name="android:textSize">14sp</item>
+        <item name="android:textAllCaps">false</item>
+        <item name="android:minWidth">0dp</item>
+        <item name="android:minHeight">48dp</item>
+        <item name="android:paddingStart">8dp</item>
+        <item name="android:paddingEnd">8dp</item>
+        <item name="android:paddingTop">12dp</item>
+        <item name="android:paddingBottom">12dp</item>
+        <item name="android:insetTop">0dp</item>
+        <item name="android:insetBottom">0dp</item>
+        <item name="android:singleLine">false</item>
+        <item name="android:ellipsize">@null</item>
+    </style>
+
+    <style name="SubtitleSourceButton" parent="BtnSecondary">
+        <item name="android:minWidth">0dp</item>
+        <item name="android:minHeight">48dp</item>
+        <item name="android:paddingStart">8dp</item>
+        <item name="android:paddingEnd">8dp</item>
+        <item name="android:paddingTop">12dp</item>
+        <item name="android:paddingBottom">12dp</item>
+        <item name="android:singleLine">false</item>
+        <item name="android:ellipsize">@null</item>
+    </style>
+
+    <!-- 底部导航选中项:移除背景色,只保留 icon/文字颜色高亮 -->
+    <style name="EmptyActiveIndicator">
+        <item name="android:color">@android:color/transparent</item>
+    </style>
+
+    <!-- 底部导航文字样式:58dp 高度下缩小字号防挤压 -->
+    <style name="NavItemTextAppearance" parent="TextAppearance.Material3.BodyMedium">
+        <item name="android:textSize">11sp</item>
+    </style>
+
     <style name="TabVerticalItemStyle">
         <item name="android:layout_width">match_parent</item>
         <item name="android:layout_height">wrap_content</item>
@@ -81,95 +302,8 @@
     </style>
 
 
-    <!-- 实心通用主题色,MaterialButton样式-->
-    <style name="mbSolid" parent="@style/Widget.MaterialComponents.Button.UnelevatedButton">
-
-        <item name="android:textColor">@color/white</item>
-        <item name="android:textSize">14sp</item>
-        <item name="android:textAllCaps">false</item>
-        <item name="android:insetTop">0dp</item>
-        <item name="android:insetBottom">0dp</item>
-        <item name="android:gravity">center</item>
-        <item name="backgroundTintMode">src_atop</item>
-        <item name="backgroundTint">@color/colorPrimary</item>
-        <!--        <item name="rippleColor">@color/white</item>-->
-
-        <item name="iconTintMode">src_atop</item>
-        <item name="iconTint">@color/white</item>
-        <item name="iconGravity">textStart</item>
-        <item name="iconPadding">0dp</item>
-        <!--        <item name="iconSize">20dp</item>-->
-
-        <item name="cornerRadius">@dimen/common_corners</item>
-    </style>
-
-    <!-- 带边框的空心MaterialButton样式-->
-    <style name="mbOutline" parent="@style/Widget.MaterialComponents.Button.OutlinedButton">
-        <!--        <item name="android:textColor">@color/colorPrimary</item>-->
-        <!--        <item name="android:textAllCaps">false</item>-->
-        <item name="android:insetTop">0dp</item>
-        <item name="android:insetBottom">0dp</item>
-        <item name="android:gravity">center</item>
-        <item name="android:textSize">13sp</item>
-        <!--        <item name="rippleColor">@color/white</item>-->
-        <!--        <item name="strokeWidth">1dp</item>-->
-        <item name="strokeColor">@color/colorPrimary</item>
-        <item name="cornerRadius">@dimen/common_corners</item>
-        <!--        <item name="iconTintMode">src_atop</item>-->
-        <!--        <item name="iconTint">@color/white</item>-->
-        <!--        <item name="iconGravity">textStart</item>-->
-        <!--        <item name="iconPadding">0dp</item>-->
-        <!--        <item name="iconSize">20dp</item>-->
-
-    </style>
-
-<!--文件选择器样式,在此只改变了背景和基本颜色-->
-    <style name="FileChooser" parent="FileChooserStyle">
-        <item name="android:textColor">@color/colorPrimary</item>
-        <item name="android:textColorPrimary">@color/colorPrimary</item>
-        <item name="android:textColorSecondary">@color/colorPrimary</item>
-        <item name="colorPrimary">@color/colorPrimary</item>
-        <item name="colorPrimaryDark">@color/colorPrimary</item>
-        <item name="colorAccent">@color/material_deep_teal_200</item>
-        <item name="fileChooserDialogStyle">@style/FileChooserDialogStyle1</item>
-        <item name="fileChooserListItemStyle">@style/FileChooserListItemStyle1</item>
-        <item name="fileChooserPathViewStyle">@style/FileChooserPathViewStyle1</item>
-    </style>
-
-<!--选择器弹窗样式-->
-    <style name="FileChooserDialogStyle1" parent="FileChooserDialogStyle">
-        <item name="android:windowBackground">@drawable/bg_large_round_popup</item>
-        <item name="android:buttonBarButtonStyle">@style/FileChooserButtonStyle1</item>
-        <item name="buttonBarButtonStyle">@style/FileChooserButtonStyle1</item>
-    </style>
-    <style name="FileChooserButtonStyle1" parent="FileChooserButtonStyle">
-        <item name="android:textColor">@color/black</item>
-    </style>
-<!--    选择器弹窗样式结束-->
-
-<!--文件选择器条目样式开始-->
-    <style name="FileChooserListItemStyle1" parent="FileChooserListItemStyle">
-        <item name="fileChooserTextNameStyle">@style/FileChooserTextNameStyle1</item>
-        <item name="fileChooserTextSizeStyle">@style/FileChooserTextSizeStyle1</item>
-        <item name="fileChooserTextDateStyle">@style/FileChooserTextDateStyle1</item>
-        <item name="android:background">@android:color/transparent</item>
-    </style>
-    <style name="FileChooserTextNameStyle1" parent="FileChooserTextNameStyle">
-        <item name="android:textColor">@color/text_foreground</item>
-    </style>
-    <style name="FileChooserTextSizeStyle1" parent="FileChooserTextSizeStyle">
-        <item name="android:textColor">@color/colorPrimary</item>
-    </style>
-    <style name="FileChooserTextDateStyle1" parent="FileChooserTextDateStyle">
-        <item name="android:textColor">@color/colorPrimary</item>
-    </style>
-<!--    文件选择器条目样式结束-->
-
-    <!-- 选择器文件路径样式   -->
-    <style name="FileChooserPathViewStyle1" parent="FileChooserPathViewStyle">
-        <item name="android:background">@android:color/transparent</item>
-        <item name="android:textColor">@color/text_foreground</item>
-    </style>
+    <!-- mbSolid / mbOutline 已由上面主题化的 BtnPrimary / BtnSecondary 取代(布局里已统一改名);
+         新代码不要再加按钮自身的色值,一律用 Btn* 样式 -->
 
 
 </resources>

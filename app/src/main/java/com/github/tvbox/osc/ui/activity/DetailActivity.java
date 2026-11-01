@@ -1,105 +1,104 @@
 package com.github.tvbox.osc.ui.activity;
 
 import android.annotation.SuppressLint;
-import android.app.PendingIntent;
-import android.app.PictureInPictureParams;
-import android.app.RemoteAction;
+import android.content.ActivityNotFoundException;
 import android.content.BroadcastReceiver;
 import android.content.ComponentName;
 import android.content.Context;
-import android.content.DialogInterface;
 import android.content.Intent;
 import android.content.IntentFilter;
-import android.content.pm.PackageManager;
-import android.content.pm.ResolveInfo;
-import android.graphics.drawable.Icon;
+import android.content.res.ColorStateList;
+import android.content.res.Configuration;
 import android.net.Uri;
-import android.os.Build;
 import android.os.Bundle;
+import android.os.Handler;
+import android.os.Looper;
+
+import androidx.annotation.Nullable;
 import android.text.TextUtils;
-import android.util.Rational;
 import android.view.KeyEvent;
 import android.view.View;
 import android.view.ViewGroup;
+import android.view.WindowManager;
+import android.view.animation.DecelerateInterpolator;
 import android.widget.FrameLayout;
 import android.widget.Toast;
 
-import androidx.annotation.RequiresApi;
-import androidx.appcompat.app.AlertDialog;
+import androidx.core.graphics.Insets;
+import androidx.core.content.ContextCompat;
+import androidx.core.view.ViewCompat;
+import androidx.core.view.WindowInsetsCompat;
+import androidx.core.widget.TextViewCompat;
 import androidx.lifecycle.Observer;
 import androidx.lifecycle.ViewModelProvider;
 
-import com.blankj.utilcode.util.AppUtils;
-import com.blankj.utilcode.util.ConvertUtils;
-import com.blankj.utilcode.util.LogUtils;
-import com.blankj.utilcode.util.NotificationUtils;
 import com.blankj.utilcode.util.ScreenUtils;
 import com.blankj.utilcode.util.ServiceUtils;
-import com.blankj.utilcode.util.ToastUtils;
+import com.github.tvbox.osc.util.AppBubble;
 import com.chad.library.adapter.base.BaseQuickAdapter;
 import com.github.tvbox.osc.R;
-import com.github.tvbox.osc.api.ApiConfig;
 import com.github.tvbox.osc.base.App;
 import com.github.tvbox.osc.base.BaseVbActivity;
 import com.github.tvbox.osc.bean.AbsXml;
 import com.github.tvbox.osc.bean.CastVideo;
 import com.github.tvbox.osc.bean.Movie;
-import com.github.tvbox.osc.bean.ParseBean;
 import com.github.tvbox.osc.bean.SourceBean;
 import com.github.tvbox.osc.bean.VodInfo;
-import com.github.tvbox.osc.cache.RoomDataManger;
-import com.github.tvbox.osc.constant.IntentKey;
+import com.github.tvbox.osc.log.Category;
+import com.github.tvbox.osc.log.LogStore;
 import com.github.tvbox.osc.databinding.ActivityDetailBinding;
-import com.github.tvbox.osc.event.RefreshEvent;
-import com.github.tvbox.osc.receiver.BatteryReceiver;
+import com.github.tvbox.osc.player.api.PlayConfig;
 import com.github.tvbox.osc.service.PlayService;
+import com.github.tvbox.osc.spiderapi.PlayUrlResolverProviders;
+import com.github.tvbox.osc.spiderapi.ResolveResult;
 import com.github.tvbox.osc.ui.adapter.ParseAdapter;
+import com.github.tvbox.osc.ui.adapter.SelectDialogAdapter;
 import com.github.tvbox.osc.ui.adapter.SeriesAdapter;
 import com.github.tvbox.osc.ui.adapter.SeriesFlagAdapter;
 import com.github.tvbox.osc.ui.dialog.AllVodSeriesBottomDialog;
 import com.github.tvbox.osc.ui.dialog.AllVodSeriesRightDialog;
 import com.github.tvbox.osc.ui.dialog.CastListDialog;
+import com.github.tvbox.osc.server.ControlManager;
+import com.github.tvbox.osc.server.RemoteServer;
+import com.github.tvbox.osc.ui.dialog.ConfirmDialog;
+import com.github.tvbox.osc.ui.dialog.DialogCoordinator;
+import com.github.tvbox.osc.ui.dialog.DownloadDialogCoordinator;
 import com.github.tvbox.osc.ui.dialog.QuickSearchDialog;
+import com.github.tvbox.osc.ui.dialog.SelectDialog;
 import com.github.tvbox.osc.ui.dialog.VideoDetailDialog;
 import com.github.tvbox.osc.ui.fragment.PlayFragment;
-import com.github.tvbox.osc.ui.widget.LinearSpacingItemDecoration;
+import com.github.tvbox.osc.ui.kit.LinearSpacingItemDecoration;
+import com.github.tvbox.osc.ui.state.EpisodeSelectionState;
+import com.github.tvbox.osc.util.BroadcastUtils;
+import com.github.tvbox.osc.util.DetailQuickSearchHelper;
+import com.github.tvbox.osc.util.DownloadHeaders;
+import com.github.tvbox.osc.ui.activity.DownloadActivity;
 import com.github.tvbox.osc.util.FastClickCheckUtil;
-import com.github.tvbox.osc.util.HawkConfig;
+import com.github.tvbox.osc.util.HeavyTaskUtil;
+import com.github.tvbox.osc.util.HistoryEntryNavigator;
+import com.github.tvbox.osc.util.HistorySourceBinding;
+import com.github.tvbox.osc.util.HttpClient;
+import com.github.tvbox.osc.util.PipHelper;
 import com.github.tvbox.osc.util.ScreenShotListenManager;
-import com.github.tvbox.osc.util.SearchHelper;
 import com.github.tvbox.osc.util.SubtitleHelper;
+import com.github.tvbox.osc.config.SystemConfig;
 import com.github.tvbox.osc.util.Utils;
+import com.github.tvbox.osc.viewmodel.HistoryViewModel;
 import com.github.tvbox.osc.viewmodel.SourceViewModel;
-import com.google.gson.Gson;
-import com.google.gson.JsonArray;
-import com.google.gson.JsonElement;
 import com.gyf.immersionbar.ImmersionBar;
-import com.lxj.xpopup.XPopup;
+import com.gyf.immersionbar.BarHide;
 import com.lxj.xpopup.core.BasePopupView;
-import com.lxj.xpopup.enums.PopupPosition;
-import com.lxj.xpopup.interfaces.OnSelectListener;
-import com.lzy.okgo.OkGo;
-import com.lzy.okgo.callback.AbsCallback;
-import com.lzy.okgo.model.Response;
-import com.orhanobut.hawk.Hawk;
 import com.owen.tvrecyclerview.widget.V7LinearLayoutManager;
 
-import org.greenrobot.eventbus.EventBus;
-import org.greenrobot.eventbus.Subscribe;
-import org.greenrobot.eventbus.ThreadMode;
 import org.json.JSONObject;
 
 import java.io.ByteArrayInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.ObjectInputStream;
 import java.io.ObjectOutputStream;
-import java.net.URLEncoder;
 import java.util.ArrayList;
-import java.util.HashMap;
-import java.util.HashSet;
 import java.util.List;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
+import java.util.Map;
 
 /**
  * @author pj567
@@ -107,20 +106,85 @@ import java.util.concurrent.Executors;
  * @description:
  */
 
-public class DetailActivity extends BaseVbActivity<ActivityDetailBinding> {
+public class DetailActivity extends BaseVbActivity<ActivityDetailBinding>
+        implements DownloadDialogCoordinator.Host, VideoDetailDialog.Host, PlayFragment.PlaySyncHost {
+    private static final long HISTORY_REFRESH_TIMEOUT_MS = 15_000L;
+    private static final String EXTERNAL_DOWNLOADER_PACKAGE = "idm.internet.download.manager.plus";
+    private static final String EXTERNAL_DOWNLOADER_ACTIVITY = "idm.internet.download.manager.Downloader";
     private PlayFragment playFragment = null;
     private SourceViewModel sourceViewModel;
-    private Movie.Video mVideo;
+    private HistoryViewModel historyViewModel;
+    /** 详情页"快速搜索"请求编排(共享线程池 + epoch 去重/暂停;UI 只负责弹窗展示与直喂数据) */
+    private DetailQuickSearchHelper quickSearchHelper;
+    /** 快速搜索弹窗(当前打开的实例;宿主直调喂数据/收回调,不再经 EventBus) */
+    private QuickSearchDialog mQuickSearchDialog;
+    /** 下载选择弹窗协调器(底部弹窗 + 全屏右侧抽屉编排;宿主只提供数据/全屏时序/跳转能力) */
+    private final DownloadDialogCoordinator downloadDialogCoordinator =
+            new DownloadDialogCoordinator(this, this);
+    /** 外部下载解析代次:重复点击或页面离开后丢弃旧结果。 */
+    private int externalDownloadEpoch;
     private VodInfo vodInfo;
+    private final EpisodeSelectionState episodeSelection = new EpisodeSelectionState();
+    private int playbackSelectionEpoch;
+    private int startedPlaybackEpoch = -1;
+    private boolean collected;
+    private boolean collectionStateReady;
+    private boolean collectionBusy;
+    private int collectionQueryEpoch;
+    private VodInfo historyRecord;
+    private boolean historyRecordReady;
+    private boolean pendingDetailReady;
+    private AbsXml pendingDetail;
+    private boolean historyQuickPlayback;
+    private boolean historySnapshotShown;
+    private boolean historyDetailCompleted;
+    private boolean historyDetailRefreshed;
+    private boolean historyRefreshRetryUsed;
+    private boolean historyCastRefreshPending;
+    private int historyCastRequestEpoch;
+    private String historySnapshotEpisodeUrl;
+    private String failedHistoryEpisodeUrl;
+    private String failedHistoryError;
+    private boolean failedHistoryFinish;
+    private boolean failedHistoryAutoSwitchPlayer;
+    private long failedHistoryGeneration = -1;
+    private final Handler historyRefreshHandler = new Handler(Looper.getMainLooper());
+    private final Runnable historyRefreshTimeout = this::finishPendingHistoryFailure;
+    private final Runnable historyCastRefreshTimeout = () -> {
+        if (!historyCastRefreshPending) return;
+        historyCastRefreshPending = false;
+        AppBubble.toast("投屏地址刷新超时，请重试");
+    };
+    private final Handler browserCastSyncHandler = new Handler(Looper.getMainLooper());
+    private boolean browserCastAttached;
+    private boolean browserCastVisible;
+    private final Runnable browserCastSync = new Runnable() {
+        @Override public void run() {
+            if (!browserCastVisible || !browserCastAttached || isFinishing() || isDestroyed()) return;
+            RemoteServer.BrowserPlaybackState state = ControlManager.get().browserPlaybackState(lanCastOwner);
+            if (state == null) {
+                browserCastAttached = false;
+                if (playFragment != null) playFragment.showBrowserCastEndedStatus();
+                return;
+            }
+            if (playFragment != null) playFragment.updateBrowserCastConnection(state.online);
+            if (playFragment != null && state.updatedAtMs > 0)
+                playFragment.updateBrowserCastState(state.positionMs, state.durationMs, state.paused);
+            browserCastSyncHandler.postDelayed(this, 1000);
+        }
+    };
+    private int detailRequestEpoch;
+    private final String lanCastOwner = java.util.UUID.randomUUID().toString();
+    private String browserCastSessionId;
+    private boolean restoringBrowserCast;
+    private boolean browserCastEpisodesAvailable = true;
     public SeriesFlagAdapter seriesFlagAdapter;
     public SeriesAdapter seriesAdapter;
     public String vodId;
     public String sourceKey;
+    /** 入口(搜索/列表)传入的剧名,详情拉不到名称时用于下载命名 */
+    private String mPassedName = "";
     private View seriesFlagFocus = null;
-    private boolean isReverse;
-    private String preFlag = "";
-    private HashMap<String, String> mCheckSources = null;
-    BatteryReceiver mBatteryReceiver = new BatteryReceiver();
     //改为view模式无法自动响应返回键操作,onBackPress时手动dismiss
     private BasePopupView mAllSeriesRightDialog;
     private BasePopupView mAllSeriesBottomDialog;
@@ -132,7 +196,6 @@ public class DetailActivity extends BaseVbActivity<ActivityDetailBinding> {
      * 是否开启后台播放标记,不在广播开启,onPause根据标记开启
      */
     boolean openBackgroundPlay;
-    private BroadcastReceiver mRemoteActionReceiver;
 
     /**
      * 截屏监听
@@ -141,31 +204,210 @@ public class DetailActivity extends BaseVbActivity<ActivityDetailBinding> {
 
     @Override
     protected void init() {
+        if (getIntent() != null && !TextUtils.isEmpty(getIntent().getStringExtra("browserCastSessionId")))
+            showPreview = true;
         initReceiver();
         initView();
         initViewModel();
         initData();
-        registerReceiver(mBatteryReceiver, new IntentFilter(Intent.ACTION_BATTERY_CHANGED));
+        initPipHelper();
+        // 状态栏不设底色(ImmersionBar 默认 statusBarColor = 0 即透明),沿用 BaseActivity 的全站口径
+        // "状态栏透明 + 图标色跟随明暗主题":页面底(窗口底色/背景层)自己透上来,亮色主题下不再是一条黑带。
+        // 原来这里写死 statusBarColor(black) + statusBarDarkFont(false)(见 5fbcae95 / dfa53b54:
+        // 当初为治"详情页顶部与状态栏重叠",顺手把状态栏刷成了黑底),详情页没有 AppTitleBar,
+        // 黑底就成了唯一一条既不跟主题、也不跟页面背景的色带。
+        //
+        // fitsSystemWindows 走 false(内容顶到状态栏下面)+ 自己按 insets 让位(applySystemBarsPadding):
+        // 原先是 true(系统整帧内缩 android.R.id.content),而页面背景层就挂在 content 最底层
+        // (PageBackgroundView.attach),于是背景层跟着内缩 —— 状态栏那条没有任何人绘制,露出的是
+        // DecorView 的 android:windowBackground(@color/bg_body 纯色),看起来就是"状态栏一条色带";
+        // 其它页不内缩,所以那条是背景图。改成自己让位后:背景层铺满整屏(那条=页面背景,与其它页一致),
+        // 内容(含预览播放器)位置与内缩时完全一致 —— 不会重新顶到状态栏下面。
         ImmersionBar.with(this)
-                .statusBarColor(R.color.black)
+                .statusBarDarkFont(!Utils.isDarkTheme())
                 .navigationBarColor(R.color.white)
-                .fitsSystemWindows(true)
-                .statusBarDarkFont(false)
+                .fitsSystemWindows(false)
                 .init();
+        applySystemBarsPadding();
         toggleScreenShotListen(true);
+    }
+
+    /**
+     * 按系统栏 insets 给根布局让位(替代 fitsSystemWindows 的整帧内缩,原因见 {@link #init()} 上方注释)。
+     * <p>
+     * 用 insets 监听而不是一次性算状态栏高度:普通预览随系统栏留白;
+     * 全屏让画面铺满窗口；播放器控制层独立读取挖孔安全区，并对称内缩整套控件。
+     * <p>
+     * 根布局(activity_detail 的根 FrameLayout)自身不带 padding,这里整体接管;页面背景层是它的兄弟
+     * (在 content 里更靠下),不受 padding 影响,所以仍铺满整屏。
+     */
+    private void applySystemBarsPadding() {
+        View root = mBinding.getRoot();
+        ViewCompat.setOnApplyWindowInsetsListener(root, (v, insets) -> {
+            Insets bars = insets.getInsets(
+                    WindowInsetsCompat.Type.systemBars() | WindowInsetsCompat.Type.displayCutout());
+            // 全屏播放器盖满整帧，摄像头留白只施加给控制层；转竖屏时系统栏 inset 可能短暂保留旧值。
+            int left = fullWindows ? 0 : bars.left;
+            int top = fullWindows ? 0 : bars.top;
+            int right = fullWindows ? 0 : bars.right;
+            int bottom = fullWindows ? 0 : bars.bottom;
+            if (v.getPaddingLeft() != left || v.getPaddingTop() != top
+                    || v.getPaddingRight() != right || v.getPaddingBottom() != bottom) {
+                v.setPadding(left, top, right, bottom);
+            }
+            return insets;
+        });
+        ViewCompat.requestApplyInsets(root);
+    }
+
+    /**
+     * 初始化画中画(小窗)辅助器,传入详情页专属钩子;本地播放器可复用同一套逻辑。
+     */
+    private void initPipHelper() {
+        pipHelper = new PipHelper(this, new PipHelper.Callback() {
+            @Override
+            public boolean isPlaying() {
+                return playFragment != null && playFragment.getPlayer() != null
+                        && playFragment.getPlayer().isPlaying();
+            }
+
+            @Override
+            public void togglePlay() {
+                if (playFragment != null && playFragment.getController() != null) {
+                    playFragment.getController().togglePlay();
+                }
+            }
+
+            @Override
+            public void pause() {
+                if (playFragment != null && playFragment.getPlayer() != null) {
+                    playFragment.getPlayer().pause();
+                }
+            }
+
+            @Override
+            public void playPrevious() {
+                if (playFragment != null) {
+                    playFragment.playPrevious();
+                }
+            }
+
+            @Override
+            public void playNext() {
+                if (playFragment != null) {
+                    playFragment.playNext(false);
+                }
+            }
+
+            @Override
+            public boolean isFullscreen() {
+                return fullWindows;
+            }
+
+            @Override
+            public void enterFullscreen() {
+                if (!fullWindows) {
+                    toggleFullPreview();
+                }
+            }
+
+            @Override
+            public void exitFullscreen() {
+                if (fullWindows) {
+                    toggleFullPreview();
+                }
+            }
+
+            @Override
+            public int[] getVideoSize() {
+                if (playFragment != null && playFragment.getPlayer() != null) {
+                    return playFragment.getPlayer().getVideoSize();
+                }
+                return null;
+            }
+
+            @Override
+            public void onClose() {
+                playServerSwitch(false);
+                finish();
+                PlayService.cancelPlaybackNotification(DetailActivity.this);
+            }
+        });
+    }
+
+    @Override
+    protected void onStop() {
+        super.onStop();
+        externalDownloadEpoch++;
+        // 兜底暂停:Activity 真正不可见且不在小窗中时暂停播放,防止"关闭小窗/退出页面后后台一直出声"。
+        // 例外:后台播放=开启(类型1,onUserLeaveHint 已置 openBackgroundPlay=true)时不暂停,
+        // 由 PlayService 继续后台播放;进入小窗时 isInPictureInPictureMode() 为 true 也不会误暂停
+        // (走 PipHelper.isInPip:API 26 方法,低版本按"不在小窗"处理,避免 7.x 上 NoSuchMethodError)
+        if (!PipHelper.isInPip(this) && !openBackgroundPlay
+                && playFragment != null && playFragment.getPlayer() != null) {
+            if (playFragment.getPlayer().isPlaying()) {
+                playFragment.getController().togglePlay();
+            }
+        }
+    }
+
+    @Override
+    protected void onStart() {
+        super.onStart();
+        // 小窗放大回前台:onStart 是比 onResume 更早的"回前台"信号,用于区分放大/点X关闭。
+        // 放大时 Activity 会 onStart(清掉小窗会话标记,保持全屏播放);
+        // 点X关闭时 Activity 留在后台不会 onStart(标记保持,走点X处理)
+        pipHelper.onActivityStarted();
+        // 点X关闭带回前台:播放"小窗逐渐放大铺满全屏"的进入动画,替代生硬的系统切换动画
+        if (pipHelper.consumePipCloseAnimation()) {
+            playPipExpandAnimation();
+        }
+    }
+
+    /**
+     * "小窗放大铺满全屏"进入动画:内容从屏幕下方(小窗常见位置)由小到大、由淡到实铺满。
+     */
+    private void playPipExpandAnimation() {
+        View root = mBinding.getRoot();
+        if (root == null) return;
+        int w = root.getWidth();
+        int h = root.getHeight();
+        if (w <= 0 || h <= 0) return;
+        root.setPivotX(w / 2f);
+        root.setPivotY(h * 0.88f); // 小窗在屏幕下方,从底部放大铺满
+        root.setScaleX(0.35f);
+        root.setScaleY(0.35f);
+        root.setAlpha(0.3f);
+        root.animate()
+                .scaleX(1f)
+                .scaleY(1f)
+                .alpha(1f)
+                .setDuration(420)
+                .setInterpolator(new DecelerateInterpolator())
+                .start();
     }
 
     @Override
     protected void onResume() {
         super.onResume();
+        browserCastVisible = true;
+        if (browserCastAttached) {
+            browserCastSyncHandler.removeCallbacks(browserCastSync);
+            browserCastSyncHandler.post(browserCastSync);
+        }
+        pipHelper.onActivityResumed(); // 点X关闭后带回前台:立即补暂停,消除"先播放一下再暂停"
         openBackgroundPlay = false;
         playServerSwitch(false);
-        mBinding.ivPrivateBrowsing.postDelayed(NotificationUtils::cancelAll, 800);
+        pipExitByBack = false; // 回到前台,清除返回键退出标记
+        navigatingAway = false; // 回到前台,清除应用内跳转标记
+        mBinding.ivPrivateBrowsing.postDelayed(
+                () -> PlayService.cancelPlaybackNotification(DetailActivity.this), 800);
+        if (collectionStateReady && !collectionBusy) refreshCollectionState();
     }
 
     private void initView() {
-        mBinding.ivPrivateBrowsing.setVisibility(Hawk.get(HawkConfig.PRIVATE_BROWSING, false) ? View.VISIBLE : View.GONE);
-        mBinding.ivPrivateBrowsing.setOnClickListener(view -> ToastUtils.showShort("当前为无痕浏览"));
+        mBinding.ivPrivateBrowsing.setVisibility(SystemConfig.isPrivateBrowsing() ? View.VISIBLE : View.GONE);
+        mBinding.ivPrivateBrowsing.setOnClickListener(view -> AppBubble.toast("当前为无痕浏览"));
         mBinding.previewPlayerPlace.setVisibility(showPreview ? View.VISIBLE : View.GONE);
 
         mBinding.mGridView.setHasFixedSize(true);
@@ -177,25 +419,24 @@ public class DetailActivity extends BaseVbActivity<ActivityDetailBinding> {
         mBinding.mGridViewFlag.setHasFixedSize(true);
         seriesFlagAdapter = new SeriesFlagAdapter();
         mBinding.mGridViewFlag.setAdapter(seriesFlagAdapter);
-        isReverse = false;
-        preFlag = "";
         if (showPreview) {
             playFragment = new PlayFragment();
+            playFragment.setPlaySyncHost(this);
             getSupportFragmentManager().beginTransaction().add(R.id.previewPlayer, playFragment).commit();
             getSupportFragmentManager().beginTransaction().show(playFragment).commitAllowingStateLoss();
         }
 
         findViewById(R.id.ll_title).setOnClickListener(view -> {
-            new XPopup.Builder(this)
-                    .isViewMode(true)
-                    .hasNavigationBar(false)
-                    .asCustom(new VideoDetailDialog(this, vodInfo))
-                    .show();
+            if (!isCurrentDetail(vodInfo)) return;
+            // VideoDetailDialog 是 SheetResizableBottomPopup(底部可伸缩抽屉):与 AboutDialog/接口历史抽屉
+            // 同属底部抽屉族,统一走 bottom(...) —— 它带的 isViewMode(true) + hasNavigationBar(false)
+            // 才算"和其它抽屉同款"(原来用 center(...) 只做 asCustom,位置虽对但少了这两个参数)
+            DialogCoordinator.bottom(this, new VideoDetailDialog(this, this, vodInfo), 0).show();
         });
         findViewById(R.id.tvDownload).setOnClickListener(new View.OnClickListener() {
             @Override
             public void onClick(View view) {
-                use1DMDownload();
+                showDownloadSeriesDialog();
             }
         });
         mBinding.tvSort.setOnClickListener(new View.OnClickListener() {
@@ -203,26 +444,13 @@ public class DetailActivity extends BaseVbActivity<ActivityDetailBinding> {
             @Override
             public void onClick(View v) {
                 sortSeries();
+                updateSortButtonText();
             }
         });
         mBinding.tvCast.setOnClickListener(v -> {
             showCastDialog();
         });
-        mBinding.tvCollect.setOnClickListener(new View.OnClickListener() {
-            @Override
-            public void onClick(View v) {
-                String text = mBinding.tvCollect.getText().toString();
-                if ("加入收藏".equals(text)) {
-                    RoomDataManger.insertVodCollect(sourceKey, vodInfo);
-                    Toast.makeText(DetailActivity.this, "已加入收藏夹", Toast.LENGTH_SHORT).show();
-                    mBinding.tvCollect.setText("取消收藏");
-                } else {
-                    RoomDataManger.deleteVodCollect(sourceKey, vodInfo);
-                    Toast.makeText(DetailActivity.this, "已移除收藏夹", Toast.LENGTH_SHORT).show();
-                    mBinding.tvCollect.setText("加入收藏");
-                }
-            }
-        });
+        mBinding.tvCollect.setOnClickListener(v -> changeCollection());
 
         seriesFlagAdapter.setOnItemClickListener((adapter, view, position) -> {
             chooseFlag(position);
@@ -241,32 +469,55 @@ public class DetailActivity extends BaseVbActivity<ActivityDetailBinding> {
         });
 
         mBinding.tvSite.setOnClickListener(view -> {
-            startQuickSearch();
-            QuickSearchDialog quickSearchDialog = new QuickSearchDialog(DetailActivity.this);
-            EventBus.getDefault().post(new RefreshEvent(RefreshEvent.TYPE_QUICK_SEARCH, quickSearchData));
-            EventBus.getDefault().post(new RefreshEvent(RefreshEvent.TYPE_QUICK_SEARCH_WORD, quickSearchWord));
-            quickSearchDialog.show();
-            if (pauseRunnable != null && pauseRunnable.size() > 0) {
-                searchExecutorService = Executors.newFixedThreadPool(5);
-                for (Runnable runnable : pauseRunnable) {
-                    searchExecutorService.execute(runnable);
-                }
-                pauseRunnable.clear();
-                pauseRunnable = null;
+            // 快速搜索编排已收敛到 DetailQuickSearchHelper(共享线程池+epoch 去重/暂停语义)
+            if (mQuickSearchDialog != null && mQuickSearchDialog.isShow()) {
+                return; // 已展示中,忽略连点
             }
-            quickSearchDialog.setOnDismissListener(new DialogInterface.OnDismissListener() {
+            quickSearchHelper.startQuickSearch(vodInfo == null ? mPassedName : vodInfo.name);
+            mQuickSearchDialog = new QuickSearchDialog(DetailActivity.this);
+            // 点击行为直调宿主(原 EventBus SELECT/WORD_CHANGE 收口)
+            mQuickSearchDialog.setHost(new QuickSearchDialog.Host() {
                 @Override
-                public void onDismiss(DialogInterface dialog) {
-                    try {
-                        if (searchExecutorService != null) {
-                            pauseRunnable = searchExecutorService.shutdownNow();
-                            searchExecutorService = null;
-                        }
-                    } catch (Throwable th) {
-                        th.printStackTrace();
-                    }
+                public void onVideoSelected(Movie.Video video) {
+                    mPassedName = video.name == null ? "" : video.name;
+                    loadDetail(video.id, video.sourceKey);
+                }
+
+                @Override
+                public void onWordChange(String word) {
+                    quickSearchHelper.switchSearchWord(word);
                 }
             });
+            // helper 结果/词表桥到弹窗:只在弹窗展示期间有效(原 EventBus 订阅窗口语义)
+            quickSearchHelper.setQuickSearchOutput(new DetailQuickSearchHelper.QuickSearchOutput() {
+                @Override
+                public void onResults(List<Movie.Video> data) {
+                    runOnUiThread(() -> {
+                        QuickSearchDialog dialog = mQuickSearchDialog;
+                        if (dialog != null && dialog.isShow()) dialog.appendResults(data);
+                    });
+                }
+
+                @Override
+                public void onWords(List<String> words) {
+                    runOnUiThread(() -> {
+                        QuickSearchDialog dialog = mQuickSearchDialog;
+                        if (dialog != null && dialog.isShow()) dialog.updateWords(words);
+                    });
+                }
+            });
+            // 弹窗打开:放行被暂停/暂存的源搜索(等价旧 pauseRunnable 续跑)
+            quickSearchHelper.onQuickSearchDialogOpened();
+            mQuickSearchDialog.setOnDismissListener(dialog -> {
+                // 弹窗关闭:暂停后续排队任务(等价旧 shutdownNow 收集 pauseRunnable),断开输出桥
+                quickSearchHelper.onQuickSearchDialogClosed();
+                quickSearchHelper.setQuickSearchOutput(null);
+                mQuickSearchDialog = null;
+            });
+            mQuickSearchDialog.show();
+            // 初始直喂已累计结果/词表(替代原 show 前广播;show 后 onCreate 已建 adapter)
+            mQuickSearchDialog.appendResults(new ArrayList<>(quickSearchHelper.getQuickSearchData()));
+            mQuickSearchDialog.updateWords(new ArrayList<>(quickSearchHelper.getQuickSearchWords()));
         });
         mBinding.tvChangeLine.setOnClickListener(v -> {
             FastClickCheckUtil.check(v);
@@ -277,9 +528,37 @@ public class DetailActivity extends BaseVbActivity<ActivityDetailBinding> {
 
     @Override
     protected void onPause() {
+        browserCastVisible = false;
+        browserCastSyncHandler.removeCallbacks(browserCastSync);
         super.onPause();
         if (openBackgroundPlay) {
             playServerSwitch(true);
+        }
+    }
+
+    @Override
+    protected void onUserLeaveHint() {
+        super.onUserLeaveHint();
+        // 用户切后台(按Home/切走/进最近任务)时的行为,由"后台播放"设置决定:
+        //   0 关闭  :不处理,由 onPause/onStop 兜底暂停,进入后台休眠
+        //   1 开启  :后台继续播放(前台服务+通知)
+        //   2 画中画:播放窗口自动进入小窗模式
+        // 按返回键退出播放页(Activity 正在销毁)不算"切后台",排除
+        // 应用内跳转(打开下载管理/设置等)也不算"切后台",排除(避免返回时误触小窗/后台播放)
+        if (pipExitByBack || navigatingAway || isFinishing()) {
+            pipExitByBack = false;
+            navigatingAway = false;
+            return;
+        }
+        if (playFragment == null || playFragment.getPlayer() == null || !playFragment.getPlayer().isPlaying()) {
+            return;
+        }
+        int type = PlayConfig.getBackgroundPlayType();
+        if (type == 2 && android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O
+                && pipHelper != null) {
+            pipHelper.enterPip(); // 自动进入小窗
+        } else if (type == 1) {
+            openBackgroundPlay = true; // onPause 里启动后台播放服务
         }
     }
 
@@ -291,133 +570,285 @@ public class DetailActivity extends BaseVbActivity<ActivityDetailBinding> {
                 public void onReceive(Context context, Intent intent) {
                     String action = intent.getAction();
                     if (action != null && action.equals(Intent.ACTION_CLOSE_SYSTEM_DIALOGS)) {
-                        openBackgroundPlay = Hawk.get(HawkConfig.BACKGROUND_PLAY_TYPE, 0) == 1 && playFragment.getPlayer() != null && playFragment.getPlayer().isPlaying();
+                        openBackgroundPlay = PlayConfig.getBackgroundPlayType() == 1
+                                && playFragment != null && playFragment.getPlayer() != null
+                                && playFragment.getPlayer().isPlaying();
                     }
                 }
             };
-            registerReceiver(mHomeKeyReceiver, new IntentFilter(Intent.ACTION_CLOSE_SYSTEM_DIALOGS));
+            BroadcastUtils.registerReceiverNotExported(this, mHomeKeyReceiver, new IntentFilter(Intent.ACTION_CLOSE_SYSTEM_DIALOGS));
         }
     }
 
     /**
-     * 排序(倒序)
+     * 排序(倒序/正序切换):反转全集列表(与弹窗/详情页共用同一状态 vodInfo.reverseSort)。
+     * 同步刷新详情页选集区排序按钮文字(弹窗/下载抽屉内排序后详情页文字跟随一致)。
+     *
+     * @return 反转后的状态:true=已倒序(按钮应显示"正序");false=正序(按钮显示"倒序")
      */
-    public void sortSeries() {
-        if (vodInfo != null && vodInfo.seriesMap.size() > 0) {
-            vodInfo.reverseSort = !vodInfo.reverseSort;
-            isReverse = !isReverse;
-            vodInfo.reverse();
-            vodInfo.playIndex = (vodInfo.seriesMap.get(vodInfo.playFlag).size() - 1) - vodInfo.playIndex;
-//                    insertVod(sourceKey, vodInfo);
+    public boolean sortSeries() {
+        if (!canSelectBrowserEpisode()) return vodInfo != null && vodInfo.reverseSort;
+        if (isCurrentDetail(vodInfo)) {
+            episodeSelection.reverse(vodInfo);
+            if (isCurrentPreview()) {
+                // 列表引用共享，倒序后必须同步播放器索引，仍指向原来的剧集。
+                previewVodInfo.playIndex = vodInfo.playIndex;
+                previewVodInfo.reverseSort = vodInfo.reverseSort;
+            }
+            refreshList();
+            if (browserCastAttached) {
+                registerBrowserCastDetail();
+                ControlManager.get().attachBrowserCastDetail(lanCastOwner, browserCastSessionId,
+                        currentCastEpisodeNames(), browserEpisodeHandler(detailRequestEpoch));
+            }
+        }
+        // 详情页选集区按钮文字跟随共用状态(弹窗内排序也同步;原调用点手调 updateSortButtonText 保留无害)
+        updateSortButtonText();
+        return vodInfo != null && vodInfo.reverseSort;
+    }
 
-            seriesAdapter.notifyDataSetChanged();
+    /** 当前是否已倒序(供各弹窗倒序按钮文字同步;与 sortSeries 共用同一状态) */
+    public boolean isSeriesReversed() {
+        return vodInfo != null && vodInfo.reverseSort;
+    }
+
+    /** 详情页选集区倒序按钮文字跟随共用状态:已倒序显示"正序",否则"倒序" */
+    private void updateSortButtonText() {
+        try {
+            mBinding.tvSort.setText(isSeriesReversed() ? "正序" : "倒序");
+        } catch (Throwable ignored) {
         }
     }
 
     public void showCastDialog() {
+        if (!isCurrentPreview() || playFragment == null || vodInfo.seriesMap == null
+                || vodInfo.seriesMap.get(vodInfo.playFlag) == null
+                || vodInfo.playIndex < 0
+                || vodInfo.playIndex >= vodInfo.seriesMap.get(vodInfo.playFlag).size()) return;
+        if (historyQuickPlayback && !historyDetailCompleted) {
+            AppBubble.toast("历史剧集信息仍在刷新，请稍后投屏");
+            return;
+        }
+        if (historyCastRefreshPending) {
+            AppBubble.toast("投屏地址正在刷新，请稍后");
+            return;
+        }
+        PlayFragment.CastRequest request = playFragment.currentCastRequest();
+        if (request != null && (request.playableNow
+                || !historyQuickPlayback || !historyDetailRefreshed)) {
+            openCastDialog(request.url, request.headers, request.sourceUrl, request.positionMs);
+            return;
+        }
+        if (historyQuickPlayback && historyDetailRefreshed) {
+            resolveHistoryCastWithoutRestart();
+            return;
+        }
+        AppBubble.toast("当前播放地址仍在解析，请稍后重试");
+    }
 
+    /** 历史地址过期且当前还没有可用快照时，独立解析投屏地址，不触碰手机解码器。 */
+    private void resolveHistoryCastWithoutRestart() {
+        List<VodInfo.VodSeries> episodes = vodInfo.seriesMap.get(vodInfo.playFlag);
+        if (episodes == null || vodInfo.playIndex < 0 || vodInfo.playIndex >= episodes.size()) return;
+        VodInfo.VodSeries episode = episodes.get(vodInfo.playIndex);
+        if (episode == null || TextUtils.isEmpty(episode.url)) {
+            AppBubble.toast("该集没有可用的投屏地址");
+            return;
+        }
+        final int detailEpoch = detailRequestEpoch;
+        final int selectionEpoch = playbackSelectionEpoch;
+        final VodInfo requestVod = vodInfo;
+        final String requestFlag = vodInfo.playFlag;
+        final String requestKey = sourceKey;
+        final String rawUrl = episode.url;
+        final long positionMs = playFragment.getPlayer() == null ? 0
+                : playFragment.getPlayer().getCurrentPosition();
+        final int castRequestEpoch = ++historyCastRequestEpoch;
+        historyCastRefreshPending = true;
+        historyRefreshHandler.removeCallbacks(historyCastRefreshTimeout);
+        historyRefreshHandler.postDelayed(historyCastRefreshTimeout, HISTORY_REFRESH_TIMEOUT_MS);
+        LogStore.log(Category.PLAYER, "历史剧集投屏: 后台独立解析地址，不重启手机播放");
+        try {
+            HeavyTaskUtil.getBigTaskExecutorService().execute(() -> {
+                ResolveResult result = null;
+                try {
+                    result = PlayUrlResolverProviders.get()
+                            .resolveCurrentWithPlaybackHeaders(requestKey, requestFlag, rawUrl, null, null);
+                } catch (RuntimeException error) {
+                    LogStore.log(Category.PLAYER, "历史剧集投屏地址解析失败: "
+                            + error.getClass().getSimpleName());
+                }
+                final ResolveResult resolved = result;
+                runOnUiThread(() -> {
+                    if (!historyCastRefreshPending || castRequestEpoch != historyCastRequestEpoch
+                            || detailEpoch != detailRequestEpoch
+                            || selectionEpoch != playbackSelectionEpoch || isFinishing() || isDestroyed()
+                            || vodInfo != requestVod || !TextUtils.equals(vodInfo.playFlag, requestFlag)
+                            || vodInfo.seriesMap == null || vodInfo.seriesMap.get(requestFlag) != episodes
+                            || vodInfo.playIndex < 0 || vodInfo.playIndex >= episodes.size()
+                            || episodes.get(vodInfo.playIndex) != episode) return;
+                    historyCastRefreshPending = false;
+                    historyRefreshHandler.removeCallbacks(historyCastRefreshTimeout);
+                    PlayFragment.CastRequest current = playFragment == null
+                            ? null : playFragment.currentCastRequest();
+                    if (current != null && current.playableNow) {
+                        openCastDialog(current.url, current.headers, current.sourceUrl,
+                                current.positionMs);
+                    } else if (resolved != null && isHttpAddress(resolved.url)) {
+                        openCastDialog(resolved.url, resolved.headers, resolved.url, positionMs);
+                    } else AppBubble.toast("该集未解析出可投屏地址，请稍后重试");
+                });
+            });
+        } catch (RuntimeException error) {
+            historyCastRefreshPending = false;
+            historyRefreshHandler.removeCallbacks(historyCastRefreshTimeout);
+            LogStore.log(Category.PLAYER, "历史剧集投屏任务启动失败: "
+                    + error.getClass().getSimpleName());
+            AppBubble.toast("投屏地址解析暂不可用，请重试");
+        }
+    }
+
+    private void openCastDialog(String playingUrl, Map<String, String> castHeaders,
+                                String headerOrigin, long positionMs) {
+        if (!isCurrentPreview() || playFragment == null || TextUtils.isEmpty(playingUrl)) return;
         VodInfo.VodSeries vodSeries = vodInfo.seriesMap.get(vodInfo.playFlag).get(vodInfo.playIndex);
-        new XPopup.Builder(this)
-                .maxWidth(ConvertUtils.dp2px(360))
-                .asCustom(new CastListDialog(this, new CastVideo(vodSeries.name
-                        , TextUtils.isEmpty(playFragment.getFinalUrl()) ? vodSeries.url : playFragment.getFinalUrl())))
-                .show();
+        List<String> castEpisodes = currentCastEpisodeNames();
+        int detailEpoch = detailRequestEpoch;
+        CastListDialog castDialog = new CastListDialog(this, new CastVideo(vodSeries.name,
+                playingUrl, positionMs), new CastListDialog.OnCastStarted() {
+            @Override public void onCastStarted(String deviceId) {
+                    if (detailEpoch != detailRequestEpoch || !isCurrentPreview()) return;
+                    if (deviceId != null) {
+                        browserCastEpisodesAvailable = true;
+                        ControlManager.get().setEpisodeCast(lanCastOwner, deviceId, castEpisodes,
+                                vodInfo.playIndex, browserEpisodeHandler(detailEpoch));
+                        registerBrowserCastDetail();
+                        browserCastAttached = true;
+                        playFragment.showBrowserCastStatus();
+                        if (browserCastVisible) {
+                            browserCastSyncHandler.removeCallbacks(browserCastSync);
+                            browserCastSyncHandler.post(browserCastSync);
+                        }
+                    } else {
+                        ControlManager.get().clearEpisodeCast(lanCastOwner);
+                        browserCastSessionId = null;
+                        restoringBrowserCast = false;
+                        browserCastAttached = false;
+                        browserCastSyncHandler.removeCallbacks(browserCastSync);
+                        playFragment.clearBrowserCastStatus();
+                    }
+                    if (playFragment.getPlayer() != null) playFragment.getPlayer().pause();
+            }
+
+            @Override public void onDlnaStarted(String deviceName) {
+                onCastStarted(null);
+                if (detailEpoch != detailRequestEpoch || !isCurrentPreview()) return;
+                playFragment.showDlnaCastStatus(deviceName);
+            }
+        }, castHeaders, headerOrigin);
+        DialogCoordinator.centerInHostView(this, castDialog).show();
+    }
+
+    private RemoteServer.NextEpisodeHandler browserEpisodeHandler(int detailEpoch) {
+        return new RemoteServer.NextEpisodeHandler() {
+            @Override public boolean playNext() {
+                if (!browserCastEpisodesAvailable) return false;
+                if (detailEpoch != detailRequestEpoch || !isCurrentPreview() || playFragment == null
+                        || vodInfo.seriesMap == null || vodInfo.seriesMap.get(vodInfo.playFlag) == null
+                        || vodInfo.playIndex + 1 >= vodInfo.seriesMap.get(vodInfo.playFlag).size()) return false;
+                playFragment.playNext(false);
+                return true;
+            }
+
+            @Override public boolean selectEpisode(int index) {
+                if (!browserCastEpisodesAvailable) return false;
+                if (detailEpoch != detailRequestEpoch || !isCurrentPreview() || playFragment == null
+                        || vodInfo.seriesMap == null || vodInfo.seriesMap.get(vodInfo.playFlag) == null
+                        || index < 0 || index >= vodInfo.seriesMap.get(vodInfo.playFlag).size()) return false;
+                if (index == vodInfo.playIndex) playFragment.play(false);
+                else {
+                    episodeSelection.browse(vodInfo, vodInfo.playFlag);
+                    refreshList();
+                    chooseSeries(index, false);
+                }
+                return true;
+            }
+        };
+    }
+
+    private void registerBrowserCastDetail() {
+        if (!isCurrentDetail(vodInfo)) return;
+        List<VodInfo.VodSeries> episodes = vodInfo.seriesMap == null ? null
+                : vodInfo.seriesMap.get(vodInfo.playFlag);
+        if (episodes == null || vodInfo.playIndex < 0 || vodInfo.playIndex >= episodes.size()) return;
+        VodInfo.VodSeries episode = episodes.get(vodInfo.playIndex);
+        RemoteServer.BrowserCastDetail detail = ControlManager.get().setBrowserCastDetail(lanCastOwner,
+                sourceKey, vodId, vodInfo.name, vodInfo.playFlag, vodInfo.playIndex, vodInfo.reverseSort,
+                episode.name, episode.url);
+        if (detail != null) browserCastSessionId = detail.sessionId;
     }
 
     public void showAllSeriesDialog() {
-        if (fullWindows) {
-            mAllSeriesRightDialog = new XPopup.Builder(this)
-                    .isViewMode(true)//隐藏导航栏(手势条)在dialog模式下会闪一下,改为view模式,但需处理onBackPress的隐藏,下方同理
-                    .hasNavigationBar(false)
-                    .popupHeight(ScreenUtils.getScreenHeight())
-                    .popupPosition(PopupPosition.Right)
-                    .enableDrag(false)//禁用拖拽,内部有横向rv
-                    .asCustom(new AllVodSeriesRightDialog(this));
+        if (!isCurrentDetail(vodInfo)) return;
+        if (mAllSeriesRightDialog != null && mAllSeriesRightDialog.isShow()
+                || mAllSeriesBottomDialog != null && mAllSeriesBottomDialog.isShow()) return;
+        // 按当前方向决定形态: 横屏用右侧抽屉, 竖屏用底部弹层并限制高度(与详情页一致)
+        if (ScreenUtils.isLandscape()) {
+            // 右侧抽屉:固定宽度 360,与下载右侧抽屉一致,避免线路列表把弹窗撑开;内部有横向 rv 禁拖拽
+            // 复用宿主线路/选集 adapter(同一实例共享数据与选中态),倒序经回调共用宿主状态
+            mAllSeriesRightDialog = DialogCoordinator.right(this,
+                    new AllVodSeriesRightDialog(this, seriesFlagAdapter, seriesAdapter,
+                            this::sortSeries, this::isSeriesReversed), 360, false);
             mAllSeriesRightDialog.show();
         } else {
-            mAllSeriesBottomDialog = new XPopup.Builder(this)
-                    .isViewMode(true)
-                    .hasNavigationBar(false)
-                    .maxHeight(ScreenUtils.getScreenHeight() - (ScreenUtils.getScreenHeight() / 4))
-                    .asCustom(new AllVodSeriesBottomDialog(this, seriesAdapter.getData(), (position, text) -> {
+            mAllSeriesBottomDialog = DialogCoordinator.bottomMaxHeight(this,
+                    new AllVodSeriesBottomDialog(this, seriesAdapter.getData(), (position, text) -> {
                         chooseSeries(position, false);
-                    }));
+                    }, this::sortSeries, this::isSeriesReversed),
+                    ScreenUtils.getScreenHeight() - (ScreenUtils.getScreenHeight() / 4));
             mAllSeriesBottomDialog.show();
         }
     }
 
     private void chooseFlag(int position) {
-        //新选中的flag
+        if (!isCurrentDetail(vodInfo) || position < 0 || position >= seriesFlagAdapter.getData().size()) return;
         String newFlag = seriesFlagAdapter.getData().get(position).name;
-        if (vodInfo != null && !vodInfo.playFlag.equals(newFlag)) {
-            for (int i = 0; i < vodInfo.seriesFlags.size(); i++) {//遍历flag集合
-                VodInfo.VodSeriesFlag flag = vodInfo.seriesFlags.get(i);
-                if (flag.name.equals(vodInfo.playFlag)) {//取消当前播放的选中状态
-                    flag.selected = false;
-                    seriesFlagAdapter.notifyItemChanged(i);
-                    break;
-                }
-            }
-            //新选中的flag
-            VodInfo.VodSeriesFlag flag = vodInfo.seriesFlags.get(position);
-            flag.selected = true;
-            //清除上一个线路集数的选中状态
-            List<VodInfo.VodSeries> currentSeriesList = vodInfo.seriesMap.get(vodInfo.playFlag);
-            if (currentSeriesList.size() > vodInfo.playIndex) {//有效集数
-                currentSeriesList.get(vodInfo.playIndex).selected = false;
-            }
-            vodInfo.playFlag = newFlag;
-            seriesFlagAdapter.notifyItemChanged(position);
+        if (!TextUtils.equals(newFlag, episodeSelection.displayedFlag(vodInfo))
+                && episodeSelection.browse(vodInfo, newFlag)) {
+            ++externalDownloadEpoch;
+            downloadDialogCoordinator.invalidate();
             refreshList();
         }
     }
 
     private void chooseSeries(int position, boolean reloadWithChangeLine) {
-        if (vodInfo != null && vodInfo.seriesMap.get(vodInfo.playFlag).size() > 0) {
-            boolean reload = false;
-            for (int j = 0; j < vodInfo.seriesMap.get(vodInfo.playFlag).size(); j++) {
-                seriesAdapter.getData().get(j).selected = false;
-                seriesAdapter.notifyItemChanged(j);
-            }
-            //解决倒叙不刷新
-            if (vodInfo.playIndex != position) {
-                seriesAdapter.getData().get(position).selected = true;
-                seriesAdapter.notifyItemChanged(position);
-                vodInfo.playIndex = position;
-
-                reload = true;
-            }
-            //解决当前集不刷新的BUG
-            if (!preFlag.isEmpty() && !vodInfo.playFlag.equals(preFlag)) {
-                reload = true;
-            }
-
-            seriesAdapter.getData().get(vodInfo.playIndex).selected = true;
-            seriesAdapter.notifyItemChanged(vodInfo.playIndex);
-
-            //选集全屏 想选集不全屏的注释下面一行
-            if (!showPreview || reload || reloadWithChangeLine) {
-                jumpToPlay();
-            }
-        }
+        if (!canSelectBrowserEpisode()) return;
+        if (!isCurrentDetail(vodInfo)) return;
+        String previousFlag = vodInfo.playFlag;
+        int previousIndex = vodInfo.playIndex;
+        if (!episodeSelection.select(vodInfo, position)) return;
+        boolean reload = previousIndex != position || !TextUtils.equals(previousFlag, vodInfo.playFlag);
+        refreshList();
+        if (!showPreview || reload || reloadWithChangeLine) jumpToPlay();
     }
-
-    private void initCheckedSourcesForSearch() {
-        mCheckSources = SearchHelper.getSourcesForSearch();
-    }
-
-    private List<Runnable> pauseRunnable = null;
 
     private void jumpToPlay() {
-        if (vodInfo != null && vodInfo.seriesMap.get(vodInfo.playFlag).size() > 0) {
-            preFlag = vodInfo.playFlag;
+        if (playFragment == null) return;
+        historyCastRefreshPending = false;
+        historyRefreshHandler.removeCallbacks(historyCastRefreshTimeout);
+        int epoch = ++playbackSelectionEpoch;
+        int detailEpoch = detailRequestEpoch;
+        playFragment.runWhenPlaybackReady(() -> {
+            if (epoch == playbackSelectionEpoch && detailEpoch == detailRequestEpoch
+                    && !isFinishing() && !isDestroyed()) startPlaybackForCurrentVod();
+        });
+    }
+
+    private void startPlaybackForCurrentVod() {
+        if (isCurrentDetail(vodInfo) && HistoryEntryNavigator.hasPlayableSnapshot(vodInfo)) {
             //更新播放地址
             Bundle bundle = new Bundle();
-            //保存历史
-            insertVod(sourceKey, vodInfo);
             bundle.putString("sourceKey", sourceKey);
-//            bundle.putSerializable("VodInfo", vodInfo);
-            App.getInstance().setVodInfo(vodInfo);
             if (previewVodInfo == null) {
                 try {
                     ByteArrayOutputStream bos = new ByteArrayOutputStream();
@@ -431,340 +862,691 @@ public class DetailActivity extends BaseVbActivity<ActivityDetailBinding> {
                     e.printStackTrace();
                 }
             }
+            if (previewVodInfo == null) {
+                AppBubble.toast("播放信息准备失败，请重新选择剧集");
+                return;
+            }
             if (previewVodInfo != null) {
                 previewVodInfo.playerCfg = vodInfo.playerCfg;
                 previewVodInfo.playFlag = vodInfo.playFlag;
                 previewVodInfo.playIndex = vodInfo.playIndex;
                 previewVodInfo.seriesMap = vodInfo.seriesMap;
-//                    bundle.putSerializable("VodInfo", previewVodInfo);
+                previewVodInfo.seriesFlags = vodInfo.seriesFlags;
+                previewVodInfo.reverseSort = vodInfo.reverseSort;
                 App.getInstance().setVodInfo(previewVodInfo);
             }
-            playFragment.setData(bundle);
+            // setData→play 会同步回调 onEpisodeSelected，那里按本次选集异步保存历史。
+            startedPlaybackEpoch = playbackSelectionEpoch;
+            if (restoringBrowserCast) {
+                // 回到已有投屏只装配手机控件，保留电脑正在播放的媒体和进度。
+                playFragment.setData(bundle, false);
+                restoreBrowserCastControls();
+            } else playFragment.setData(bundle);
 
             //定位选集
-            mBinding.mGridView.scrollToPosition(vodInfo.playIndex);
+            if (TextUtils.equals(episodeSelection.displayedFlag(vodInfo), vodInfo.playFlag))
+                mBinding.mGridView.scrollToPosition(vodInfo.playIndex);
         }
     }
 
     @SuppressLint("NotifyDataSetChanged")
     void refreshList() {
-        int seriesSize = vodInfo.seriesMap.get(vodInfo.playFlag).size();
-        if (seriesSize > 0 && seriesSize <= vodInfo.playIndex) {//当前集数大于新选线路的总集数,设置为最后一集
-            vodInfo.playIndex = seriesSize - 1;
-        }
-
-        if (vodInfo.seriesMap.get(vodInfo.playFlag) != null) {
-            boolean canSelect = true;
-            for (int j = 0; j < vodInfo.seriesMap.get(vodInfo.playFlag).size(); j++) {
-                if (vodInfo.seriesMap.get(vodInfo.playFlag).get(j).selected) {
-                    canSelect = false;
-                    break;
-                }
-            }
-            if (canSelect)
-                vodInfo.seriesMap.get(vodInfo.playFlag).get(vodInfo.playIndex).selected = true;
-        }
-        seriesAdapter.setNewData(vodInfo.seriesMap.get(vodInfo.playFlag));
-
+        episodeSelection.sync(vodInfo);
+        seriesFlagAdapter.notifyDataSetChanged();
+        List<VodInfo.VodSeries> shown = episodeSelection.displayedEpisodes(vodInfo);
+        seriesAdapter.setNewData(shown);
+        if (mAllSeriesBottomDialog instanceof AllVodSeriesBottomDialog && mAllSeriesBottomDialog.isShow())
+            ((AllVodSeriesBottomDialog) mAllSeriesBottomDialog).updateData(shown);
     }
 
     private void initViewModel() {
         sourceViewModel = new ViewModelProvider(this).get(SourceViewModel.class);
+        historyViewModel = new ViewModelProvider(this, new HistoryViewModel.Factory()).get(HistoryViewModel.class);
+        quickSearchHelper = new DetailQuickSearchHelper(sourceViewModel);
+        // quick 搜索批次结果直调(替代历史 EventBus 快搜批次通道;回调线程不保证主线程,切主线程喂快搜聚合)
+        sourceViewModel.setQuickSearchBatchListener(data ->
+                runOnUiThread(() -> quickSearchHelper.handleQuickSearchResult(data)));
         sourceViewModel.detailResult.observe(this, new Observer<AbsXml>() {
             @Override
             public void onChanged(AbsXml absXml) {
-                if (absXml != null && absXml.movie != null && absXml.movie.videoList != null && absXml.movie.videoList.size() > 0) {
-                    showSuccess();
-                    mVideo = absXml.movie.videoList.get(0);
-                    vodInfo = new VodInfo();
-                    vodInfo.setVideo(mVideo);
-                    vodInfo.sourceKey = mVideo.sourceKey;
-
-                    mBinding.tvName.setText(TextUtils.isEmpty(mVideo.name) ? "暂无信息" : mVideo.name);
-                    String srcName = ApiConfig.get().getSource(mVideo.sourceKey).getName();
-                    mBinding.tvSite.setText("来源：" + (TextUtils.isEmpty(srcName) ? "未知" : srcName));
-
-                    if (vodInfo.seriesMap != null && vodInfo.seriesMap.size() > 0) {//线路
-                        mBinding.mGridViewFlag.setVisibility(View.VISIBLE);
-                        mBinding.mGridView.setVisibility(View.VISIBLE);
-                        mBinding.mEmptyPlaylist.setVisibility(View.GONE);
-
-                        VodInfo vodInfoRecord = RoomDataManger.getVodInfo(sourceKey, vodId);
-                        // 读取历史记录
-                        if (vodInfoRecord != null) {
-                            vodInfo.playIndex = Math.max(vodInfoRecord.playIndex, 0);
-                            vodInfo.playFlag = vodInfoRecord.playFlag;
-                            vodInfo.playerCfg = vodInfoRecord.playerCfg;
-                            vodInfo.reverseSort = vodInfoRecord.reverseSort;
-                        } else {
-                            vodInfo.playIndex = 0;
-                            vodInfo.playFlag = null;
-                            vodInfo.playerCfg = "";
-                            vodInfo.reverseSort = false;
-                        }
-
-                        if (vodInfo.reverseSort) {
-                            vodInfo.reverse();
-                        }
-
-                        if (vodInfo.playFlag == null || !vodInfo.seriesMap.containsKey(vodInfo.playFlag))
-                            vodInfo.playFlag = (String) vodInfo.seriesMap.keySet().toArray()[0];
-
-                        int flagScrollTo = 0;
-                        for (int j = 0; j < vodInfo.seriesFlags.size(); j++) {
-                            VodInfo.VodSeriesFlag flag = vodInfo.seriesFlags.get(j);
-                            if (flag.name.equals(vodInfo.playFlag)) {
-                                flagScrollTo = j;
-                                flag.selected = true;
-                            } else
-                                flag.selected = false;
-                        }
-//                        setTextShow(tvPlayUrl, "播放地址：", vodInfo.seriesMap.get(vodInfo.playFlag).get(0).url);
-                        //设置线路数据
-                        seriesFlagAdapter.setNewData(vodInfo.seriesFlags);
-                        mBinding.mGridViewFlag.scrollToPosition(flagScrollTo);
-
-                        refreshList();
-                        if (showPreview) {
-                            jumpToPlay();
-                            mBinding.previewPlayer.setVisibility(View.VISIBLE);
-                            toggleSubtitleTextSize();
-                        }
-                        // startQuickSearch();
-                    } else {//空布局
-                        mBinding.mGridViewFlag.setVisibility(View.GONE);
-                        mBinding.mGridView.setVisibility(View.GONE);
-                        mBinding.mEmptyPlaylist.setVisibility(View.VISIBLE);
-                    }
+                if (!historyRecordReady) {
+                    pendingDetail = absXml;
+                    pendingDetailReady = true;
                 } else {
-                    showEmpty();
-                    mBinding.previewPlayer.setVisibility(View.GONE);
+                    applyDetailResult(absXml);
                 }
             }
         });
     }
 
-    private String getHtml(String label, String content) {
-        if (content == null) {
-            content = "";
+    private void applyDetailResult(AbsXml absXml) {
+        historyDetailCompleted = true;
+        if (absXml == null || absXml.movie == null || absXml.movie.videoList == null
+                || absXml.movie.videoList.isEmpty()) {
+            // 快照已起播时，详情刷新失败不应把当前播放器和选集盖成空态。
+            if (!historySnapshotShown) {
+                showEmpty(emptyTipForSource());
+                mBinding.previewPlayerPlace.setVisibility(View.GONE);
+                mBinding.previewPlayer.setVisibility(View.GONE);
+            }
+            finishPendingHistoryFailure();
+            return;
         }
-        return label + "<font color=\"#FFFFFF\">" + content + "</font>";
+        Movie.Video video = absXml.movie.videoList.get(0);
+        VodInfo fresh = new VodInfo();
+        fresh.setVideo(video);
+        fresh.sourceKey = video.sourceKey;
+        if (!isCurrentDetail(fresh)) return;
+        if (historySnapshotShown && (fresh.seriesMap == null || fresh.seriesMap.isEmpty())) {
+            finishPendingHistoryFailure();
+            return;
+        }
+        if (historyRecord != null) {
+            fresh.playIndex = Math.max(historyRecord.playIndex, 0);
+            fresh.playFlag = historyRecord.playFlag;
+            fresh.playerCfg = historyRecord.playerCfg;
+            fresh.reverseSort = historyRecord.reverseSort;
+        }
+        if (fresh.reverseSort && fresh.seriesMap != null) fresh.reverse();
+        if (historyQuickPlayback && !HistoryEntryNavigator.matchCurrentEpisode(fresh, vodInfo)) {
+            finishPendingHistoryFailure();
+            return;
+        }
+        showVodInfo(fresh, historyQuickPlayback || browserCastAttached);
+        historyDetailRefreshed = historyQuickPlayback;
+        if (historySnapshotShown) insertVod(sourceKey, fresh);
+        historyRecord = fresh;
+        if (!retryRefreshedHistoryIfNeeded()) finishPendingHistoryFailure();
+    }
+
+    private boolean retryRefreshedHistoryIfNeeded() {
+        if (!historyQuickPlayback || !historyDetailRefreshed || historyRefreshRetryUsed
+                || failedHistoryEpisodeUrl == null || playFragment == null
+                || !playFragment.isPlaybackRequestCurrent(failedHistoryGeneration, failedHistoryEpisodeUrl)
+                || !HistoryEntryNavigator.hasPlayableSnapshot(vodInfo)) return false;
+        String freshUrl = vodInfo.seriesMap.get(vodInfo.playFlag).get(vodInfo.playIndex).url;
+        if (TextUtils.equals(freshUrl, failedHistoryEpisodeUrl)) return false;
+        historyRefreshRetryUsed = true;
+        historyRefreshHandler.removeCallbacks(historyRefreshTimeout);
+        failedHistoryEpisodeUrl = null;
+        com.github.tvbox.osc.log.LogStore.log(com.github.tvbox.osc.log.Category.PLAYER,
+                "历史快照播放失败，使用刷新后的剧集地址重试一次");
+        playFragment.play(false);
+        return true;
+    }
+
+    private void finishPendingHistoryFailure() {
+        if (failedHistoryEpisodeUrl == null) return;
+        historyRefreshHandler.removeCallbacks(historyRefreshTimeout);
+        String episodeUrl = failedHistoryEpisodeUrl;
+        String error = failedHistoryError;
+        boolean finish = failedHistoryFinish;
+        boolean autoSwitchPlayer = failedHistoryAutoSwitchPlayer;
+        long generation = failedHistoryGeneration;
+        failedHistoryEpisodeUrl = null;
+        failedHistoryError = null;
+        failedHistoryGeneration = -1;
+        historyRefreshRetryUsed = true;
+        if (playFragment != null && playFragment.isPlaybackRequestCurrent(generation, episodeUrl)) {
+            playFragment.showFinalPlaybackError(error, finish, autoSwitchPlayer);
+        }
+    }
+
+    private void showVodInfo(VodInfo info, boolean keepPlaying) {
+        if (restoringBrowserCast || browserCastAttached) {
+            RemoteServer.BrowserCastDetail detail = currentBrowserCastDetail();
+            if (detail != null) {
+                if (info.reverseSort != detail.reverseSort && info.seriesMap != null) info.reverse();
+                info.reverseSort = detail.reverseSort;
+                info.playFlag = detail.playFlag;
+                info.playIndex = detail.selectedIndex;
+            }
+        }
+        vodInfo = info;
+        episodeSelection.bind(info, keepPlaying);
+        updateCollectAction(collected);
+        showSuccess();
+        mBinding.tvName.setText(TextUtils.isEmpty(info.name) ? "暂无信息" : info.name);
+        SourceBean detailSource = com.github.tvbox.osc.spiderapi.SourceConfigProviders.get().getSource(info.sourceKey);
+        String srcName = detailSource == null ? "" : detailSource.getName();
+        mBinding.tvSite.setText("来源：" + (TextUtils.isEmpty(srcName) ? "未知" : srcName));
+
+        if (info.seriesMap == null || info.seriesMap.isEmpty()) {
+            seriesFlagAdapter.setNewData(new ArrayList<>());
+            refreshList();
+            dismissSeriesDialogs();
+            mBinding.llLayout.setVisibility(View.GONE);
+            mBinding.mEmptyPlaylist.setVisibility(View.VISIBLE);
+            mBinding.previewPlayerPlace.setVisibility(View.GONE);
+            mBinding.previewPlayer.setVisibility(View.GONE);
+            return;
+        }
+        mBinding.llLayout.setVisibility(View.VISIBLE);
+        mBinding.mGridViewFlag.setVisibility(View.VISIBLE);
+        mBinding.mGridView.setVisibility(View.VISIBLE);
+        mBinding.rlLineHeader.setVisibility(View.VISIBLE);
+        mBinding.llSeriesHeader.setVisibility(View.VISIBLE);
+        mBinding.mEmptyPlaylist.setVisibility(View.GONE);
+        if (info.seriesFlags == null) info.seriesFlags = new ArrayList<>();
+        if (info.seriesFlags.isEmpty()) {
+            for (String flag : info.seriesMap.keySet()) info.seriesFlags.add(new VodInfo.VodSeriesFlag(flag));
+        }
+        episodeSelection.sync(info);
+        int flagScrollTo = 0;
+        for (int j = 0; j < info.seriesFlags.size(); j++) {
+            VodInfo.VodSeriesFlag flag = info.seriesFlags.get(j);
+            if (flag.selected) flagScrollTo = j;
+        }
+        updateSortButtonText();
+        seriesFlagAdapter.setNewData(info.seriesFlags);
+        mBinding.mGridViewFlag.scrollToPosition(flagScrollTo);
+        refreshList();
+        if (showPreview && HistoryEntryNavigator.hasPlayableSnapshot(info)) {
+            if (keepPlaying && previewVodInfo != null) {
+                // PlayFragment 持有 previewVodInfo 引用；只换后续选集列表，保留当前解码会话。
+                previewVodInfo.seriesMap = info.seriesMap;
+                previewVodInfo.seriesFlags = info.seriesFlags;
+                previewVodInfo.playFlag = info.playFlag;
+                previewVodInfo.playIndex = info.playIndex;
+                previewVodInfo.name = info.name;
+                previewVodInfo.playerCfg = info.playerCfg;
+                previewVodInfo.reverseSort = info.reverseSort;
+                if (browserCastAttached) rebindBrowserCastControls(currentBrowserCastDetail());
+            } else {
+                jumpToPlay();
+            }
+            mBinding.previewPlayerPlace.setVisibility(View.VISIBLE);
+            mBinding.previewPlayer.setVisibility(View.VISIBLE);
+            toggleSubtitleTextSize();
+        } else {
+            mBinding.previewPlayerPlace.setVisibility(View.GONE);
+            mBinding.previewPlayer.setVisibility(View.GONE);
+        }
+    }
+
+    /**
+     * 「跟随系统」翻明暗时的重建:本页正在播(预览播放器)就先不重建 —— 翻明暗不该把正在看的片子
+     * 重建掉;那次重建会记下来,等本页空闲回到前台时由 {@code BaseActivity.onResume} 补做。
+     */
+    @Override
+    protected boolean allowRecreateOnNightChange() {
+        try {
+            return playFragment == null || playFragment.getPlayer() == null
+                    || !playFragment.getPlayer().isPlaying();
+        } catch (Throwable th) {
+            return true;
+        }
+    }
+
+    /**
+     * 详情拉不到时的空态文案:能说清原因就说原因,说不清才退回默认「暂无数据」。
+     * <p>
+     * 动机(线上实例):订阅里某个站点声明的类在其 jar 里并不存在(如 csp_XPathGuard),
+     * 该源每次调用只会拿到 SpiderNull → 详情页永远空白,用户看到的和"这个片没资源"一模一样,
+     * 无从判断是源坏了还是 App 坏了。原因由 :spider 侧登记(SpiderFaults),
+     * 这里只经契约读;源已从订阅里消失(订阅换了/被删)也单独给个说法。
+     */
+    private String emptyTipForSource() {
+        String reason = com.github.tvbox.osc.spiderapi.SpiderFaultProviders.unavailableReason(sourceKey);
+        if (!TextUtils.isEmpty(reason)) return reason;
+        if (com.github.tvbox.osc.spiderapi.SourceConfigProviders.get().getSource(sourceKey) == null) {
+            return "该源已不在当前订阅中（可能已被移除或改名）";
+        }
+        return null;
     }
 
     private void initData() {
         Intent intent = getIntent();
         if (intent != null && intent.getExtras() != null) {
             Bundle bundle = intent.getExtras();
-            loadDetail(bundle.getString("id", null), bundle.getString("sourceKey", ""));
+            // 入口(搜索/列表等)传过来的剧名,用于下载命名兜底
+            mPassedName = bundle.getString("vodName", "");
+            String id = bundle.getString("id", null);
+            String key = bundle.getString("sourceKey", "");
+            String castSession = bundle.getString("browserCastSessionId");
+            if (!TextUtils.isEmpty(castSession)) {
+                RemoteServer.BrowserCastDetail detail = ControlManager.get().activeBrowserCastDetail();
+                if (detail == null || !castSession.equals(detail.sessionId)) {
+                    AppBubble.toast("该投屏已结束");
+                    if (vodInfo == null) finish();
+                    return;
+                }
+                if (playFragment == null) {
+                    showPreview = true;
+                    playFragment = new PlayFragment();
+                    playFragment.setPlaySyncHost(this);
+                    getSupportFragmentManager().beginTransaction()
+                            .add(R.id.previewPlayer, playFragment).commit();
+                }
+                loadDetail(detail.vodId, detail.sourceKey, null, castSession);
+                return;
+            }
+            Object saved = bundle.getSerializable("historySnapshot");
+            VodInfo snapshot = saved instanceof VodInfo ? (VodInfo) saved : null;
+            if (snapshot != null && (!TextUtils.equals(snapshot.id, id)
+                    || !TextUtils.equals(snapshot.sourceKey, key)
+                    || !HistorySourceBinding.isAvailable(snapshot)
+                    || !HistoryEntryNavigator.hasPlayableSnapshot(snapshot))) snapshot = null;
+            loadDetail(id, key, snapshot);
         }
+    }
+
+    @Override
+    protected void onNewIntent(Intent intent) {
+        super.onNewIntent(intent);
+        setIntent(intent);
+        initData();
     }
 
     private void loadDetail(String vid, String key) {
+        loadDetail(vid, key, null);
+    }
+
+    private void loadDetail(String vid, String key, VodInfo snapshot) {
+        loadDetail(vid, key, snapshot, null);
+    }
+
+    private void loadDetail(String vid, String key, VodInfo snapshot, String castSession) {
         if (vid != null) {
+            int epoch = ++detailRequestEpoch;
+            browserCastSessionId = castSession;
+            restoringBrowserCast = !TextUtils.isEmpty(castSession);
+            browserCastEpisodesAvailable = true;
+            if (castSession == null && getIntent() != null)
+                getIntent().removeExtra("browserCastSessionId");
+            browserCastAttached = false;
+            browserCastSyncHandler.removeCallbacks(browserCastSync);
+            ++playbackSelectionEpoch;
+            if (playFragment != null) playFragment.clearData();
+            ++externalDownloadEpoch;
+            int collectEpoch = ++collectionQueryEpoch;
+            dismissSeriesDialogs();
+            downloadDialogCoordinator.invalidate();
+            previewVodInfo = null;
+            vodInfo = null;
+            episodeSelection.bind(null, false);
+            seriesFlagAdapter.setNewData(new ArrayList<>());
+            refreshList();
+            ControlManager.get().clearEpisodeCast(lanCastOwner);
             vodId = vid;
             sourceKey = key;
-            showLoading();
-            sourceViewModel.getDetail(sourceKey, vodId);
-            boolean isVodCollect = RoomDataManger.isVodCollect(sourceKey, vodId);
-            if (isVodCollect) {
-                mBinding.tvCollect.setText("取消收藏");
+            collectionStateReady = false;
+            collectionBusy = false;
+            updateCollectAction(false);
+            historyRecord = snapshot;
+            historyRecordReady = snapshot != null && !showPreview;
+            pendingDetail = null;
+            pendingDetailReady = false;
+            historyQuickPlayback = false;
+            historySnapshotShown = snapshot != null;
+            historyDetailCompleted = false;
+            historyDetailRefreshed = false;
+            historyRefreshRetryUsed = false;
+            historyCastRefreshPending = false;
+            historyRefreshHandler.removeCallbacks(historyCastRefreshTimeout);
+            historySnapshotEpisodeUrl = HistoryEntryNavigator.hasPlayableSnapshot(snapshot)
+                    ? snapshot.seriesMap.get(snapshot.playFlag).get(snapshot.playIndex).url : null;
+            historyRefreshHandler.removeCallbacks(historyRefreshTimeout);
+            failedHistoryEpisodeUrl = null;
+            failedHistoryError = null;
+            failedHistoryGeneration = -1;
+            if (snapshot != null && showPreview && playFragment != null) {
+                // Activity.onCreate 期间 Fragment 事务虽已提交，播放器的懒初始化仍未完成。
+                // 就绪后先起播，再请求同源详情，避免刷新任务占住播放解析队列。
+                playFragment.runWhenPlaybackReady(() -> {
+                    if (epoch != detailRequestEpoch || isFinishing() || isDestroyed()) return;
+                    pendingDetail = null;
+                    pendingDetailReady = false;
+                    historyRecordReady = true;
+                    showVodInfo(snapshot, false);
+                    historyQuickPlayback = previewVodInfo != null;
+                    sourceViewModel.getDetail(key, vid);
+                });
             } else {
-                mBinding.tvCollect.setText("加入收藏");
+                if (snapshot != null) showVodInfo(snapshot, false);
+                else showLoading();
+                sourceViewModel.getDetail(key, vid);
             }
-        }
-    }
-
-    @Subscribe(threadMode = ThreadMode.MAIN)
-    public void refresh(RefreshEvent event) {
-        if (event.type == RefreshEvent.TYPE_REFRESH) {
-            if (event.obj != null) {
-                if (event.obj instanceof Integer) {
-                    int index = (int) event.obj;
-                    for (int j = 0; j < vodInfo.seriesMap.get(vodInfo.playFlag).size(); j++) {
-                        seriesAdapter.getData().get(j).selected = false;
-                        seriesAdapter.notifyItemChanged(j);
-                    }
-                    seriesAdapter.getData().get(index).selected = true;
-                    seriesAdapter.notifyItemChanged(index);
-                    //mBinding.mGridView.setSelection(index);
-                    vodInfo.playIndex = index;
-                    //保存历史
-                    insertVod(sourceKey, vodInfo);
-                } else if (event.obj instanceof JSONObject) {
-                    vodInfo.playerCfg = ((JSONObject) event.obj).toString();
-                    //保存历史
-                    insertVod(sourceKey, vodInfo);
+            HeavyTaskUtil.executeNewTask(() -> {
+                VodInfo loadedRecord = snapshot;
+                boolean saved = false;
+                try {
+                    if (snapshot == null) loadedRecord = historyViewModel.history().get(key, vid);
+                    saved = historyViewModel.collect().isSaved(key, vid);
+                } catch (Throwable th) {
+                    android.util.Log.w("DetailActivity", "读取历史/收藏状态失败", th);
                 }
-
-            }
-        } else if (event.type == RefreshEvent.TYPE_QUICK_SEARCH_SELECT) {
-            if (event.obj != null) {
-                Movie.Video video = (Movie.Video) event.obj;
-                loadDetail(video.id, video.sourceKey);
-            }
-        } else if (event.type == RefreshEvent.TYPE_QUICK_SEARCH_WORD_CHANGE) {
-            if (event.obj != null) {
-                String word = (String) event.obj;
-                switchSearchWord(word);
-            }
-        } else if (event.type == RefreshEvent.TYPE_QUICK_SEARCH_RESULT) {
-            try {
-                searchData(event.obj == null ? null : (AbsXml) event.obj);
-            } catch (Exception e) {
-                searchData(null);
-            }
-        }
-    }
-
-    private String searchTitle = "";
-    private boolean hadQuickStart = false;
-    private final List<Movie.Video> quickSearchData = new ArrayList<>();
-    private final List<String> quickSearchWord = new ArrayList<>();
-    private ExecutorService searchExecutorService = null;
-
-    private void switchSearchWord(String word) {
-        OkGo.getInstance().cancelTag("quick_search");
-        quickSearchData.clear();
-        searchTitle = word;
-        searchResult();
-    }
-
-    private void startQuickSearch() {
-        initCheckedSourcesForSearch();
-        if (hadQuickStart)
-            return;
-        hadQuickStart = true;
-        OkGo.getInstance().cancelTag("quick_search");
-        quickSearchWord.clear();
-        searchTitle = mVideo.name;
-        quickSearchData.clear();
-        quickSearchWord.addAll(SearchHelper.splitWords(searchTitle));
-        // 分词
-        OkGo.<String>get("http://api.pullword.com/get.php?source=" + URLEncoder.encode(searchTitle) + "&param1=0&param2=0&json=1")
-                .tag("fenci")
-                .execute(new AbsCallback<String>() {
-                    @Override
-                    public String convertResponse(okhttp3.Response response) throws Throwable {
-                        if (response.body() != null) {
-                            return response.body().string();
-                        } else {
-                            throw new IllegalStateException("网络请求错误");
+                VodInfo record = loadedRecord;
+                boolean collected = saved;
+                runOnUiThread(() -> {
+                    if (epoch != detailRequestEpoch || isFinishing() || isDestroyed()) return;
+                    if (snapshot == null) {
+                        historyRecord = record;
+                        historyRecordReady = true;
+                        if (restoringBrowserCast && HistoryEntryNavigator.hasPlayableSnapshot(record)) {
+                            historySnapshotShown = true;
+                            showVodInfo(record, false);
                         }
                     }
-
-                    @Override
-                    public void onSuccess(Response<String> response) {
-                        String json = response.body();
-                        try {
-                            for (JsonElement je : new Gson().fromJson(json, JsonArray.class)) {
-                                quickSearchWord.add(je.getAsJsonObject().get("t").getAsString());
-                            }
-                        } catch (Throwable th) {
-                            th.printStackTrace();
-                        }
-                        List<String> words = new ArrayList<>(new HashSet<>(quickSearchWord));
-                        EventBus.getDefault().post(new RefreshEvent(RefreshEvent.TYPE_QUICK_SEARCH_WORD, words));
+                    if (collectEpoch == collectionQueryEpoch) {
+                        collectionStateReady = true;
+                        updateCollectAction(collected);
                     }
-
-                    @Override
-                    public void onError(Response<String> response) {
-                        super.onError(response);
+                    if (historyRecordReady && pendingDetailReady) {
+                        AbsXml result = pendingDetail;
+                        pendingDetail = null;
+                        pendingDetailReady = false;
+                        applyDetailResult(result);
                     }
                 });
-
-        searchResult();
-    }
-
-    private void searchResult() {
-        try {
-            if (searchExecutorService != null) {
-                searchExecutorService.shutdownNow();
-                searchExecutorService = null;
-            }
-        } catch (Throwable th) {
-            th.printStackTrace();
-        }
-        searchExecutorService = Executors.newFixedThreadPool(5);
-        List<SourceBean> searchRequestList = new ArrayList<>();
-        searchRequestList.addAll(ApiConfig.get().getSourceBeanList());
-        SourceBean home = ApiConfig.get().getHomeSourceBean();
-        searchRequestList.remove(home);
-        searchRequestList.add(0, home);
-
-        ArrayList<String> siteKey = new ArrayList<>();
-        for (SourceBean bean : searchRequestList) {
-            if (!bean.isSearchable() || !bean.isQuickSearch()) {
-                continue;
-            }
-            if (mCheckSources != null && !mCheckSources.containsKey(bean.getKey())) {
-                continue;
-            }
-            siteKey.add(bean.getKey());
-        }
-        for (String key : siteKey) {
-            searchExecutorService.execute(new Runnable() {
-                @Override
-                public void run() {
-                    sourceViewModel.getQuickSearch(key, searchTitle);
-                }
             });
         }
     }
 
-    private void searchData(AbsXml absXml) {
-        if (absXml != null && absXml.movie != null && absXml.movie.videoList != null && absXml.movie.videoList.size() > 0) {
-            List<Movie.Video> data = new ArrayList<>();
-            for (Movie.Video video : absXml.movie.videoList) {
-                // 去除当前相同的影片
-                if (video.sourceKey.equals(sourceKey) && video.id.equals(vodId))
-                    continue;
-                data.add(video);
-            }
-            quickSearchData.addAll(data);
-            EventBus.getDefault().post(new RefreshEvent(RefreshEvent.TYPE_QUICK_SEARCH, data));
+    private RemoteServer.BrowserCastDetail currentBrowserCastDetail() {
+        RemoteServer.BrowserCastDetail detail = ControlManager.get().activeBrowserCastDetail();
+        return detail != null && TextUtils.equals(detail.sessionId, browserCastSessionId)
+                && TextUtils.equals(detail.vodId, vodId) && TextUtils.equals(detail.sourceKey, sourceKey)
+                ? detail : null;
+    }
+
+    private void restoreBrowserCastControls() {
+        RemoteServer.BrowserCastDetail detail = currentBrowserCastDetail();
+        if (detail != null) detail = rebindBrowserCastControls(detail);
+        restoringBrowserCast = false;
+        playFragment.showBrowserCastStatus();
+        if (detail != null) playFragment.setBrowserCastEpisodeControls(browserCastEpisodesAvailable,
+                detail.vodName + " " + detail.episodeName);
+        browserCastAttached = detail != null;
+        if (detail == null) {
+            browserCastSessionId = null;
+            playFragment.showBrowserCastEndedStatus();
+        } else if (browserCastVisible) {
+            browserCastSyncHandler.removeCallbacks(browserCastSync);
+            browserCastSyncHandler.post(browserCastSync);
         }
     }
 
+    private RemoteServer.BrowserCastDetail rebindBrowserCastControls(RemoteServer.BrowserCastDetail detail) {
+        if (detail == null) return null;
+        boolean matches = isCurrentDetail(vodInfo) && TextUtils.equals(vodInfo.playFlag, detail.playFlag)
+                && vodInfo.playIndex == detail.selectedIndex && vodInfo.reverseSort == detail.reverseSort;
+        List<VodInfo.VodSeries> episodes = vodInfo == null || vodInfo.seriesMap == null ? null
+                : vodInfo.seriesMap.get(vodInfo.playFlag);
+        if (matches) matches = episodes != null && vodInfo.playIndex >= 0
+                && vodInfo.playIndex < episodes.size()
+                && TextUtils.equals(episodes.get(vodInfo.playIndex).name, detail.episodeName)
+                && TextUtils.equals(episodes.get(vodInfo.playIndex).url, detail.episodeUrl);
+        browserCastEpisodesAvailable = matches;
+        RemoteServer.BrowserCastDetail attached = ControlManager.get().attachBrowserCastDetail(lanCastOwner,
+                detail.sessionId, matches ? currentCastEpisodeNames() : java.util.Collections.emptyList(),
+                matches ? browserEpisodeHandler(detailRequestEpoch) : new RemoteServer.NextEpisodeHandler() {
+                    @Override public boolean playNext() { return false; }
+                });
+        if (playFragment != null) playFragment.setBrowserCastEpisodeControls(matches,
+                detail.vodName + " " + detail.episodeName);
+        return attached;
+    }
+
+    private boolean canSelectBrowserEpisode() {
+        if (!browserCastAttached || browserCastEpisodesAvailable) return true;
+        AppBubble.toast("剧集列表已变化，当前投屏仅支持播放、暂停和进度控制");
+        return false;
+    }
+
+    /** 收藏是普通动作，取消收藏是移除动作；文字与图标保持同一颜色。 */
+    private boolean isCurrentDetail(VodInfo info) {
+        return info != null && TextUtils.equals(info.id, vodId)
+                && TextUtils.equals(info.sourceKey, sourceKey);
+    }
+
+    private boolean isCurrentPreview() {
+        return startedPlaybackEpoch == playbackSelectionEpoch
+                && isCurrentDetail(vodInfo) && isCurrentDetail(previewVodInfo);
+    }
+
+    private void dismissSeriesDialogs() {
+        if (mAllSeriesRightDialog != null) mAllSeriesRightDialog.dismiss();
+        if (mAllSeriesBottomDialog != null) mAllSeriesBottomDialog.dismiss();
+        mAllSeriesRightDialog = null;
+        mAllSeriesBottomDialog = null;
+    }
+
+    private void refreshCollectionState() {
+        if (!isCurrentDetail(vodInfo)) return;
+        final int detailEpoch = detailRequestEpoch;
+        final int queryEpoch = ++collectionQueryEpoch;
+        final String key = sourceKey;
+        final String id = vodId;
+        HeavyTaskUtil.executeNewTask(() -> {
+            try {
+                boolean saved = historyViewModel.collect().isSaved(key, id);
+                runOnUiThread(() -> {
+                    if (detailEpoch != detailRequestEpoch || queryEpoch != collectionQueryEpoch
+                            || collectionBusy || isFinishing() || isDestroyed()) return;
+                    collectionStateReady = true;
+                    updateCollectAction(saved);
+                });
+            } catch (Throwable th) {
+                android.util.Log.w("DetailActivity", "刷新收藏状态失败", th);
+            }
+        });
+    }
+
+    private void changeCollection() {
+        if (!isCurrentDetail(vodInfo) || !collectionStateReady || collectionBusy) return;
+        int epoch = detailRequestEpoch;
+        if (!collected) {
+            persistCollection(epoch, true);
+        } else {
+            ConfirmDialog.showDangerInHostView(this, "取消收藏",
+                    "确定将《" + (vodInfo.name == null ? "该影片" : vodInfo.name) + "》移出收藏夹吗？",
+                    "移除", () -> {
+                        if (epoch == detailRequestEpoch && collected && !collectionBusy)
+                            persistCollection(epoch, false);
+                    });
+        }
+    }
+
+    private void persistCollection(int epoch, boolean save) {
+        if (epoch != detailRequestEpoch || !isCurrentDetail(vodInfo)) return;
+        VodInfo record = new VodInfo();
+        record.id = vodInfo.id;
+        record.name = vodInfo.name;
+        record.pic = vodInfo.pic;
+        // 打上当前订阅指纹:换订阅后收藏卡片仍能识别来源并支持一键切回(与观看历史一致)。
+        HistorySourceBinding.stamp(record);
+        final String key = sourceKey;
+        collectionBusy = true;
+        ++collectionQueryEpoch;
+        updateCollectAction(collected);
+        HeavyTaskUtil.executeNewTask(() -> {
+            String failure = null;
+            try {
+                if (save) historyViewModel.collect().save(key, record);
+                else historyViewModel.collect().delete(key, record.id);
+                com.github.tvbox.osc.log.LogStore.log(com.github.tvbox.osc.log.Category.SYSTEM,
+                        (save ? "收藏: " : "取消收藏: ") + (record.name == null ? "?" : record.name));
+            } catch (Throwable th) {
+                android.util.Log.w("DetailActivity", "更新收藏失败", th);
+                failure = "更新收藏失败，请重试";
+            }
+            String error = failure;
+            runOnUiThread(() -> {
+                if (epoch != detailRequestEpoch || isFinishing() || isDestroyed()) return;
+                collectionBusy = false;
+                updateCollectAction(error == null ? save : collected);
+                AppBubble.toast(error == null ? (save ? "已加入收藏夹" : "已移除收藏夹") : error);
+            });
+        });
+    }
+
+    private void updateCollectAction(boolean collected) {
+        this.collected = collected;
+        mBinding.tvCollect.setText(collected ? "取消收藏" : "加入收藏");
+        mBinding.tvCollect.setEnabled(collectionStateReady && !collectionBusy && isCurrentDetail(vodInfo));
+        int color = ContextCompat.getColor(this,
+                collected ? R.color.text_danger : R.color.text_foreground);
+        mBinding.tvCollect.setTextColor(color);
+        TextViewCompat.setCompoundDrawableTintList(
+                mBinding.tvCollect, ColorStateList.valueOf(color));
+    }
+
+    /** PlaySyncHost:选集切换同步(预览播放器→详情选集高亮/历史) */
+    @Override
+    public void onEpisodeSelected(int index) {
+        if (!isCurrentPreview() || vodInfo.seriesMap == null) return;
+        List<VodInfo.VodSeries> playing = vodInfo.seriesMap.get(previewVodInfo.playFlag);
+        if (playing == null || index < 0 || index >= playing.size()) return;
+        ControlManager.get().markEpisodeAdvancing(lanCastOwner);
+        vodInfo.playFlag = previewVodInfo.playFlag;
+        vodInfo.playIndex = index;
+        refreshList();
+        insertVod(sourceKey, vodInfo);
+    }
+
+    /** PlaySyncHost:播放配置变更回写(详情页缓存配置并保存历史) */
+    @Override
+    public void onPlayerCfgChanged(JSONObject cfg) {
+        if (!isCurrentPreview() || cfg == null) return;
+        vodInfo.playerCfg = cfg.toString();
+        insertVod(sourceKey, vodInfo);
+    }
+
+    @Override
+    public boolean onPlaybackResolved(String title, String url) {
+        if (!isCurrentPreview() || !ControlManager.get().updateEpisodeCast(lanCastOwner, title, url,
+                vodInfo.playIndex, currentCastEpisodeNames(),
+                playFragment == null ? null : playFragment.getPlayHeaders(),
+                playFragment == null ? null : playFragment.getFinalUrl())) return false;
+        browserCastAttached = true;
+        registerBrowserCastDetail();
+        if (browserCastVisible) {
+            browserCastSyncHandler.removeCallbacks(browserCastSync);
+            browserCastSyncHandler.post(browserCastSync);
+        }
+        if (playFragment != null && playFragment.getPlayer() != null)
+            playFragment.getPlayer().pause();
+        return true;
+    }
+
+    @Override
+    public boolean controlBrowserCast(String action, long positionMs) {
+        boolean sent = ControlManager.get().controlBrowserPlayback(lanCastOwner, action, positionMs);
+        if (!sent) AppBubble.toast("电脑暂未连接，请稍后重试");
+        return sent;
+    }
+
+    @Override
+    public boolean stopBrowserCast() {
+        ControlManager.get().stopBrowserPlayback(lanCastOwner);
+        browserCastEpisodesAvailable = true;
+        browserCastSessionId = null;
+        restoringBrowserCast = false;
+        browserCastAttached = false;
+        browserCastSyncHandler.removeCallbacks(browserCastSync);
+        return true;
+    }
+
+    @Override
+    public boolean onPlaybackFailed(long generation, String episodeUrl, String error,
+                                    boolean finish, boolean autoSwitchPlayer) {
+        if (!isCurrentPreview() || !historyQuickPlayback || historyRefreshRetryUsed || historySnapshotEpisodeUrl == null
+                || !TextUtils.equals(historySnapshotEpisodeUrl, episodeUrl) || playFragment == null
+                || !playFragment.isPlaybackRequestCurrent(generation, episodeUrl)) return false;
+        failedHistoryGeneration = generation;
+        failedHistoryEpisodeUrl = episodeUrl;
+        failedHistoryError = error;
+        failedHistoryFinish = finish;
+        failedHistoryAutoSwitchPlayer = autoSwitchPlayer;
+        if (historyDetailCompleted) {
+            if (retryRefreshedHistoryIfNeeded()) return true;
+            failedHistoryEpisodeUrl = null;
+            historyRefreshRetryUsed = true;
+            return false;
+        }
+        historyRefreshHandler.removeCallbacks(historyRefreshTimeout);
+        historyRefreshHandler.postDelayed(historyRefreshTimeout, HISTORY_REFRESH_TIMEOUT_MS);
+        return true;
+    }
+
+    private List<String> currentCastEpisodeNames() {
+        List<String> names = new ArrayList<>();
+        if (vodInfo == null || vodInfo.seriesMap == null) return names;
+        List<VodInfo.VodSeries> current = vodInfo.seriesMap.get(vodInfo.playFlag);
+        if (current != null) for (VodInfo.VodSeries episode : current)
+            names.add(episode == null || episode.name == null ? "" : episode.name);
+        return names;
+    }
+
     private void insertVod(String sourceKey, VodInfo vodInfo) {
-        if (Hawk.get(HawkConfig.PRIVATE_BROWSING, false)) {//无痕浏览
+        if (SystemConfig.isPrivateBrowsing()) {//无痕浏览
             return;
         }
+        com.github.tvbox.osc.util.HistorySourceBinding.stamp(vodInfo);
         try {
             vodInfo.playNote = vodInfo.seriesMap.get(vodInfo.playFlag).get(vodInfo.playIndex).name;
         } catch (Throwable th) {
             vodInfo.playNote = "";
         }
-        RoomDataManger.insertVodRecord(sourceKey, vodInfo);
-        EventBus.getDefault().post(new RefreshEvent(RefreshEvent.TYPE_HISTORY_REFRESH));
+        historyViewModel.history().saveAsync(sourceKey, vodInfo);
+    }
+
+    /** 详情页不再注册 EventBus:选集/配置经 PlayFragment.PlaySyncHost 屏内直调,快搜批次经监听直调 */
+    @Override
+    protected void onCreate(@Nullable Bundle savedInstanceState) {
+        super.onCreate(savedInstanceState);
     }
 
     @Override
     protected void onDestroy() {
-        registerActionReceiver(false);
+        browserCastVisible = false;
+        browserCastAttached = false;
+        browserCastSyncHandler.removeCallbacks(browserCastSync);
+        ++detailRequestEpoch;
+        ++playbackSelectionEpoch;
+        ++externalDownloadEpoch;
+        ++collectionQueryEpoch;
+        dismissSeriesDialogs();
+        downloadDialogCoordinator.invalidate();
+        historyRefreshHandler.removeCallbacks(historyRefreshTimeout);
+        historyRefreshHandler.removeCallbacks(historyCastRefreshTimeout);
+        ControlManager.get().clearEpisodeCast(lanCastOwner);
+        sourceViewModel.setQuickSearchBatchListener(null); // 断开 quick 结果直调,防悬垂
+        if (playFragment != null) playFragment.setPlaySyncHost(null); // 断开屏内直调
+        // 页面销毁:解除后台播放服务对共享播放视图的借用。只摘引用、不停服务 ——
+        // 后台播放是用户显式开启的能力,"宿主销毁"不等于"停止播放";
+        // 但不摘掉的话服务会继续操作一张随本页销毁的视图(通知栏/锁屏按钮打在死视图上)
+        PlayService.onHostDestroyed(this);
+        pipHelper.setReceiverEnabled(false);
         super.onDestroy();
-        unregisterReceiver(mBatteryReceiver);
         // 注销广播接收器
         if (mHomeKeyReceiver != null) {
             unregisterReceiver(mHomeKeyReceiver);
             mHomeKeyReceiver = null;
         }
 
+        // 作废未启动的快速搜索任务、清空暂停队列(共享线程池不可关闭);断开弹窗与输出桥
         try {
-            if (searchExecutorService != null) {
-                searchExecutorService.shutdownNow();
-                searchExecutorService = null;
+            if (quickSearchHelper != null) {
+                quickSearchHelper.release();
+                quickSearchHelper.setQuickSearchOutput(null);
             }
         } catch (Throwable th) {
             th.printStackTrace();
         }
-        OkGo.getInstance().cancelTag("fenci");
-        OkGo.getInstance().cancelTag("detail");
-        OkGo.getInstance().cancelTag("quick_search");
+        if (mQuickSearchDialog != null) {
+            mQuickSearchDialog = null;
+        }
+        HttpClient.cancel("fenci");
+        HttpClient.cancel("detail");
+        HttpClient.cancel("quick_search");
         toggleScreenShotListen(false);
     }
 
     @Override
     public void onBackPressed() {
+        if (DialogCoordinator.dismissSimpleHostPopupOnBack(this)) return;
         if (mAllSeriesRightDialog != null && mAllSeriesRightDialog.isShow()) {
             mAllSeriesRightDialog.dismiss();
             return;
@@ -781,6 +1563,7 @@ public class DetailActivity extends BaseVbActivity<ActivityDetailBinding> {
             mBinding.mGridView.requestFocus();
             return;
         }
+        pipExitByBack = true; // 返回键真正退出播放页,onUserLeaveHint 里排除(不算"切后台")
         super.onBackPressed();
     }
 
@@ -796,9 +1579,16 @@ public class DetailActivity extends BaseVbActivity<ActivityDetailBinding> {
 
     // preview
     VodInfo previewVodInfo = null;
-    boolean showPreview = Hawk.get(HawkConfig.SHOW_PREVIEW, true);
+    boolean showPreview = SystemConfig.isShowPreview();
     ; // true 开启 false 关闭
     boolean fullWindows = false;
+    /** 用户按返回键退出播放页的标记(onUserLeaveHint 里排除,避免"返回退出"被当成"切后台") */
+    private boolean pipExitByBack = false;
+    /** 应用内跳转(如打开下载管理/设置等)标记:onUserLeaveHint 里排除,避免"应用内导航"被当成"切后台"触发小窗/后台播放 */
+    private boolean navigatingAway = false;
+    /** 画中画(小窗)通用辅助器,封装进入/退出小窗逻辑,详情页与本地播放器复用 */
+    private PipHelper pipHelper;
+
     ViewGroup.LayoutParams windowsPreview = null;
     ViewGroup.LayoutParams windowsFull = null;
 
@@ -810,6 +1600,10 @@ public class DetailActivity extends BaseVbActivity<ActivityDetailBinding> {
             windowsFull = new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT);
         }
         fullWindows = !fullWindows;
+        if (fullWindows) {
+            // 先清掉预览态留下的状态栏 padding，避免竖屏全屏顶部露出页面背景。
+            mBinding.getRoot().setPadding(0, 0, 0, 0);
+        }
 
         //交由fragment处理播放器全屏逻辑
         playFragment.changedLandscape(fullWindows);
@@ -822,6 +1616,18 @@ public class DetailActivity extends BaseVbActivity<ActivityDetailBinding> {
         mBinding.tvSort.setFocusable(!fullWindows);
         mBinding.tvCollect.setFocusable(!fullWindows);
         toggleSubtitleTextSize();
+        if (fullWindows) {
+            restoreFullscreenBars();
+        } else {
+            // 退出全屏预览时撤销窗口标志，详情内容重新按可见系统栏留白。
+            View decor = getWindow().getDecorView();
+            decor.setSystemUiVisibility(decor.getSystemUiVisibility()
+                    & ~(View.SYSTEM_UI_FLAG_FULLSCREEN
+                    | View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
+                    | View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY));
+            getWindow().clearFlags(WindowManager.LayoutParams.FLAG_FULLSCREEN);
+        }
+        if (!fullWindows) ViewCompat.requestApplyInsets(mBinding.getRoot());
     }
 
     void toggleSubtitleTextSize() {
@@ -829,150 +1635,316 @@ public class DetailActivity extends BaseVbActivity<ActivityDetailBinding> {
         if (!fullWindows) {
             subtitleTextSize *= 0.6;
         }
-        EventBus.getDefault().post(new RefreshEvent(RefreshEvent.TYPE_SUBTITLE_SIZE_CHANGE, subtitleTextSize));
+        // 预览播放器与详情页同屏,直调取代 EventBus TYPE_SUBTITLE_SIZE_CHANGE 广播
+        if (playFragment != null) {
+            playFragment.applySubtitleTextSize(subtitleTextSize);
+        }
     }
 
-    public void use1DMDownload() {
-        if (vodInfo != null && vodInfo.seriesMap.get(vodInfo.playFlag).size() > 0) {
-            VodInfo.VodSeries vod = vodInfo.seriesMap.get(vodInfo.playFlag).get(vodInfo.playIndex);
-            String url = TextUtils.isEmpty(playFragment.getFinalUrl()) ? vod.url : playFragment.getFinalUrl();
-            // 创建Intent对象，启动1DM App
-            Intent intent = new Intent(Intent.ACTION_VIEW, Uri.parse(url));
-            intent.setDataAndType(Uri.parse(url), "video/mp4");
-            intent.putExtra("title", vodInfo.name + " " + vod.name); // 传入文件保存名
-//            intent.setClassName("idm.internet.download.manager.plus", "idm.internet.download.manager.MainActivity");
-            intent.setClassName("idm.internet.download.manager.plus", "idm.internet.download.manager.Downloader");
-            intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+    // ------------------------------------------------------------------
+    // 下载弹窗协调器 Host 实现 + 兼容入口(编排已下沉 DownloadDialogCoordinator)
+    // ------------------------------------------------------------------
 
-            // 检查1DM App是否已安装
-            PackageManager pm = getPackageManager();
-            List<ResolveInfo> activities = pm.queryIntentActivities(intent, 0);
-            boolean isIntentSafe = activities.size() > 0;
-
-            if (isIntentSafe) {
-                startActivity(intent); // 启动1DM App
-            } else {
-                // 如果1DM App未安装，提示用户安装1DM App
-                AlertDialog.Builder builder = new AlertDialog.Builder(this);
-                builder.setTitle("请先安装1DM+下载管理器");
-                builder.setMessage("为了下载视频，请先安装1DM+下载管理器。是否现在安装？");
-                builder.setPositiveButton("立即下载", new DialogInterface.OnClickListener() {
-
-                    public void onClick(DialogInterface dialog, int which) {
-                        // 跳转到下载链接
-                        Intent downloadIntent = new Intent(Intent.ACTION_VIEW, Uri.parse("https://od.lk/d/MzRfMTg0NTcxMDdf/1DM _v15.6.apk"));
-                        startActivity(downloadIntent);
-                    }
-                });
-                builder.setNegativeButton("取消", null);
-                builder.show();
+    @Override
+    public VodInfo currentVodInfo() {
+        if (!isCurrentDetail(vodInfo)) return null;
+        // 下载跟随正在浏览的线路；传出副本，后台查询不读取正在变化的页面模型。
+        VodInfo snapshot = new VodInfo();
+        snapshot.id = vodInfo.id;
+        snapshot.name = vodInfo.name;
+        snapshot.sourceKey = vodInfo.sourceKey;
+        snapshot.playerCfg = vodInfo.playerCfg;
+        snapshot.reverseSort = vodInfo.reverseSort;
+        snapshot.playFlag = episodeSelection.displayedFlag(vodInfo);
+        snapshot.playIndex = TextUtils.equals(snapshot.playFlag, vodInfo.playFlag) ? vodInfo.playIndex : -1;
+        snapshot.seriesMap = new java.util.LinkedHashMap<>();
+        if (vodInfo.seriesMap != null) for (Map.Entry<String, List<VodInfo.VodSeries>> line : vodInfo.seriesMap.entrySet()) {
+            List<VodInfo.VodSeries> episodes = new ArrayList<>();
+            if (line.getValue() != null) for (VodInfo.VodSeries episode : line.getValue()) {
+                if (episode == null) {
+                    episodes.add(null);
+                    continue;
+                }
+                VodInfo.VodSeries copy = new VodInfo.VodSeries(episode.name, episode.url);
+                copy.selected = episode.selected;
+                copy.episodeId = episode.episodeId;
+                episodes.add(copy);
             }
+            snapshot.seriesMap.put(line.getKey(), episodes);
+        }
+        return snapshot;
+    }
+
+    @Override
+    public String downloadVodName() {
+        String vodName = vodInfo == null ? "" : vodInfo.name;
+        if (TextUtils.isEmpty(vodName)) {
+            vodName = mPassedName;
+        }
+        if (TextUtils.isEmpty(vodName)) {
+            CharSequence title = mBinding.tvName.getText();
+            vodName = title == null ? "" : title.toString().trim();
+            if ("暂无信息".equals(vodName)) vodName = "";
+        }
+        return vodName;
+    }
+
+    @Override
+    public PlayFragment currentPlayFragment() {
+        return playFragment;
+    }
+
+    @Override
+    public VodInfo currentPlaybackVodInfo() {
+        return isCurrentPreview() ? previewVodInfo : null;
+    }
+
+    @Override
+    public boolean isFullscreen() {
+        return fullWindows;
+    }
+
+    @Override
+    public boolean isLandscape() {
+        return ScreenUtils.isLandscape();
+    }
+
+    /** 全屏下先退全屏,再延迟打开底部下载弹窗(宿主负责退全屏 + postDelayed 时序) */
+    @Override
+    public void exitFullscreenThenOpenBottom() {
+        toggleFullPreview();
+        // 等退全屏布局稳定后再弹窗,避免弹窗与全屏切换动画叠加(修复:返回时全屏/抽屉残留)
+        mBinding.previewPlayer.postDelayed(downloadDialogCoordinator.pendingBottomOpenAction(), 250);
+    }
+
+    @Override
+    public void openDownloadManager() {
+        // 应用内跳转:标记避免 onUserLeaveHint 误判为"切后台"触发小窗/后台播放(修复:返回时全屏播放)
+        navigatingAway = true;
+        jumpActivity(DownloadActivity.class);
+    }
+
+    @Override
+    public void toast(String msg) {
+        AppBubble.toast(msg);
+    }
+
+    @Override
+    public void runOnUi(Runnable action) {
+        runOnUiThread(action);
+    }
+
+    /** 下载入口:内置模式选集下载,外部模式把当前集交给 1DM+。 */
+    public void showDownloadSeriesDialog() {
+        if (SystemConfig.isInternalDownloadEnabled()) {
+            downloadDialogCoordinator.showDownloadSeriesDialog();
         } else {
-            ToastUtils.showShort("资源异常,请稍后重试");
+            openExternalDownloader();
+        }
+    }
+
+    /** 全屏控制栏与详情页使用同一下载方式设置。 */
+    public void showDownloadDialogInFullscreen() {
+        if (SystemConfig.isInternalDownloadEnabled()) {
+            downloadDialogCoordinator.showDownloadDialogInFullscreen();
+        } else {
+            openExternalDownloader();
+        }
+    }
+
+    private void openExternalDownloader() {
+        if (!isCurrentDetail(vodInfo) || vodInfo.seriesMap == null) {
+            toast("资源异常,请稍后重试");
+            return;
+        }
+        List<VodInfo.VodSeries> series = vodInfo.seriesMap.get(vodInfo.playFlag);
+        int index = vodInfo.playIndex;
+        if (series == null || index < 0 || index >= series.size()) {
+            toast("资源异常,请稍后重试");
+            return;
+        }
+        VodInfo.VodSeries episode = series.get(index);
+        if (episode == null) {
+            toast("资源异常,请稍后重试");
+            return;
+        }
+        String rawUrl = episode.url;
+        String title = downloadVodName() + " " + (episode.name == null ? "" : episode.name);
+        int epoch = ++externalDownloadEpoch;
+        // getFinalUrl keeps the resolved source URL, before the local purified playback playlist.
+        boolean samePlayback = isCurrentPreview() && previewVodInfo.playIndex == index
+                && TextUtils.equals(previewVodInfo.playFlag, vodInfo.playFlag);
+        String finalUrl = !samePlayback || playFragment == null ? "" : playFragment.getFinalUrl();
+        Map<String, String> playHeaders = !samePlayback || playFragment == null ? null : playFragment.getPlayHeaders();
+        if (isExternalDownloadAddress(finalUrl)) {
+            launchExternalDownloader(finalUrl, title, playHeaders);
+            return;
+        }
+        if (TextUtils.isEmpty(rawUrl)) {
+            toast("当前剧集没有可用的下载地址");
+            return;
+        }
+        if (isExternalDownloadAddress(rawUrl) && !isHttpAddress(rawUrl)) {
+            launchExternalDownloader(rawUrl, title, null);
+            return;
+        }
+
+        // 预览未开启或当前集尚未起播时,原集地址可能只是爬虫标识,不能直接交给 1DM+。
+        final VodInfo requestVod = vodInfo;
+        final String playFlag = vodInfo.playFlag;
+        toast("正在解析下载地址，请稍候...");
+        HeavyTaskUtil.getBigTaskExecutorService().execute(() -> {
+            ResolveResult resolved = PlayUrlResolverProviders.get().resolvePlayUrl(
+                    requestVod.sourceKey, playFlag, rawUrl);
+            runOnUiThread(() -> {
+                if (!isCurrentExternalDownloadRequest(epoch, requestVod, playFlag, index, episode)) return;
+                String resolvedUrl = resolved == null ? null : resolved.url;
+                String url = isExternalDownloadAddress(resolvedUrl) ? resolvedUrl
+                        : isExternalDownloadAddress(rawUrl) ? rawUrl : null;
+                if (url == null) {
+                    toast("该集未解析出可供 1DM+ 下载的地址，请先播放后重试");
+                    return;
+                }
+                Map<String, String> headers = TextUtils.equals(url, resolvedUrl)
+                        ? DownloadHeaders.mergeForOrigin(finalUrl, url, playHeaders,
+                                resolved == null ? null : resolved.headers)
+                        : null;
+                launchExternalDownloader(url, title, headers);
+            });
+        });
+    }
+
+    private boolean isCurrentExternalDownloadRequest(int epoch, VodInfo requestVod,
+                                                     String playFlag, int index, VodInfo.VodSeries episode) {
+        List<VodInfo.VodSeries> currentSeries = requestVod.seriesMap == null
+                ? null : requestVod.seriesMap.get(playFlag);
+        return epoch == externalDownloadEpoch && !isFinishing() && !isDestroyed()
+                && vodInfo == requestVod && requestVod.playIndex == index
+                && TextUtils.equals(requestVod.playFlag, playFlag)
+                && currentSeries != null && index >= 0 && index < currentSeries.size()
+                && currentSeries.get(index) == episode;
+    }
+
+    private static boolean isHttpAddress(String url) {
+        if (TextUtils.isEmpty(url)) return false;
+        String scheme = Uri.parse(url.trim()).getScheme();
+        return "http".equalsIgnoreCase(scheme) || "https".equalsIgnoreCase(scheme);
+    }
+
+    private static boolean isExternalDownloadAddress(String url) {
+        if (TextUtils.isEmpty(url)) return false;
+        String scheme = Uri.parse(url.trim()).getScheme();
+        return "http".equalsIgnoreCase(scheme) || "https".equalsIgnoreCase(scheme)
+                || "magnet".equalsIgnoreCase(scheme) || "ftp".equalsIgnoreCase(scheme)
+                || "thunder".equalsIgnoreCase(scheme) || "ed2k".equalsIgnoreCase(scheme);
+    }
+
+    private void launchExternalDownloader(String url, String title, Map<String, String> headers) {
+        Intent intent = new Intent(Intent.ACTION_VIEW);
+        // 1DM's download contract accepts the source URL and request headers directly.
+        // Let the downloader identify HLS/file media from the URL and HTTP response.
+        intent.setData(Uri.parse(url.trim()));
+        intent.putExtra("title", title.trim());
+        intent.putExtra("extra_filename", title.trim());
+        Map<String, String> snapshot = DownloadHeaders.merge(headers);
+        if (!snapshot.isEmpty() && isHttpAddress(url)) {
+            Bundle requestHeaders = new Bundle();
+            for (Map.Entry<String, String> header : snapshot.entrySet())
+                requestHeaders.putString(header.getKey(), header.getValue());
+            intent.putExtra("extra_headers", requestHeaders);
+        }
+        intent.setClassName(EXTERNAL_DOWNLOADER_PACKAGE, EXTERNAL_DOWNLOADER_ACTIVITY);
+        intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+        if (tryStartExternalActivity(intent)) return;
+
+        // 1DM+ 的入口类名在不同版本可能变化,仅在同一包内尝试其它可处理入口。
+        intent.setComponent(null);
+        intent.setPackage(EXTERNAL_DOWNLOADER_PACKAGE);
+        if (tryStartExternalActivity(intent)) return;
+
+        ConfirmDialog.showInHostView(this, "需要 1DM+ 下载管理器",
+                "未找到可处理当前视频的 1DM+。安装后可重试下载。", "前往应用商店",
+                () -> {
+                    Intent store = new Intent(Intent.ACTION_VIEW,
+                            Uri.parse("market://details?id=" + EXTERNAL_DOWNLOADER_PACKAGE));
+                    if (tryStartExternalActivity(store)) return;
+                    Intent web = new Intent(Intent.ACTION_VIEW,
+                            Uri.parse("https://play.google.com/store/apps/details?id=" + EXTERNAL_DOWNLOADER_PACKAGE));
+                    if (!tryStartExternalActivity(web)) toast("无法打开应用商店，请手动安装 1DM+");
+                });
+    }
+
+    private boolean tryStartExternalActivity(Intent intent) {
+        navigatingAway = true;
+        try {
+            startActivity(intent);
+            return true;
+        } catch (ActivityNotFoundException | SecurityException ignored) {
+            navigatingAway = false;
+            return false;
         }
     }
 
     /**
-     * 画中画模式
+     * 画中画模式(小窗):进入小窗。逻辑封装在 PipHelper,详情页/本地播放器复用。
      */
     public void enterPip() {
-        if (Utils.supportsPiPMode()) {
-            // 创建一个Intent对象，模拟按下Home键
-            Intent intent = new Intent(Intent.ACTION_MAIN);
-            intent.addCategory(Intent.CATEGORY_HOME);
-            startActivity(intent);
-
-            // Calculate Video Resolution
-            int vWidth = playFragment.getPlayer().getVideoSize()[0];
-            int vHeight = playFragment.getPlayer().getVideoSize()[1];
-            Rational ratio;
-            if (vWidth != 0) {
-                if ((((double) vWidth) / ((double) vHeight)) > 2.39) {
-                    vHeight = (int) (((double) vWidth) / 2.35);
-                }
-                ratio = new Rational(vWidth, vHeight);
-            } else {
-                ratio = new Rational(16, 9);
-            }
-            List<RemoteAction> actions = new ArrayList<>();
-            actions.add(generateRemoteAction(android.R.drawable.ic_media_previous, IntentKey.BROADCAST_ACTION_PREV, "Prev", "Play Previous"));
-            actions.add(generateRemoteAction(android.R.drawable.ic_media_play, IntentKey.BROADCAST_ACTION_PLAYPAUSE, "Play", "Play/Pause"));
-            actions.add(generateRemoteAction(android.R.drawable.ic_media_next, IntentKey.BROADCAST_ACTION_NEXT, "Next", "Play Next"));
-            PictureInPictureParams params = new PictureInPictureParams.Builder()
-                    .setAspectRatio(ratio)
-                    .setActions(actions).build();
-            playFragment.getPlayer().postDelayed(() -> {//代码模拟home键时会立即执行,toggleFullPreview中竖屏有切换横屏操作,
-                if (!fullWindows) {
-                    toggleFullPreview();
-                }
-            }, 300);
-            enterPictureInPictureMode(params);
-            playFragment.getController().hideBottom();
-
-            playFragment.getPlayer().postDelayed(() -> {
-                if (!playFragment.getPlayer().isPlaying()) {
-                    playFragment.getController().togglePlay();
-                }
-            }, 400);
-        }
-    }
-
-    @RequiresApi(api = Build.VERSION_CODES.O)
-    private RemoteAction generateRemoteAction(int iconResId, int actionCode, String title, String desc) {
-        final PendingIntent intent =
-                PendingIntent.getBroadcast(
-                        DetailActivity.this,
-                        actionCode,
-                        new Intent(IntentKey.BROADCAST_ACTION).putExtra("action", actionCode),
-                        0);
-        final Icon icon = Icon.createWithResource(DetailActivity.this, iconResId);
-        return (new RemoteAction(icon, title, desc, intent));
-    }
-
-    /**
-     * 事件接收广播(画中画/后台播放点击事件)
-     * @param isRegister 注册/注销
-     */
-    private void registerActionReceiver(boolean isRegister) {
-        if (isRegister) {
-            mRemoteActionReceiver = new BroadcastReceiver() {
-
-                @Override
-                public void onReceive(Context context, Intent intent) {
-                    if (intent == null || !intent.getAction().equals(IntentKey.BROADCAST_ACTION) || playFragment.getController() == null) {
-                        return;
-                    }
-
-                    int currentStatus = intent.getIntExtra("action", 1);
-                    if (currentStatus == IntentKey.BROADCAST_ACTION_PREV) {
-                        playFragment.playPrevious();
-                    } else if (currentStatus == IntentKey.BROADCAST_ACTION_PLAYPAUSE) {
-                        playFragment.getController().togglePlay();
-                    } else if (currentStatus == IntentKey.BROADCAST_ACTION_NEXT) {
-                        playFragment.playNext(false);
-                    } else if (currentStatus == IntentKey.BROADCAST_ACTION_CLOSE) {
-                        playServerSwitch(false);
-                        finish();
-                        NotificationUtils.cancelAll();
-                    }
-                }
-            };
-            registerReceiver(mRemoteActionReceiver, new IntentFilter(IntentKey.BROADCAST_ACTION));
-        } else {
-            if (mRemoteActionReceiver != null) {
-                unregisterReceiver(mRemoteActionReceiver);
-                mRemoteActionReceiver = null;
-            }
-            if (playFragment.getPlayer().isPlaying()) {// 退出画中画时,暂停播放(画中画的全屏也会触发,但全屏后会自动播放)
-                playFragment.getController().togglePlay();
-            }
-        }
+        if (android.os.Build.VERSION.SDK_INT < android.os.Build.VERSION_CODES.O
+                || pipHelper == null || playFragment == null || playFragment.getController() == null) return;
+        pipHelper.enterPip();
+        playFragment.getController().hideBottom();
     }
 
     @Override
     public void onPictureInPictureModeChanged(boolean isInPictureInPictureMode) {
+        if (android.os.Build.VERSION.SDK_INT < android.os.Build.VERSION_CODES.O) return;
         super.onPictureInPictureModeChanged(isInPictureInPictureMode);
-        registerActionReceiver(Utils.supportsPiPMode() && isInPictureInPictureMode);
+        if (playFragment != null && playFragment.getController() != null) {
+            playFragment.getController().setPictureInPicture(isInPictureInPictureMode);
+        }
+        if (pipHelper != null) pipHelper.onPictureInPictureModeChanged(isInPictureInPictureMode);
+    }
+
+    @Override
+    public void onConfigurationChanged(Configuration newConfig) {
+        super.onConfigurationChanged(newConfig);
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O
+                && playFragment != null && playFragment.getController() != null) {
+            playFragment.getController().setPictureInPicture(isInPictureInPictureMode());
+        }
+        // 兜底:本设备上点X关闭不触发 onPictureInPictureModeChanged(false),只触发配置变化,
+        // 由 PipHelper 统一延迟判断"放大/点X关闭"
+        pipHelper.onConfigurationChanged();
+        // 设置抽屉切换横竖屏会触发配置变化；系统可能重置沉浸式标志，等新布局完成后补回。
+        if (fullWindows) mBinding.getRoot().post(this::restoreFullscreenBars);
+    }
+
+    @Override
+    public void onWindowFocusChanged(boolean hasFocus) {
+        super.onWindowFocusChanged(hasFocus);
+        if (hasFocus) restoreFullscreenBars();
+        // 爬虫的扫码登录框挂在本页：焦点进出就是"登录框开关"的信号，交给播放页决定何时重试
+        if (playFragment != null) playFragment.onHostWindowFocusChanged(hasFocus);
+    }
+
+    private void restoreFullscreenBars() {
+        if (!fullWindows || (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O
+                && isInPictureInPictureMode())) return;
+        mBinding.getRoot().setPadding(0, 0, 0, 0);
+        ImmersionBar.with(this)
+                .hideBar(BarHide.FLAG_HIDE_BAR)
+                .navigationBarColor(R.color.black)
+                .fitsSystemWindows(false)
+                .init();
+        // 转屏后系统可能再次显示状态栏；直接恢复窗口全屏标志，避免顶部 inset 把画面压低。
+        View decor = getWindow().getDecorView();
+        decor.setSystemUiVisibility(decor.getSystemUiVisibility()
+                | View.SYSTEM_UI_FLAG_FULLSCREEN
+                | View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
+                | View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY);
+        getWindow().setFlags(WindowManager.LayoutParams.FLAG_FULLSCREEN,
+                WindowManager.LayoutParams.FLAG_FULLSCREEN);
+        ViewCompat.requestApplyInsets(mBinding.getRoot());
     }
 
     /**
@@ -980,27 +1952,32 @@ public class DetailActivity extends BaseVbActivity<ActivityDetailBinding> {
      */
     private void playServerSwitch(boolean open) {
         if (open) {
+            if (!isCurrentPreview() || playFragment == null || playFragment.getPlayer() == null
+                    || !HistoryEntryNavigator.hasPlayableSnapshot(vodInfo)) return;
             VodInfo.VodSeries vod = vodInfo.seriesMap.get(vodInfo.playFlag).get(vodInfo.playIndex);
-            PlayService.start(playFragment.getPlayer(), vodInfo.name + "&&" + vod.name);
-            registerActionReceiver(true);
+            PlayService.start(playFragment.getPlayer(), vodInfo.name + "&&" + vod.name,
+                    vodInfo.id, sourceKey, vodInfo.name);
+            pipHelper.setReceiverEnabled(true);
         } else {
             if (ServiceUtils.isServiceRunning(PlayService.class)) {
                 PlayService.stop();
-                registerActionReceiver(false);
+                pipHelper.setReceiverEnabled(false);
             }
         }
     }
 
     public String getCurrentVodUrl() {
-        return playFragment == null ? "" : playFragment.getFinalUrl();
+        return !isCurrentPreview() || playFragment == null ? "" : playFragment.getFinalUrl();
     }
 
     public void quickLineChange() {
+        if (!isCurrentDetail(vodInfo)) return;
+        int playingIndex = vodInfo.playIndex;
         List<VodInfo.VodSeriesFlag> flags = seriesFlagAdapter.getData();
         if (flags.size() > 1) {
             int currentIndex = 0;
             for (int i = 0; i < flags.size(); i++) {
-                if (flags.get(i).selected) {
+                if (TextUtils.equals(flags.get(i).name, vodInfo.playFlag)) {
                     currentIndex = i;
                 }
             }
@@ -1010,7 +1987,8 @@ public class DetailActivity extends BaseVbActivity<ActivityDetailBinding> {
             }
             mBinding.mGridViewFlag.smoothScrollToPosition(currentIndex);
             chooseFlag(currentIndex);
-            mBinding.mGridView.postDelayed(() -> chooseSeries(vodInfo.playIndex, true), 300);
+            List<VodInfo.VodSeries> episodes = episodeSelection.displayedEpisodes(vodInfo);
+            if (!episodes.isEmpty()) chooseSeries(Math.max(0, Math.min(playingIndex, episodes.size() - 1)), true);
         }
     }
 
@@ -1036,36 +2014,43 @@ public class DetailActivity extends BaseVbActivity<ActivityDetailBinding> {
             }
             screenShotListenManager.setListener(imagePath -> {
 
-                if (playFragment.getPlayer().isInPlaybackState())return;
+                if (playFragment == null || playFragment.getPlayer() == null
+                        || playFragment.getPlayer().isInPlaybackState()) return;
 
-                new XPopup.Builder(this)
-                        .isDarkTheme(Utils.isDarkTheme())
-                        .asCenterList("",new String[]{"跳转阿狸","跳转优汐","跳转夸父","关闭"}, null, (position, text) -> {
-                            String pkg = "";
-                            String cls = "";
-                            switch (position){
-                                case 0:
-                                    pkg = "com.alicloud.databox";
-                                    cls = "com.alicloud.databox.launcher.splash.SplashActivity";
-                                    break;
-                                case 1:
-                                    pkg = "com.UCMobile";
-                                    cls = "com.uc.browser.InnerUCMobile";
-                                    break;
-                                case 2:
-                                    pkg = "com.quark.browser";
-                                    cls = "com.ucpro.MainActivity";
-                                    break;
-                                case 3:
-                                    return;
-                            }
-                            try {
-                                startActivity(new Intent().setComponent(new ComponentName(pkg, cls)));
-                            }catch (Exception e){
-                                ToastUtils.showShort("未找到应用");
-                            }
-                        })
-                        .show();
+                // 截图后弹"跳转到哪个 App":统一走公共选择弹窗(SelectDialog)。
+                // 原来用 XPopup 内置的 asCenterList —— 它的面板底/文字色与**圆角(库内固定 15dp)**都来自
+                // 库内样式,不吃主题文件;自定义主题下它就是一块"外来"的底,圆角也跟全站对不上
+                // (users 口径:"抽屉圆角还是不对 / 我怎么设置圆角都不生效")。
+                // SelectDialog 是 app 的公共居中列表:面板走 bg_dialog(= 主题圆角档),行样式与
+                // "选择音轨 / 内置字幕 / 主题"同款 —— 全站弹窗的圆角从此只有一个来源。
+                final String[] labels = {"跳转阿狸", "跳转优汐", "跳转夸父", "关闭"};
+                final String[][] targets = {
+                        {"com.alicloud.databox", "com.alicloud.databox.launcher.splash.SplashActivity"},
+                        {"com.UCMobile", "com.uc.browser.InnerUCMobile"},
+                        {"com.quark.browser", "com.ucpro.MainActivity"},
+                        null,
+                };
+                SelectDialog<String> dialog = new SelectDialog<>(this);
+                dialog.setTip("打开方式");
+                dialog.setAdapter(new SelectDialogAdapter.SelectDialogInterface<String>() {
+                    @Override
+                    public void click(String value, int pos) {
+                        dialog.dismiss();
+                        if (pos < 0 || pos >= targets.length || targets[pos] == null) return; // 「关闭」
+                        try {
+                            startActivity(new Intent().setComponent(new ComponentName(targets[pos][0], targets[pos][1])));
+                        } catch (Exception e) {
+                            AppBubble.toast("未找到应用");
+                        }
+                    }
+
+                    @Override
+                    public CharSequence getDisplay(String val) {
+                        return val == null ? "" : val;
+                    }
+                }, SelectDialogAdapter.stringDiff, java.util.Arrays.asList(labels), -1);
+                // -1 = 动作列表:4 项都没有"默认选中",每一行都点得动(选择列表才会跳过已选项)
+                DialogCoordinator.centerInHostView(this, dialog).show();
             });
             screenShotListenManager.startListen();
         }else {

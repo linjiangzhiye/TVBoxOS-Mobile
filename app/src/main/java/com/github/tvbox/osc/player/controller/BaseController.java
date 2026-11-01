@@ -2,6 +2,7 @@ package com.github.tvbox.osc.player.controller;
 
 import android.app.Activity;
 import android.content.Context;
+import android.graphics.Rect;
 import android.media.AudioManager;
 import android.os.Handler;
 import android.os.Message;
@@ -14,11 +15,22 @@ import android.view.ViewGroup;
 import android.view.Window;
 import android.view.WindowManager;
 import android.widget.ProgressBar;
+import android.widget.ImageView;
 import android.widget.TextView;
 
+import com.airbnb.lottie.LottieAnimationView;
 import androidx.annotation.NonNull;
 import androidx.annotation.Nullable;
+import androidx.core.graphics.Insets;
+import androidx.core.view.DisplayCutoutCompat;
+import androidx.core.view.ViewCompat;
+import androidx.core.view.WindowInsetsCompat;
 
+import com.github.tvbox.osc.R;
+import com.github.tvbox.osc.util.LoadingAnim;
+import com.github.tvbox.osc.util.LoadingAnimFit;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Map;
 
 import xyz.doikki.videoplayer.controller.BaseVideoController;
@@ -92,15 +104,325 @@ public abstract class BaseController extends BaseVideoController implements Gest
 
     private TextView mSlideInfo;
     private View mLoading;
+    /**
+     * 加载中网速文字(tag=play_load_net_speed,仅点播/本地布局有)。
+     * 注意:播放器 loading 分三类——资源解析/起播准备(PREPARING)、首次起播缓冲(未出画面的 BUFFERING)、
+     * 播中缓存(BUFFERING)。网速只跟"出过画面后的播中缓存"一致:起播阶段(解析/准备/首缓冲)不显示,
+     * 避免与"正在获取播放信息/起播转圈"同屏;卡顿重缓冲时才显示速度。
+     */
+    private View mNetSpeed;
+    /** 是否已出过画面(PLAYING/PREPARED 过);新会话(IDLE)复位,用于区分"首缓冲"与"播中卡顿" */
+    private boolean mEverPrepared = false;
+    /** 快进/快退进度浮层是否显示中;显示期间 loading/网速让位(二者不同时出现),浮层消失后按播放状态还原 */
+    private boolean mSeekPanelVisible = false;
+    /** 点播/本地共用的中心播放状态；直播控制布局没有这两个视图。 */
+    private View mCenterPlaybackStatus;
+    private ImageView mCenterPlaybackIcon;
+    private boolean mWasPaused;
+    private boolean mSeeking;
+    private boolean mPausedBeforeSeeking;
+    private boolean mSuppressPlayFeedback;
+    private boolean mPictureInPicture;
+    private int mReservedProgressTimeLength = -1;
+    private static final long PLAY_FEEDBACK_DURATION_MS = 2500L;
+    private final Runnable mHidePlayFeedback = () -> {
+        if (mCenterPlaybackStatus != null && mCurPlayState != VideoView.STATE_PAUSED) {
+            mCenterPlaybackStatus.setVisibility(GONE);
+        }
+    };
+    private final DoubleTapSeekPolicy mDoubleTapSeek = new DoubleTapSeekPolicy();
+    private DoubleTapSeekFeedbackView mDoubleTapSeekFeedback;
+    private List<SideMargin> mSideMargins;
+    private boolean mFullscreenControlSafeArea;
+    private int mCutoutSideInset;
+    private int mLiveBaseSidePadding;
+    private final Runnable mHideDoubleTapSeekFeedback = () -> {
+        if (mDoubleTapSeekFeedback != null) mDoubleTapSeekFeedback.hide();
+        mDoubleTapSeek.reset();
+    };
 
     @Override
     protected void initView() {
         super.initView();
+        // BaseVideoController 在其构造器里调用 initView，此时本类字段初始化尚未执行。
+        mSideMargins = new ArrayList<>();
         mAudioManager = (AudioManager) getContext().getSystemService(Context.AUDIO_SERVICE);
         mGestureDetector = new GestureDetector(getContext(), this);
         setOnTouchListener(this);
         mSlideInfo = findViewWithTag("vod_control_slide_info");
         mLoading = findViewWithTag("vod_control_loading");
+        mNetSpeed = findViewWithTag("play_load_net_speed"); // 直播布局无此 tag → null,仅控 loading
+        mCenterPlaybackStatus = findViewById(R.id.center_playback_status);
+        mCenterPlaybackIcon = findViewById(R.id.center_playback_icon);
+        mDoubleTapSeekFeedback = findViewById(R.id.double_tap_seek_feedback);
+        if (mCenterPlaybackStatus != null) {
+            mCenterPlaybackStatus.setOnClickListener(v -> {
+                if (mControlWrapper != null && isInPlaybackState() && !isLocked() && !mSeeking) {
+                    togglePlay();
+                }
+            });
+        }
+        // 播放器加载动画跟随设置页"加载动画"选项(默认/Glowing Fish)
+        LoadingAnim.apply(mLoading);
+        if (mLoading instanceof LottieAnimationView && mLoading.getParent() instanceof ViewGroup) {
+            // 内嵌播放器与全屏播放器共用布局，按真实画面大小收起动画。
+            ((ViewGroup) mLoading.getParent()).addOnLayoutChangeListener(
+                    (v, left, top, right, bottom, oldLeft, oldTop, oldRight, oldBottom) -> fitPlayerLoading());
+            if (mNetSpeed != null) {
+                mNetSpeed.addOnLayoutChangeListener(
+                        (v, left, top, right, bottom, oldLeft, oldTop, oldRight, oldBottom) -> fitPlayerLoading());
+            }
+        }
+        if (getLayoutId() == R.layout.player_vod_control_view) {
+            // 点播和本地共用布局：只移动边缘控件，保持双击反馈层铺满画面、触点坐标不变。
+            addSideMargin(R.id.tv_top_l_container, true, false);
+            addSideMargin(R.id.tv_top_r_container, false, true);
+            addSideMargin(R.id.iv_screen_rotate, true, false);
+            addSideMargin(R.id.iv_lock, false, true);
+            addSideMargin(R.id.tv_sys_time, false, true);
+            addSideMargin(R.id.subtitle_view, true, true);
+            addSideMargin(R.id.bottom_container, true, true);
+        } else if (getLayoutId() == R.layout.player_live_control_view) {
+            // 直播原有的 30dp 留白保留为下限，摄像头更靠内时两侧同步加大。
+            mLiveBaseSidePadding = Math.round(30f * getResources().getDisplayMetrics().density);
+            setPadding(mLiveBaseSidePadding, 0, mLiveBaseSidePadding, 0);
+        }
+        if (!mSideMargins.isEmpty() || mLiveBaseSidePadding > 0) {
+            ViewCompat.setOnApplyWindowInsetsListener(this, (view, insets) -> {
+                Insets cutoutInsets = insets.getInsets(WindowInsetsCompat.Type.displayCutout());
+                int left = cutoutInsets.left;
+                int right = cutoutInsets.right;
+                DisplayCutoutCompat cutout = insets.getDisplayCutout();
+                if (cutout != null) {
+                    left = Math.max(left, cutout.getSafeInsetLeft());
+                    right = Math.max(right, cutout.getSafeInsetRight());
+                }
+                mCutoutSideInset = Math.max(left, right);
+                applyControlSideSafeArea();
+                return insets;
+            });
+        }
+        // 初始也走状态机:控制器刚 inflate、尚未收到播放状态回调时,把初始态视作 STATE_IDLE
+        // 收敛一次——loading/网速的显隐唯一由 refreshLoadingUi 决定,不依赖布局默认值,
+        // 也不存在"手动隐藏"的第二条路径。
+        refreshLoadingUi(VideoView.STATE_IDLE);
+    }
+
+    private static final class SideMargin {
+        final View view;
+        final int originalLeft;
+        final int originalRight;
+        final boolean relativeMargins;
+        final boolean insetLeft;
+        final boolean insetRight;
+
+        SideMargin(View view, ViewGroup.MarginLayoutParams margins, boolean insetLeft, boolean insetRight) {
+            this.view = view;
+            relativeMargins = margins.isMarginRelative();
+            originalLeft = relativeMargins && insetLeft ? margins.getMarginStart() : margins.leftMargin;
+            originalRight = relativeMargins && insetRight ? margins.getMarginEnd() : margins.rightMargin;
+            this.insetLeft = insetLeft;
+            this.insetRight = insetRight;
+        }
+    }
+
+    private void addSideMargin(int id, boolean left, boolean right) {
+        View view = findViewById(id);
+        if (view != null && view.getLayoutParams() instanceof ViewGroup.MarginLayoutParams) {
+            mSideMargins.add(new SideMargin(view, (ViewGroup.MarginLayoutParams) view.getLayoutParams(), left, right));
+        }
+    }
+
+    /** 全屏整套控制栏在摄像头安全区内左右对称；预览态保留原布局。 */
+    protected final void setFullscreenControlSafeArea(boolean fullscreen) {
+        mFullscreenControlSafeArea = fullscreen;
+        applyControlSideSafeArea();
+        if (ViewCompat.isAttachedToWindow(this)) ViewCompat.requestApplyInsets(this);
+    }
+
+    private void applyControlSideSafeArea() {
+        int side = mFullscreenControlSafeArea ? mCutoutSideInset : 0;
+        for (SideMargin target : mSideMargins) {
+            ViewGroup.MarginLayoutParams margins = (ViewGroup.MarginLayoutParams) target.view.getLayoutParams();
+            int left = target.originalLeft + (target.insetLeft ? side : 0);
+            int right = target.originalRight + (target.insetRight ? side : 0);
+            boolean changed = margins.leftMargin != left || margins.rightMargin != right;
+            if (target.relativeMargins && target.insetLeft && margins.getMarginStart() != left) {
+                margins.setMarginStart(left);
+                changed = true;
+            }
+            if (target.relativeMargins && target.insetRight && margins.getMarginEnd() != right) {
+                margins.setMarginEnd(right);
+                changed = true;
+            }
+            if (changed) {
+                margins.leftMargin = left;
+                margins.rightMargin = right;
+                target.view.setLayoutParams(margins);
+            }
+        }
+        if (mLiveBaseSidePadding > 0) {
+            int liveSide = Math.max(mLiveBaseSidePadding,
+                    mCutoutSideInset + Math.round(10f * getResources().getDisplayMetrics().density));
+            if (getPaddingLeft() != liveSide || getPaddingRight() != liveSide) {
+                setPadding(liveSide, getPaddingTop(), liveSide, getPaddingBottom());
+            }
+        }
+    }
+
+    @Override
+    protected void onAttachedToWindow() {
+        super.onAttachedToWindow();
+        if (!mSideMargins.isEmpty() || mLiveBaseSidePadding > 0) ViewCompat.requestApplyInsets(this);
+    }
+
+    @Override
+    protected void onSizeChanged(int width, int height, int oldWidth, int oldHeight) {
+        super.onSizeChanged(width, height, oldWidth, oldHeight);
+        if ((width != oldWidth || height != oldHeight)
+                && (!mSideMargins.isEmpty() || mLiveBaseSidePadding > 0)) {
+            ViewCompat.requestApplyInsets(this);
+        }
+    }
+
+    /** loading 显隐(资源解析/起播准备/播中缓存都转圈) */
+    private void setLoadingVisible(boolean visible) {
+        if (mLoading != null) mLoading.setVisibility(visible ? VISIBLE : GONE);
+    }
+
+    /** 网速显隐:仅"出过画面后的播中缓存"显示(首缓冲/起播不显示,避免与加载提示同屏) */
+    private void setNetSpeedVisible(boolean visible) {
+        if (mNetSpeed != null) mNetSpeed.setVisibility(visible ? VISIBLE : GONE);
+    }
+
+    /** Keep the animation and buffering speed together inside the central part of the picture. */
+    private void fitPlayerLoading() {
+        if (!(mLoading instanceof LottieAnimationView) || !(mLoading.getParent() instanceof ViewGroup)) return;
+        ViewGroup slot = (ViewGroup) mLoading.getParent();
+        int width = slot.getWidth();
+        int height = slot.getHeight();
+        if (width <= 0 || height <= 0) return;
+        float density = getResources().getDisplayMetrics().density;
+        int sideReserve = Math.round(48f * density);
+        int topReserve = Math.min(Math.round(48f * density), height / 3);
+        int bottomReserve = Math.min(Math.round(64f * density), height / 3);
+        boolean speedVisible = mNetSpeed != null && mNetSpeed.getVisibility() == VISIBLE;
+        int speedHeight = speedVisible ? Math.max(mNetSpeed.getHeight(), Math.round(24f * density)) : 0;
+        int gap = speedVisible ? Math.round(4f * density) : 0;
+        int availableWidth = Math.max(1, width - slot.getPaddingLeft() - slot.getPaddingRight()
+                - 2 * sideReserve);
+        int availableHeight = Math.max(1, height - slot.getPaddingTop() - slot.getPaddingBottom()
+                - topReserve - bottomReserve - speedHeight - gap);
+        int size = LoadingAnimFit.fitWithinPixels((LottieAnimationView) mLoading,
+                availableWidth, availableHeight);
+        if (size <= 0) return;
+        float offset = (slot.getPaddingTop() + topReserve
+                - slot.getPaddingBottom() - bottomReserve) / 2f;
+        mLoading.setTranslationY(offset - (speedHeight + gap) / 2f);
+        if (mNetSpeed != null) {
+            // Both views use FrameLayout's center gravity; place speed beneath the fitted canvas.
+            mNetSpeed.setTranslationY(speedVisible ? offset + (size + gap) / 2f : 0f);
+        }
+    }
+
+    /**
+     * 按播放状态刷新 loading/网速显隐。
+     * 快进/快退浮层显示期间一律隐藏,保证 loading 与拖动指示不同时出现;浮层隐藏后按状态还原。
+     */
+    private void refreshLoadingUi(int playState) {
+        boolean showLoading = false;
+        boolean showNetSpeed = false;
+        switch (playState) {
+            case VideoView.STATE_PREPARING: // 起播准备:loading 转,但网速不显示(尚未出画面)
+                showLoading = true;
+                break;
+            case VideoView.STATE_BUFFERING: // 缓存:出过画面(播中卡顿)才显示网速;首缓冲不显示
+                showLoading = true;
+                showNetSpeed = mEverPrepared;
+                break;
+            default:
+                break;
+        }
+        if (mSeekPanelVisible) { // 拖动/遥控快进快退指示显示中:loading 让位,不同屏
+            showLoading = false;
+            showNetSpeed = false;
+        }
+        setLoadingVisible(showLoading);
+        setNetSpeedVisible(showNetSpeed);
+        fitPlayerLoading();
+    }
+
+    /**
+     * seek 指示浮层显隐回调(由点播/本地控制器的 1000/1001 消息驱动)。
+     * 显示时立即隐藏 loading/网速,消失时按当前播放状态还原。
+     * 属播放器 UI 内部实现细节,不外扩为公开契约(见 改进.txt §六)。
+     */
+    protected void setSeekPanelVisible(boolean visible) {
+        if (mSeekPanelVisible == visible) return;
+        mSeekPanelVisible = visible;
+        refreshLoadingUi(mCurPlayState);
+    }
+
+    /**
+     * seek 动作结束(手势松手/遥控器松键):立即关闭进度浮层,不等 1s 超时。
+     * 浮层一消失状态机立刻按当前播放状态接管 loading/网速——若 seek 后确实在缓冲,
+     * loading 马上如实显示;不会出现"浮层还挂着、loading 被压住 1 秒后才冒出来"的拖沓感。
+     * 属播放器 UI 内部实现细节,不外扩为公开契约(见 改进.txt §六)。
+     */
+    protected void dismissSeekPanel() {
+        mHandler.removeMessages(1000);
+        mHandler.removeMessages(1001);
+        mHandler.sendEmptyMessage(1001); // 子类 1001:浮层 GONE + setSeekPanelVisible(false)
+    }
+
+    /** seek 开始时让中心状态按钮退场；本次 seek 恢复播放不展示“点击播放”的反馈。 */
+    protected void beginSeeking() {
+        mPausedBeforeSeeking = mCurPlayState == VideoView.STATE_PAUSED;
+        mSeeking = true;
+        mSuppressPlayFeedback = true;
+        hideCenterPlaybackStatus();
+    }
+
+    /** 拖动结束后从暂停态恢复播放，取消拖动则还原暂停提示。 */
+    protected void finishSeeking(boolean committed) {
+        mSeeking = false;
+        boolean resume = committed && mPausedBeforeSeeking;
+        mPausedBeforeSeeking = false;
+        if (resume && mControlWrapper != null) {
+            mControlWrapper.start();
+        } else {
+            mSuppressPlayFeedback = false;
+            if (mCurPlayState == VideoView.STATE_PAUSED) showCenterPlaybackStatus(false);
+        }
+    }
+
+    private void hideCenterPlaybackStatus() {
+        mHandler.removeCallbacks(mHidePlayFeedback);
+        if (mCenterPlaybackStatus != null) mCenterPlaybackStatus.setVisibility(GONE);
+    }
+
+    /** 系统画中画只保留视频画面和系统播放操作。 */
+    public final void setPictureInPicture(boolean active) {
+        if (mPictureInPicture == active) return;
+        mPictureInPicture = active;
+        if (active) {
+            hideCenterPlaybackStatus();
+        } else if (mCurPlayState == VideoView.STATE_PAUSED && !mSeeking) {
+            showCenterPlaybackStatus(false);
+        }
+    }
+
+    private void showCenterPlaybackStatus(boolean playingFeedback) {
+        if (mCenterPlaybackStatus == null || mCenterPlaybackIcon == null) return;
+        if (mPictureInPicture) {
+            hideCenterPlaybackStatus();
+            return;
+        }
+        mHandler.removeCallbacks(mHidePlayFeedback);
+        mCenterPlaybackIcon.setImageResource(playingFeedback ? R.drawable.ic_pause : R.drawable.ic_play);
+        mCenterPlaybackStatus.setContentDescription(playingFeedback ? "暂停播放" : "继续播放");
+        mCenterPlaybackStatus.setVisibility(VISIBLE);
+        if (playingFeedback) mHandler.postDelayed(mHidePlayFeedback, PLAY_FEEDBACK_DURATION_MS);
     }
 
     @Override
@@ -108,32 +430,78 @@ public abstract class BaseController extends BaseVideoController implements Gest
         super.setProgress(duration, position);
     }
 
+    /** Reserve the total time's format with every digit shown as 8, then keep that width during playback. */
+    protected void updateProgressTimeLabels(TextView currentTime, TextView totalTime, int duration, int position) {
+        String currentText = PlayerUtils.stringForTime(position);
+        String totalText = PlayerUtils.stringForTime(duration);
+        if (mReservedProgressTimeLength != totalText.length()) {
+            char[] widthSample = totalText.toCharArray();
+            for (int i = 0; i < widthSample.length; i++) {
+                if (Character.isDigit(widthSample[i])) widthSample[i] = '8';
+            }
+            int width = (int) Math.ceil(currentTime.getPaint().measureText(new String(widthSample)))
+                    + currentTime.getCompoundPaddingLeft() + currentTime.getCompoundPaddingRight();
+            currentTime.setMinWidth(width);
+            mReservedProgressTimeLength = totalText.length();
+        }
+        currentTime.setText(currentText);
+        totalTime.setText(totalText);
+    }
+
     @Override
     protected void onPlayStateChanged(int playState) {
         super.onPlayStateChanged(playState);
+        if (playState == VideoView.STATE_IDLE || playState == VideoView.STATE_PREPARING
+                || playState == VideoView.STATE_ERROR || playState == VideoView.STATE_PLAYBACK_COMPLETED) {
+            clearDoubleTapSeekFeedback();
+        }
         switch (playState) {
-            case VideoView.STATE_IDLE:
-                mLoading.setVisibility(GONE);
+            case VideoView.STATE_PAUSED:
+                mWasPaused = true;
+                if (mSeeking) hideCenterPlaybackStatus();
+                else showCenterPlaybackStatus(false);
                 break;
             case VideoView.STATE_PLAYING:
-                mLoading.setVisibility(GONE);
+                boolean showPlayFeedback = mWasPaused && !mSeeking && !mSuppressPlayFeedback;
+                mWasPaused = false;
+                mSuppressPlayFeedback = false;
+                if (showPlayFeedback) showCenterPlaybackStatus(true);
+                else hideCenterPlaybackStatus();
                 break;
-            case VideoView.STATE_PAUSED:
-                mLoading.setVisibility(GONE);
+            case VideoView.STATE_BUFFERING:
+                hideCenterPlaybackStatus();
                 break;
+            case VideoView.STATE_BUFFERED:
+                if (mWasPaused && !mSeeking) showCenterPlaybackStatus(false);
+                break;
+            case VideoView.STATE_IDLE:
+            case VideoView.STATE_PREPARING:
             case VideoView.STATE_PREPARED:
             case VideoView.STATE_ERROR:
-            case VideoView.STATE_BUFFERED:
-                mLoading.setVisibility(GONE);
-                break;
-            case VideoView.STATE_PREPARING:
-            case VideoView.STATE_BUFFERING:
-                mLoading.setVisibility(VISIBLE);
-                break;
             case VideoView.STATE_PLAYBACK_COMPLETED:
-                mLoading.setVisibility(GONE);
+            case VideoView.STATE_START_ABORT:
+                mWasPaused = false;
+                mSeeking = false;
+                mPausedBeforeSeeking = false;
+                mSuppressPlayFeedback = false;
+                hideCenterPlaybackStatus();
+                break;
+            default:
                 break;
         }
+        switch (playState) {
+            case VideoView.STATE_IDLE: // 新会话起点(切集/重播前 release)
+                mEverPrepared = false;
+                mReservedProgressTimeLength = -1;
+                break;
+            case VideoView.STATE_PLAYING:
+            case VideoView.STATE_PREPARED: // 已出画面
+                mEverPrepared = true;
+                break;
+            default:
+                break;
+        }
+        refreshLoadingUi(playState);
     }
 
     /**
@@ -155,6 +523,10 @@ public abstract class BaseController extends BaseVideoController implements Gest
      */
     public void setGestureEnabled(boolean gestureEnabled) {
         mIsGestureEnabled = gestureEnabled;
+    }
+
+    protected final boolean isGestureEnabled() {
+        return mIsGestureEnabled;
     }
 
     /**
@@ -192,7 +564,15 @@ public abstract class BaseController extends BaseVideoController implements Gest
 
     @Override
     public boolean onTouch(View v, MotionEvent event) {
-        return mGestureDetector.onTouchEvent(event);
+        boolean handled = mGestureDetector.onTouchEvent(event);
+        int action = event.getActionMasked();
+        // GestureDetector 消费 ACTION_UP 时 View 不再进入 onTouchEvent，seek 仍须提交。
+        if (handled && (action == MotionEvent.ACTION_UP || action == MotionEvent.ACTION_CANCEL)
+                && (mSeeking || mSeekPosition >= 0)) {
+            stopSlide();
+            finishGestureSeek(action);
+        }
+        return handled;
     }
 
     /**
@@ -202,7 +582,7 @@ public abstract class BaseController extends BaseVideoController implements Gest
     public boolean onDown(MotionEvent e) {
         if (!isInPlaybackState() //不处于播放状态
                 || !mIsGestureEnabled //关闭了手势
-                || PlayerUtils.isEdge(getContext(), e)) //处于屏幕边沿
+                || PlayerUtils.isEdge(this, e)) //处于控制器边沿
             return true;
         mStreamVolume = mAudioManager.getStreamVolume(AudioManager.STREAM_MUSIC);
         Activity activity = PlayerUtils.scanForActivity(getContext());
@@ -238,6 +618,68 @@ public abstract class BaseController extends BaseVideoController implements Gest
         return true;
     }
 
+    /** 按播放器自身尺寸命中左右曲边区域；中央返回 false，由原有双击暂停逻辑接管。 */
+    protected final boolean handleDoubleTapSeek(MotionEvent event, View... controls) {
+        for (View control : controls) {
+            if (isOverVisibleControl(event, control)) return true;
+        }
+        int direction = DoubleTapSeekPolicy.direction(event.getX(), event.getY(), getWidth(), getHeight());
+        if (direction == 0) {
+            clearDoubleTapSeekFeedback();
+            return false;
+        }
+        DoubleTapSeekPolicy.Result seek = mDoubleTapSeek.seek(direction,
+                mControlWrapper.getCurrentPosition(), mControlWrapper.getDuration(), event.getEventTime());
+        if (seek == null) return true;
+        if (seek.moved) mControlWrapper.seekTo(seek.targetMs);
+        showDoubleTapSeekFeedback(seek, event);
+        return true;
+    }
+
+    /** 让全屏系统时间始终居于锁定键和底部控制栏之间。 */
+    protected final void positionSystemTime(View time, View lock, View bottom) {
+        View root = (View) time.getParent();
+        View.OnLayoutChangeListener updatePosition = (view, left, top, right, bottomEdge,
+                oldLeft, oldTop, oldRight, oldBottom) -> {
+            if (time.getHeight() == 0 || lock.getHeight() == 0 || bottom.getVisibility() != VISIBLE) {
+                return;
+            }
+            float targetCenterY = (lock.getBottom() + bottom.getTop()) / 2f;
+            float currentCenterY = (time.getTop() + time.getBottom()) / 2f;
+            time.setTranslationY(targetCenterY - currentCenterY);
+        };
+        root.addOnLayoutChangeListener(updatePosition);
+        lock.addOnLayoutChangeListener(updatePosition);
+        bottom.addOnLayoutChangeListener(updatePosition);
+        time.addOnLayoutChangeListener(updatePosition);
+    }
+
+    private boolean isOverVisibleControl(MotionEvent event, View view) {
+        if (view == null || !view.isShown()) return false;
+        Rect bounds = new Rect();
+        return view.getGlobalVisibleRect(bounds)
+                && bounds.contains((int) event.getRawX(), (int) event.getRawY());
+    }
+
+    private void showDoubleTapSeekFeedback(DoubleTapSeekPolicy.Result seek, MotionEvent event) {
+        if (mDoubleTapSeekFeedback == null) return;
+        mDoubleTapSeekFeedback.show(seek, event.getX(), event.getY());
+        mHandler.removeCallbacks(mHideDoubleTapSeekFeedback);
+        mHandler.postDelayed(mHideDoubleTapSeekFeedback, 1000);
+    }
+
+    protected final void clearDoubleTapSeekFeedback() {
+        mHandler.removeCallbacks(mHideDoubleTapSeekFeedback);
+        mHideDoubleTapSeekFeedback.run();
+    }
+
+    /**
+     * 纵向滑动调节的目标分区(按手势起点横坐标)：起点在左半屏=亮度、右半屏=音量。
+     */
+    protected int slideAdjustZone(float startX, int width) {
+        return startX > width / 2f ? 1 : -1;
+    }
+
     /**
      * 在屏幕上滑动
      */
@@ -247,18 +689,18 @@ public abstract class BaseController extends BaseVideoController implements Gest
                 || !mIsGestureEnabled //关闭了手势
                 || !mCanSlide //关闭了滑动手势
                 || isLocked() //锁住了屏幕
-                || PlayerUtils.isEdge(getContext(), e1)) //处于屏幕边沿
+                || PlayerUtils.isEdge(this, e1)) //处于控制器边沿
             return true;
         float deltaX = e1.getX() - e2.getX();
         float deltaY = e1.getY() - e2.getY();
         if (mFirstTouch) {
             mChangePosition = Math.abs(distanceX) >= Math.abs(distanceY);
             if (!mChangePosition) {
-                //半屏宽度
-                int halfScreen = PlayerUtils.getScreenWidth(getContext(), true) / 2;
-                if (e2.getX() > halfScreen) {
+                // 纵向滑动分区(按起点)：正=音量、负=亮度、零=不响应；默认左半亮度右半音量，子类可覆写。
+                int zone = slideAdjustZone(e1.getX(), getWidth());
+                if (zone > 0) {
                     mChangeVolume = true;
-                } else {
+                } else if (zone < 0) {
                     mChangeBrightness = true;
                 }
             }
@@ -266,6 +708,7 @@ public abstract class BaseController extends BaseVideoController implements Gest
             if (mChangePosition) {
                 //根据用户设置是否可以滑动调节进度来决定最终是否可以滑动调节进度
                 mChangePosition = mCanChangePosition;
+                if (mChangePosition) beginSeeking();
             }
 
             if (mChangePosition || mChangeBrightness || mChangeVolume) {
@@ -365,23 +808,28 @@ public abstract class BaseController extends BaseVideoController implements Gest
     @Override
     public boolean onTouchEvent(MotionEvent event) {
         //滑动结束时事件处理
-        if (!mGestureDetector.onTouchEvent(event)) {
-            int action = event.getAction();
-            switch (action) {
-                case MotionEvent.ACTION_UP:
-                    stopSlide();
-                    if (mSeekPosition >= 0) {
-                        mControlWrapper.seekTo(mSeekPosition);
-                        mSeekPosition = -1;
-                    }
-                    break;
-                case MotionEvent.ACTION_CANCEL:
-                    stopSlide();
-                    mSeekPosition = -1;
-                    break;
+        boolean handled = mGestureDetector.onTouchEvent(event);
+        if (!handled || mSeeking || mSeekPosition >= 0) {
+            int action = event.getActionMasked();
+            if (action == MotionEvent.ACTION_UP || action == MotionEvent.ACTION_CANCEL) {
+                stopSlide();
+                finishGestureSeek(action);
             }
         }
         return super.onTouchEvent(event);
+    }
+
+    private void finishGestureSeek(int action) {
+        if (action == MotionEvent.ACTION_UP && mSeekPosition >= 0) {
+            mControlWrapper.seekTo(mSeekPosition);
+            mSeekPosition = -1;
+            finishSeeking(true);
+            dismissSeekPanel(); // seek 结束:浮层立即消失,状态机马上接管 loading
+        } else if (action == MotionEvent.ACTION_CANCEL || mSeeking) {
+            mSeekPosition = -1;
+            if (mSeeking) finishSeeking(false);
+            dismissSeekPanel();
+        }
     }
 
     private void stopSlide() {
@@ -410,9 +858,11 @@ public abstract class BaseController extends BaseVideoController implements Gest
 
     @Override
     public boolean onDoubleTapEvent(MotionEvent e) {
+        if (e.getActionMasked() == MotionEvent.ACTION_DOWN && mDoubleTapSeekFeedback != null) {
+            mDoubleTapSeekFeedback.updateTouch(e.getX(), e.getY());
+        }
         return false;
     }
-
 
     @Override
     public boolean onSingleTapUp(MotionEvent e) {

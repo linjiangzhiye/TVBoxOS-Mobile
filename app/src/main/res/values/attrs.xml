@@ -48,4 +48,36 @@
         <attr name="endColor" />
         <attr name="topDelta" />
     </declare-styleable>
+
+    <!-- SizedIconTextView:让 compound drawable(android:drawableLeft/Right/Start/End...)
+         的显示尺寸能在布局里指定(用于替代"按素材固有尺寸绘制、只能另出一份素材"的老做法)。
+         不写(或写 0dp)即保持原生行为。实现与依据见 com.github.tvbox.osc.ui.kit.SizedIconTextView。 -->
+    <declare-styleable name="SizedIconTextView">
+        <attr name="drawableIconSize" format="dimension" />
+    </declare-styleable>
+
+    <!-- 全站统一头部(ui/kit/AppTitleBar):标题 + 返回 + 右侧动作。
+         右侧动作 = 布局里的子 View(自动收进右容器、垂直居中、统一间距)。
+         默认几何(字号/间距/背景)由组件内部定义,页面改不动 —— 以前正是各页自己写这些
+         才导致"返回图标跟标题对不齐""关闭键大小不一"。
+         但图标**光学尺寸**因素材覆盖率不同(细箭头 vs 满幅实心图)无法用统一 dp 拉齐,
+         故开放两个窄口子(默认值即全站统一值,不写 = 不变):
+           backIconSize 覆盖返回图标 dp;
+           右侧 ImageView 子 View 自己写的 layout_width/height 即图标 dp(组件自动扩成标准触区并着主题色),
+           其 layout_margin 保留用于微调位置。 -->
+    <declare-styleable name="AppTitleBar">
+        <attr name="title" format="string" />
+        <attr name="titleBold" format="boolean" />
+        <attr name="showBack" format="boolean" />
+        <attr name="backIconSize" format="dimension" />
+    </declare-styleable>
+
+    <!-- 自研流式标签容器(ui/kit/FlowTagLayout,替代第三方 flowlayout-lib):
+         一行放不下就换行,行高把子视图的上下外边距算进去(所以标签的圆角永远不会被容器裁掉)。
+         标签间距 = 条目布局自己的 layout_margin,容器不再另设 spacing。
+         max_select > 0 时点击标签会切换选中态(单选)并同步 view.setSelected(驱动 selector_widget_btn);
+         0(默认)= 纯点击列表,只回调不记选中。 -->
+    <declare-styleable name="FlowTagLayout">
+        <attr name="max_select" format="integer" />
+    </declare-styleable>
 </resources>

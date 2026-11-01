@@ -2,49 +2,60 @@ package xyz.doikki.videoplayer.exo;
 
 import android.content.Context;
 import android.net.Uri;
-import android.text.TextUtils;
+import android.util.Log;
+import androidx.media3.common.util.UnstableApi;
 
-import com.google.android.exoplayer2.C;
-import com.google.android.exoplayer2.MediaItem;
-import com.google.android.exoplayer2.PlaybackException;
-import com.google.android.exoplayer2.database.ExoDatabaseProvider;
-import com.google.android.exoplayer2.database.StandaloneDatabaseProvider;
-import com.google.android.exoplayer2.ext.rtmp.RtmpDataSource;
-import com.google.android.exoplayer2.ext.rtmp.RtmpDataSourceFactory;
-import com.google.android.exoplayer2.extractor.DefaultExtractorsFactory;
-import com.google.android.exoplayer2.extractor.ExtractorsFactory;
-import com.google.android.exoplayer2.extractor.ts.DefaultTsPayloadReaderFactory;
-import com.google.android.exoplayer2.extractor.ts.TsExtractor;
-import com.google.android.exoplayer2.source.DefaultMediaSourceFactory;
-import com.google.android.exoplayer2.source.MediaSource;
-import com.google.android.exoplayer2.source.ProgressiveMediaSource;
-import com.google.android.exoplayer2.source.dash.DashMediaSource;
-import com.google.android.exoplayer2.source.hls.HlsMediaSource;
-import com.google.android.exoplayer2.source.rtsp.RtspMediaSource;
-import com.google.android.exoplayer2.upstream.DataSource;
-import com.google.android.exoplayer2.upstream.DefaultDataSource;
-import com.google.android.exoplayer2.upstream.DefaultDataSourceFactory;
-import com.google.android.exoplayer2.upstream.cache.Cache;
-import com.google.android.exoplayer2.upstream.cache.CacheDataSource;
-import com.google.android.exoplayer2.upstream.cache.LeastRecentlyUsedCacheEvictor;
-import com.google.android.exoplayer2.upstream.cache.SimpleCache;
-import com.google.android.exoplayer2.util.MimeTypes;
-import com.google.android.exoplayer2.util.Util;
+import androidx.media3.common.C;
+import androidx.media3.common.MediaItem;
+import androidx.media3.common.PlaybackException;
+import androidx.media3.database.StandaloneDatabaseProvider;
+import androidx.media3.datasource.rtmp.RtmpDataSource;
+import androidx.media3.extractor.DefaultExtractorsFactory;
+import androidx.media3.extractor.ExtractorsFactory;
+import androidx.media3.extractor.ts.DefaultTsPayloadReaderFactory;
+import androidx.media3.extractor.ts.TsExtractor;
+import androidx.media3.exoplayer.source.DefaultMediaSourceFactory;
+import androidx.media3.exoplayer.source.MediaSource;
+import androidx.media3.exoplayer.source.ProgressiveMediaSource;
+import androidx.media3.exoplayer.dash.DashMediaSource;
+import androidx.media3.exoplayer.hls.HlsMediaSource;
+import androidx.media3.exoplayer.rtsp.RtspMediaSource;
+import androidx.media3.datasource.DataSource;
+import androidx.media3.datasource.DefaultDataSource;
+import androidx.media3.datasource.cache.Cache;
+import androidx.media3.datasource.cache.CacheDataSource;
+import androidx.media3.datasource.cache.LeastRecentlyUsedCacheEvictor;
+import androidx.media3.datasource.cache.SimpleCache;
+import androidx.media3.common.MimeTypes;
+import androidx.media3.common.util.Util;
 
 import java.io.File;
-import java.lang.reflect.Field;
+import java.util.LinkedHashMap;
+import java.util.Locale;
 import java.util.Map;
 
 import okhttp3.OkHttpClient;
 
+@UnstableApi
 public final class ExoMediaSourceHelper {
+
+    private static final String TAG = "ExoMediaSourceHelper";
 
     private static volatile ExoMediaSourceHelper sInstance;
 
+    /**
+     * 取流客户端提供方(app 组合根注入一次)。
+     * <p>
+     * 为什么必须有:client 会被"安全 DNS 变更"作废({@link #dropOkClient()}),作废之后必须有人重新给 ——
+     * 原实现只指望调用方再调一次 {@link #setOkClient},而全仓零调用点,于是 mOkClient 恒为 null,
+     * 取流时 OkHttpDataSource 内部 checkNotNull(callFactory) 抛 NPE(真机回归:Exo 每次起播即失败)。
+     * 有了提供方,作废后由本类在下次取用时自取,不必依赖谁记得多调一次。
+     */
+    private static volatile java.util.function.Supplier<OkHttpClient> sClientSupplier;
+
     private final String mUserAgent;
     private final Context mAppContext;
-    private OkHttpDataSource.Factory mHttpDataSourceFactory;
-    private OkHttpClient mOkClient = null;
+    private volatile OkHttpClient mOkClient = null;
     private Cache mCache;
 
     private ExoMediaSourceHelper(Context context) {
@@ -63,8 +74,57 @@ public final class ExoMediaSourceHelper {
         return sInstance;
     }
 
-    public void setOkClient(OkHttpClient client) {
+    /**
+     * 设置播放用 OkHttpClient。
+     * <p>
+     * 传 null 表示"作废"({@code getOkClient()} 会回退到当前实例):安全 DNS 变更后
+     * 每个媒体源使用独立工厂，下次起播会从提供方取新 client。
+     */
+    public synchronized void setOkClient(OkHttpClient client) {
         mOkClient = client;
+    }
+
+    /** 当前播放客户端(已缓存的实例);需"没有就自取"时用 {@link #resolveOkClient()} */
+    public OkHttpClient getOkClient() {
+        return mOkClient;
+    }
+
+    /**
+     * 注入取流客户端提供方(app 组合根启动时调一次)。
+     * 提供方内部负责懒建与"安全 DNS 变更后重建"(见 App.playbackHttpClient)。
+     */
+    public static void setOkClientSupplier(java.util.function.Supplier<OkHttpClient> supplier) {
+        sClientSupplier = supplier;
+    }
+
+    /**
+     * 取当前播放客户端:mOkClient 优先;被作废({@link #dropOkClient()})后经提供方重新取用并缓存 —— 自愈,
+     * 不再依赖"作废之后必须有人记得再 setOkClient 一次"(那正是 Exo 取流客户端恒为 null 的成因)。
+     * 拿不到时返回 null,由取流处给出明确报错。
+     */
+    public OkHttpClient resolveOkClient() {
+        OkHttpClient client = mOkClient;
+        if (client != null) return client;
+        java.util.function.Supplier<OkHttpClient> supplier = sClientSupplier;
+        if (supplier == null) return null;
+        synchronized (this) {
+            if (mOkClient == null) {
+                try {
+                    mOkClient = supplier.get();
+                } catch (Throwable th) {
+                    Log.e(TAG, "播放客户端提供方取用失败", th);
+                }
+            }
+            return mOkClient;
+        }
+    }
+
+    /**
+     * 作废当前 client(安全 DNS 变更后调用)，下一媒体源的工厂会使用新 client。
+     * 不关闭旧 client:正在播的流仍持有它,关闭会直接断流。
+     */
+    public synchronized void dropOkClient() {
+        mOkClient = null;
     }
 
     public MediaSource getMediaSource(String uri) {
@@ -84,6 +144,12 @@ public final class ExoMediaSourceHelper {
     }
 
     public MediaSource getMediaSource(String uri, Map<String, String> headers, boolean isCache, int errorCode) {
+        return getMediaSource(uri, headers, isCache, errorCode, true);
+    }
+
+    /** writeCache=false 时只读取已有缓存,未命中的内容仍走网络但不写入缓存。 */
+    public MediaSource getMediaSource(String uri, Map<String, String> headers, boolean isCache,
+                                      int errorCode, boolean writeCache) {
         Uri contentUri = Uri.parse(uri);
         if ("rtmp".equals(contentUri.getScheme())) {
             return new ProgressiveMediaSource.Factory(new RtmpDataSource.Factory())
@@ -94,17 +160,12 @@ public final class ExoMediaSourceHelper {
         int contentType = inferContentType(uri);
         DataSource.Factory factory;
         if (isCache) {
-            factory = getCacheDataSourceFactory();
+            factory = getCacheDataSourceFactory(headers, writeCache);
         } else {
-            factory = getDataSourceFactory();
-        }
-        if (mHttpDataSourceFactory != null) {
-            setHeaders(headers);
+            factory = getDataSourceFactory(headers);
         }
         if (errorCode == PlaybackException.ERROR_CODE_PARSING_CONTAINER_UNSUPPORTED) {
-            MediaItem.Builder builder = new MediaItem.Builder().setUri(uri);
-            builder.setMimeType(MimeTypes.APPLICATION_M3U8);
-            return new DefaultMediaSourceFactory(getDataSourceFactory(), getExtractorsFactory()).createMediaSource(getMediaItem(uri, errorCode));
+            return new DefaultMediaSourceFactory(factory, getExtractorsFactory()).createMediaSource(getMediaItem(uri, errorCode));
         }
         switch (contentType) {
             case C.TYPE_DASH:
@@ -129,32 +190,102 @@ public final class ExoMediaSourceHelper {
 
     }
 
+    /**
+     * 已知的普通媒体后缀:路径已明确指向这类文件时,不再拿查询串里的目标地址兜底
+     * (避免 xxx.mp4?sign=yyy.m3u8 之类被误判成 HLS)。
+     */
+    private static final java.util.Set<String> PLAIN_MEDIA_EXTS = new java.util.HashSet<>(java.util.Arrays.asList(
+            "mp4", "mkv", "avi", "ts", "flv", "mov", "wmv", "webm", "m4v", "mpg", "mpeg",
+            "rmvb", "rm", "3gp", "vob", "mp3", "m4a", "flac", "aac", "wav", "ogg"));
+
     private int inferContentType(String fileName) {
-        fileName = fileName.toLowerCase();
-        if (fileName.contains(".mpd")) {
-            return C.TYPE_DASH;
-        } else if (fileName.contains(".m3u8")) {
-            return C.TYPE_HLS;
-        } else {
-            return C.TYPE_OTHER;
+        String lower = fileName.toLowerCase(Locale.ROOT);
+        String path = lower;
+        String query = "";
+        int queryIdx = lower.indexOf('?');
+        if (queryIdx >= 0) {
+            path = lower.substring(0, queryIdx);
+            query = lower.substring(queryIdx + 1);
         }
+        // 先看路径的最后扩展名,避免下载文件名含 ".m3u8"(如 xxx.m3u8_sign=yyy_播放.mp4) 被误判为 HLS
+        int dotIdx = path.lastIndexOf('.');
+        String ext = dotIdx >= 0 ? path.substring(dotIdx + 1) : "";
+        if ("mpd".equals(ext)) {
+            return C.TYPE_DASH;
+        }
+        if ("m3u8".equals(ext)) {
+            return C.TYPE_HLS;
+        }
+        // 路径没有明确媒体后缀时,真实目标可能在查询串里:代理地址形如
+        // http://127.0.0.1:9978/proxy?do=js&...&url=<源地址 m3u8>,只按路径判定会退化成 Progressive
+        // (首播失败后靠 ERROR_CODE_PARSING_CONTAINER_UNSUPPORTED 重试兜底),这里保留查询串兜底识别
+        if (queryIdx >= 0 && !PLAIN_MEDIA_EXTS.contains(ext)) {
+            if (query.contains(".m3u8")) {
+                return C.TYPE_HLS;
+            }
+            if (query.contains(".mpd")) {
+                return C.TYPE_DASH;
+            }
+        }
+        return C.TYPE_OTHER;
     }
 
-    private DataSource.Factory getCacheDataSourceFactory() {
+    // 与 setCache 共用实例锁:播放线程与预载线程不得为同一目录重复创建 SimpleCache。
+    private synchronized DataSource.Factory getCacheDataSourceFactory(Map<String, String> headers,
+                                                                      boolean writeCache) {
         if (mCache == null) {
             mCache = newCache();
         }
-        return new CacheDataSource.Factory()
+        CacheDataSource.Factory factory = new CacheDataSource.Factory()
                 .setCache(mCache)
-                .setUpstreamDataSourceFactory(getDataSourceFactory())
+                .setUpstreamDataSourceFactory(getDataSourceFactory(headers))
                 .setFlags(CacheDataSource.FLAG_IGNORE_CACHE_ON_ERROR);
+        if (!writeCache) {
+            factory.setCacheWriteDataSinkFactory(null);
+        }
+        return factory;
     }
 
     private Cache newCache() {
+        // 容量取自播放缓存设置;SimpleCache 的 LRU 上限在创建时固定,运行中改容量不重建
+        // (重建需 close 正在被播放持有的缓存,风险大),故新容量自下一次建缓存(通常为重启)生效。
+        long capacityBytes = (long) com.github.tvbox.osc.player.api.PlayConfig.getCacheCapacityMb()
+                * 1024L * 1024L;
+        File cacheRoot = mAppContext.getExternalCacheDir();
+        if (cacheRoot == null) cacheRoot = mAppContext.getCacheDir();
         return new SimpleCache(
-                new File(mAppContext.getExternalCacheDir(), "exo-video-cache"),//缓存目录
-                new LeastRecentlyUsedCacheEvictor(512 * 1024 * 1024),//缓存大小，默认512M，使用LRU算法实现
+                new File(cacheRoot, "exo-video-cache"),//缓存目录
+                new LeastRecentlyUsedCacheEvictor(capacityBytes),//缓存大小,LRU 淘汰
                 new StandaloneDatabaseProvider(mAppContext));
+    }
+
+    /** 播放缓存目录(与 newCache 同源:外部缓存目录,无则退回内部缓存) */
+    private File playbackCacheDir() {
+        File root = mAppContext.getExternalCacheDir();
+        if (root == null) root = mAppContext.getCacheDir();
+        return new File(root, "exo-video-cache");
+    }
+
+    /** 清空播放缓存:释放 SimpleCache 并删目录,下次播放按当前容量设置重建(后台调用) */
+    public synchronized void clearPlaybackCache() {
+        if (mCache != null) {
+            try {
+                mCache.release();
+            } catch (Throwable ignored) {
+            }
+            mCache = null;
+        }
+        deleteDir(playbackCacheDir());
+    }
+
+    private static void deleteDir(File dir) {
+        if (dir == null || !dir.exists()) return;
+        if (dir.isDirectory()) {
+            File[] children = dir.listFiles();
+            if (children != null) for (File f : children) deleteDir(f);
+        }
+        //noinspection ResultOfMethodCallIgnored
+        dir.delete();
     }
 
     /**
@@ -162,8 +293,8 @@ public final class ExoMediaSourceHelper {
      *
      * @return A new DataSource factory.
      */
-    private DataSource.Factory getDataSourceFactory() {
-        return new DefaultDataSource.Factory(mAppContext, getHttpDataSourceFactory());
+    private DataSource.Factory getDataSourceFactory(Map<String, String> headers) {
+        return new DefaultDataSource.Factory(mAppContext, getHttpDataSourceFactory(headers));
     }
 
     /**
@@ -171,40 +302,32 @@ public final class ExoMediaSourceHelper {
      *
      * @return A new HttpDataSource factory.
      */
-    private DataSource.Factory getHttpDataSourceFactory() {
-        if (mHttpDataSourceFactory == null) {
-            mHttpDataSourceFactory = new OkHttpDataSource.Factory(mOkClient)
-                    .setUserAgent(mUserAgent)/*
-                    .setAllowCrossProtocolRedirects(true)*/;
+    private DataSource.Factory getHttpDataSourceFactory(Map<String, String> headers) {
+        OkHttpClient client = resolveOkClient();
+        if (client == null) {
+            Log.e(TAG, "取流客户端未注入:app 组合根未调用 setOkClientSupplier");
+            throw new IllegalStateException("Media3 播放客户端未注入(见 AppCompositionRoot)");
         }
-        return mHttpDataSourceFactory;
+        // client 复用，工厂按媒体源隔离：HLS 旧分片不能被下一次播放的 UA/鉴权头污染。
+        return new OkHttpDataSource.Factory(client)
+                .setUserAgent(mUserAgent)
+                .setDefaultRequestProperties(copyHeaders(headers));
     }
 
-    private void setHeaders(Map<String, String> headers) {
-        if (headers != null && headers.size() > 0) {
-            //如果发现用户通过header传递了UA，则强行将HttpDataSourceFactory里面的userAgent字段替换成用户的
-            if (headers.containsKey("User-Agent")) {
-                String value = headers.remove("User-Agent");
-                if (!TextUtils.isEmpty(value)) {
-                    try {
-                        Field userAgentField = mHttpDataSourceFactory.getClass().getDeclaredField("userAgent");
-                        userAgentField.setAccessible(true);
-                        userAgentField.set(mHttpDataSourceFactory, value.trim());
-                    } catch (Exception e) {
-                        //ignore
-                    }
-                }
-            }
-            for (String k : headers.keySet()) {
-                String v = headers.get(k);
-                if (v != null)
-                    headers.put(k, v.trim());
-            }
-            mHttpDataSourceFactory.setDefaultRequestProperties(headers);
+    /** 保留源站 UA（任意大小写），不修改调用方的头；数据源负责避免再追加默认 UA。 */
+    static Map<String, String> copyHeaders(Map<String, String> headers) {
+        Map<String, String> copy = new LinkedHashMap<>();
+        if (headers == null) return copy;
+        for (Map.Entry<String, String> header : headers.entrySet()) {
+            if (header.getKey() == null || header.getValue() == null) continue;
+            String value = header.getValue().trim();
+            if ("User-Agent".equalsIgnoreCase(header.getKey()) && value.isEmpty()) continue;
+            copy.put(header.getKey(), value);
         }
+        return copy;
     }
 
-    public void setCache(Cache cache) {
+    public synchronized void setCache(Cache cache) {
         this.mCache = cache;
     }
 

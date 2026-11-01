@@ -6,10 +6,10 @@
     xmlns:app="http://schemas.android.com/apk/res-auto"
     xmlns:tools="http://schemas.android.com/tools"
     android:layout_gravity="center"
-    android:background="@color/bg_popup"
+    android:background="@color/bg_float"
     android:orientation="vertical"
     android:paddingTop="20dp"
-    android:paddingBottom="10dp"
+    android:paddingBottom="20dp"
     android:gravity="center_horizontal">
 
 
@@ -23,20 +23,25 @@
             android:id="@+id/mGridViewFlag"
             android:layout_width="0dp"
             android:layout_weight="1"
-            android:layout_height="30dp"
+            android:layout_height="wrap_content"
             android:layout_margin="10dp"
             android:clipChildren="false"
             android:clipToPadding="false"
             app:tv_horizontalSpacingWithMargins="@dimen/dp_10"
             app:tv_selectedItemIsCentered="true"
             tools:listitem="@layout/item_select_flag"
+            
+            android:paddingHorizontal="16dp"
+            android:paddingVertical="4dp"
             />
-        <TextView
+        <com.github.tvbox.osc.ui.kit.SizedIconTextView
             android:id="@+id/tvSort"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
             android:text="倒序"
             android:drawableRight="@drawable/ic_sort_18"
+            app:drawableTint="@color/text_foreground"
+            app:drawableIconSize="18dp"
             android:textColor="@color/text_foreground"
             android:drawablePadding="4dp"
             android:paddingVertical="6dp"
@@ -46,8 +51,12 @@
 
     <androidx.recyclerview.widget.RecyclerView
         android:id="@+id/rv"
-        android:layout_width="360dp"
+        android:layout_width="match_parent"
         android:layout_height="wrap_content"
+        android:layout_marginTop="8dp"
+        android:clipToPadding="false"
+        android:paddingHorizontal="16dp"
+        android:paddingVertical="4dp"
         tools:listitem="@layout/item_series"
         />
 

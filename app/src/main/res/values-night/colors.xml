@@ -1,9 +1,46 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
 
-    <color name="bg_gray">#212121</color>
-    <color name="bg_popup">#2a2d32</color>
+    <!-- 以下核心色由 assets/theme/themes/dark/ 下的默认主题派生(values-night/theme_colors.xml) -->
+    <color name="bg_gray">@color/bg_card</color>
+    <!-- bg_float(弹层/抽屉背景, 现为半透明可调) 由默认暗色主题统一维护, 此处不再重复定义 -->
 
-    <color name="text_foreground">#FFFFFF</color>
-    <color name="text_sub_foreground">#AFAFAF</color>
+    <color name="text_foreground">@color/text_main</color>
+    <color name="text_sub_foreground">@color/text_sub</color>
+
+    <!-- 应用强调色随文字主色 brand；text_accent 是派生资源，不单独配置。 -->
+    <color name="colorPrimary">@color/text_accent</color>
+    <color name="windowBackground">@color/bg_body</color>
+
+    <!-- ============ Material 3 色板(暗色) ============ -->
+    <color name="md_primary">@color/text_accent</color>
+    <color name="md_on_primary">@color/btn_select_text</color>
+    <color name="md_primary_container">@color/bg_card</color>
+    <color name="md_on_primary_container">@color/text_main</color>
+    <color name="md_secondary">@color/text_sub</color>
+    <color name="md_on_secondary">@color/btn_select_text</color>
+    <color name="md_secondary_container">@color/bg_card</color>
+    <color name="md_on_secondary_container">@color/text_accent</color>
+    <color name="md_tertiary">@color/text_sub</color>
+    <color name="md_on_tertiary">@color/btn_select_text</color>
+    <color name="md_tertiary_container">@color/bg_card</color>
+    <color name="md_on_tertiary_container">@color/text_accent</color>
+    <color name="md_error">#F2B8B5</color>
+    <color name="md_on_error">#601410</color>
+    <color name="md_error_container">#8C1D18</color>
+    <color name="md_on_error_container">#F9DEDC</color>
+    <color name="md_surface">@color/bg_body</color>
+    <color name="md_on_surface">@color/text_main</color>
+    <color name="md_surface_variant">@color/bg_card</color>
+    <color name="md_on_surface_variant">@color/text_sub</color>
+    <color name="md_outline">#6B7280</color>
+    <!-- 开关轨道-关闭态(浅色主题浅灰;深色主题深灰,避免深色主题下白底白点) -->
+
+
+    <!-- bg_surface(底部导航栏磨砂遮罩)与 bg_float(悬浮钮磨砂遮罩)由默认暗色主题
+         统一维护(颜色+透明度), 生成到 values-night/theme_colors.xml, 此处不再重复定义 -->
+
+    <!-- 悬浮圆钮(直播/筛选)描边色:暗色用亮色 35% 透明度描边, 纯黑背景上清晰可见 -->
+    <color name="fab_stroke">@color/btn_stroke</color>
+
 </resources>

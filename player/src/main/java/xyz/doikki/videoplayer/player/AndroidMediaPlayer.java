@@ -12,7 +12,7 @@ import android.view.SurfaceHolder;
 import java.util.Map;
 
 /**
- * 封装系统的MediaPlayer，不推荐，系统的MediaPlayer兼容性较差，建议使用IjkPlayer或者ExoPlayer
+ * 封装系统的MediaPlayer，不推荐，系统的MediaPlayer兼容性较差，建议使用Media3(ExoPlayer)
  */
 public class AndroidMediaPlayer extends AbstractPlayer implements MediaPlayer.OnErrorListener,
         MediaPlayer.OnCompletionListener, MediaPlayer.OnInfoListener,
@@ -23,6 +23,7 @@ public class AndroidMediaPlayer extends AbstractPlayer implements MediaPlayer.On
     private int mBufferedPercent;
     private Context mAppContext;
     private boolean mIsPreparing;
+    private String sourceSummary = "未知来源";
 
     public AndroidMediaPlayer(Context context) {
         mAppContext = context.getApplicationContext();
@@ -43,19 +44,21 @@ public class AndroidMediaPlayer extends AbstractPlayer implements MediaPlayer.On
 
     @Override
     public void setDataSource(String path, Map<String, String> headers) {
+        sourceSummary = PlaybackErrorReporter.source(path);
         try {
             mMediaPlayer.setDataSource(mAppContext, Uri.parse(path), headers);
         } catch (Exception e) {
-            mPlayerEventListener.onError();
+            reportError("设置播放地址", e);
         }
     }
 
     @Override
     public void setDataSource(AssetFileDescriptor fd) {
+        sourceSummary = "本地文件描述符";
         try {
             mMediaPlayer.setDataSource(fd.getFileDescriptor(), fd.getStartOffset(), fd.getLength());
         } catch (Exception e) {
-            mPlayerEventListener.onError();
+            reportError("设置本地文件", e);
         }
     }
 
@@ -63,8 +66,8 @@ public class AndroidMediaPlayer extends AbstractPlayer implements MediaPlayer.On
     public void start() {
         try {
             mMediaPlayer.start();
-        } catch (IllegalStateException e) {
-            mPlayerEventListener.onError();
+        } catch (RuntimeException e) {
+            reportError("开始播放", e);
         }
     }
 
@@ -72,8 +75,8 @@ public class AndroidMediaPlayer extends AbstractPlayer implements MediaPlayer.On
     public void pause() {
         try {
             mMediaPlayer.pause();
-        } catch (IllegalStateException e) {
-            mPlayerEventListener.onError();
+        } catch (RuntimeException e) {
+            reportError("暂停", e);
         }
     }
 
@@ -81,8 +84,8 @@ public class AndroidMediaPlayer extends AbstractPlayer implements MediaPlayer.On
     public void stop() {
         try {
             mMediaPlayer.stop();
-        } catch (IllegalStateException e) {
-            mPlayerEventListener.onError();
+        } catch (RuntimeException e) {
+            reportError("停止", e);
         }
     }
 
@@ -91,8 +94,8 @@ public class AndroidMediaPlayer extends AbstractPlayer implements MediaPlayer.On
         try {
             mIsPreparing = true;
             mMediaPlayer.prepareAsync();
-        } catch (IllegalStateException e) {
-            mPlayerEventListener.onError();
+        } catch (RuntimeException e) {
+            reportError("准备播放", e);
         }
     }
 
@@ -114,13 +117,14 @@ public class AndroidMediaPlayer extends AbstractPlayer implements MediaPlayer.On
     public void seekTo(long time) {
         try {
             mMediaPlayer.seekTo((int) time);
-        } catch (IllegalStateException e) {
-            mPlayerEventListener.onError();
+        } catch (RuntimeException e) {
+            reportError("跳转进度", e);
         }
     }
 
     @Override
     public void release() {
+        final String releasedSource = sourceSummary;
         mMediaPlayer.setOnErrorListener(null);
         mMediaPlayer.setOnCompletionListener(null);
         mMediaPlayer.setOnInfoListener(null);
@@ -130,16 +134,22 @@ public class AndroidMediaPlayer extends AbstractPlayer implements MediaPlayer.On
         stop();
         final MediaPlayer mediaPlayer = mMediaPlayer;
         mMediaPlayer = null;
-        new Thread() {
+        // 与 Surface 解绑后再异步释放:宿主随后会释放渲染视图的 Surface,原生输出线程不能还挂在上面
+        try {
+            mediaPlayer.setSurface(null);
+        } catch (Throwable ignored) {
+        }
+        releaseAsync(new Runnable() {
             @Override
             public void run() {
                 try {
                     mediaPlayer.release();
-                } catch (Exception e) {
-                    e.printStackTrace();
+                } catch (Throwable e) {
+                    // 必须兜 Throwable:native 释放失败抛的是 Error,只 catch Exception 会逃到释放线程上
+                    PlaybackErrorReporter.failure("系统播放器", "释放", releasedSource, e);
                 }
             }
-        }.start();
+        });
     }
 
     @Override
@@ -162,7 +172,7 @@ public class AndroidMediaPlayer extends AbstractPlayer implements MediaPlayer.On
         try {
             mMediaPlayer.setSurface(surface);
         } catch (Exception e) {
-            mPlayerEventListener.onError();
+            reportError("设置画面", e);
         }
     }
 
@@ -171,7 +181,7 @@ public class AndroidMediaPlayer extends AbstractPlayer implements MediaPlayer.On
         try {
             mMediaPlayer.setDisplay(holder);
         } catch (Exception e) {
-            mPlayerEventListener.onError();
+            reportError("设置显示输出", e);
         }
     }
 
@@ -196,7 +206,7 @@ public class AndroidMediaPlayer extends AbstractPlayer implements MediaPlayer.On
             try {
                 mMediaPlayer.setPlaybackParams(mMediaPlayer.getPlaybackParams().setSpeed(speed));
             } catch (Exception e) {
-                mPlayerEventListener.onError();
+                reportError("设置倍速", e);
             }
         }
     }
@@ -208,7 +218,7 @@ public class AndroidMediaPlayer extends AbstractPlayer implements MediaPlayer.On
             try {
                 return mMediaPlayer.getPlaybackParams().getSpeed();
             } catch (Exception e) {
-                mPlayerEventListener.onError();
+                reportError("读取倍速", e);
             }
         }
         return 1f;
@@ -222,8 +232,28 @@ public class AndroidMediaPlayer extends AbstractPlayer implements MediaPlayer.On
 
     @Override
     public boolean onError(MediaPlayer mp, int what, int extra) {
+        PlaybackErrorReporter.failure("系统播放器", "播放回调", sourceSummary,
+                "what=" + what + "(" + errorName(what) + "), extra=" + extra
+                        + "(" + errorName(extra) + ")");
         mPlayerEventListener.onError();
         return true;
+    }
+
+    private void reportError(String operation, Exception error) {
+        PlaybackErrorReporter.failure("系统播放器", operation, sourceSummary, error);
+        mPlayerEventListener.onError();
+    }
+
+    private static String errorName(int code) {
+        switch (code) {
+            case MediaPlayer.MEDIA_ERROR_UNKNOWN: return "未知错误";
+            case MediaPlayer.MEDIA_ERROR_SERVER_DIED: return "播放器服务异常";
+            case MediaPlayer.MEDIA_ERROR_IO: return "读取失败";
+            case MediaPlayer.MEDIA_ERROR_MALFORMED: return "媒体格式损坏";
+            case MediaPlayer.MEDIA_ERROR_UNSUPPORTED: return "格式不支持";
+            case MediaPlayer.MEDIA_ERROR_TIMED_OUT: return "超时";
+            default: return "其他";
+        }
     }
 
     @Override

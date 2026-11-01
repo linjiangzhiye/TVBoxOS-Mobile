@@ -6,9 +6,8 @@ import android.text.TextUtils;
 import com.github.tvbox.osc.base.App;
 import com.github.tvbox.osc.bean.IpScanningVo;
 import com.github.tvbox.osc.server.RemoteServer;
-import com.github.tvbox.osc.util.HawkConfig;
+import com.github.tvbox.osc.config.HawkConfig;
 import com.github.tvbox.osc.util.IpScanning;
-import com.orhanobut.hawk.Hawk;
 
 import java.io.IOException;
 import java.net.URLEncoder;
@@ -110,8 +109,9 @@ public class RemoteTVBox {
         return;
     }
 
+
     public static String getAvalible() {
-        return Hawk.get(HawkConfig.REMOTE_TVBOX, null);
+        return com.github.tvbox.osc.config.PrefsDataStore.getString(HawkConfig.REMOTE_TVBOX, null);
     }
 
     public static String getAvalibleActionUrl() {
@@ -122,15 +122,16 @@ public class RemoteTVBox {
     }
 
     public static void setAvalible(String viewHost) {
-        Hawk.put(HawkConfig.REMOTE_TVBOX, viewHost);
+        com.github.tvbox.osc.config.PrefsDataStore.put(HawkConfig.REMOTE_TVBOX, viewHost);
     }
 
     private static void post(String url, Map<String, String> params, okhttp3.Callback callback) {
-        OkHttpClient.Builder builder = new OkHttpClient.Builder();
-        builder.readTimeout(1000, TimeUnit.MILLISECONDS);
-        builder.writeTimeout(1000, TimeUnit.MILLISECONDS);
-        builder.connectTimeout(1000, TimeUnit.MILLISECONDS);
-        OkHttpClient client = builder.build();
+        // LAN 探测用 1s 超时;其余策略走 :core-network 公共根
+        OkHttpClient client = com.github.tvbox.osc.util.OkGoHelper.newBaseBuilder()
+                .readTimeout(1000, TimeUnit.MILLISECONDS)
+                .writeTimeout(1000, TimeUnit.MILLISECONDS)
+                .connectTimeout(1000, TimeUnit.MILLISECONDS)
+                .build();
         FormBody.Builder formBodyBuilder = new FormBody.Builder();
         if (params != null && params.size() > 0) {
             for(Map.Entry<String, String> entry : params.entrySet()) {

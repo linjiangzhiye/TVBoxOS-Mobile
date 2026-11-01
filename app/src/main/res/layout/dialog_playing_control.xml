@@ -1,16 +1,27 @@
 <?xml version="1.0" encoding="utf-8"?>
+<!-- 播放设置面板(全屏=右抽屉 PlayingControlRightDialog / 非全屏=底部面板 PlayingControlDialog,同一布局)。
+
+     **上下内边距放在面板根上,不放在滚动区上**(2026-10-01,用户口径"全屏播放界面的设置抽屉的滚动贴着
+     上下两个边了,没有内边距"):滚动区带 clipToPadding=false 时,它自己的 padding 只是**初始偏移**,
+     滚动过程中内容仍会走到它的边界;而它的边界就是面板边界 —— 于是看着"贴着边"。
+     把上下内边距挪到面板根(背景 bg_playing_control 所在的这一层),滚动区就被整体内缩,
+     内容永远停在距面板上下边 16dp 处;滚动区只保留左右内边距,clipToPadding 照旧 false
+     (符合全站"可滚动组件保留内边距 + clipToPadding=false"的口径)。 -->
 <LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:app="http://schemas.android.com/apk/res-auto"
     xmlns:tools="http://schemas.android.com/tools"
     android:layout_width="match_parent"
     android:layout_height="wrap_content"
     android:orientation="vertical"
-    android:background="@color/white">
+    android:paddingTop="16dp"
+    android:paddingBottom="16dp"
+    android:background="@drawable/bg_playing_control">
 
     <ScrollView
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:scrollbars="none"
+        android:clipToPadding="false"
         android:paddingHorizontal="16dp">
 
         <LinearLayout
@@ -22,11 +33,10 @@
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
                 android:text="倍速"
-                android:textColor="?android:attr/textColorPrimary"
+                android:textColor="@color/text_foreground"
                 android:textSize="16sp"
                 android:textStyle="bold"
-                android:layout_marginBottom="10dp"
-                android:layout_marginTop="16dp"/>
+                android:layout_marginBottom="10dp"/>
 
             <HorizontalScrollView
                 android:layout_width="wrap_content"
@@ -38,122 +48,161 @@
                     android:layout_height="wrap_content"
                     android:orientation="horizontal">
 
-                    <TextView
+                    <TextView style="@style/WidgetBtn"
                         android:id="@+id/speed0"
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
                         android:layout_marginEnd="8dp"
-                        android:background="@drawable/bg_r_common_stroke_primary"
                         android:gravity="center"
                         android:singleLine="true"
-                        android:textColor="@color/text_foreground"
                         android:paddingVertical="4dp"
                         android:paddingHorizontal="10dp"
                         android:text="x0.5" />
 
-                    <TextView
+                    <TextView style="@style/WidgetBtn"
                         android:id="@+id/speed1"
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
                         android:layout_marginEnd="8dp"
-                        android:background="@drawable/bg_r_common_stroke_primary"
                         android:gravity="center"
                         android:singleLine="true"
-                        android:textColor="@color/text_foreground"
                         android:paddingVertical="4dp"
                         android:paddingHorizontal="10dp"
                         android:text="x1.0" />
 
-                    <TextView
+                    <TextView style="@style/WidgetBtn"
                         android:id="@+id/speed1a"
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
                         android:layout_marginEnd="8dp"
-                        android:background="@drawable/bg_r_common_stroke_primary"
                         android:gravity="center"
                         android:singleLine="true"
-                        android:textColor="@color/text_foreground"
                         android:paddingVertical="4dp"
                         android:paddingHorizontal="10dp"
                         android:text="x1.25" />
 
-                    <TextView
+                    <TextView style="@style/WidgetBtn"
                         android:id="@+id/speed2"
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
                         android:layout_marginEnd="8dp"
-                        android:background="@drawable/bg_r_common_stroke_primary"
                         android:gravity="center"
                         android:paddingHorizontal="10dp"
                         android:paddingVertical="4dp"
                         android:singleLine="true"
                         android:text="x1.5"
-                        android:textColor="@color/text_foreground" />
+                         />
 
-                    <TextView
+                    <TextView style="@style/WidgetBtn"
                         android:id="@+id/speed3"
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
                         android:layout_marginEnd="8dp"
-                        android:background="@drawable/bg_r_common_stroke_primary"
                         android:gravity="center"
                         android:singleLine="true"
-                        android:textColor="@color/text_foreground"
                         android:paddingVertical="4dp"
                         android:paddingHorizontal="10dp"
                         android:text="x2.0" />
-                    <TextView
+                    <TextView style="@style/WidgetBtn"
                         android:id="@+id/speed4"
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
                         android:layout_marginEnd="8dp"
-                        android:background="@drawable/bg_r_common_stroke_primary"
                         android:gravity="center"
                         android:singleLine="true"
-                        android:textColor="@color/text_foreground"
                         android:paddingVertical="4dp"
                         android:paddingHorizontal="10dp"
                         android:text="x2.5" />
-                    <TextView
+                    <TextView style="@style/WidgetBtn"
                         android:id="@+id/speed5"
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
                         android:layout_marginEnd="8dp"
-                        android:background="@drawable/bg_r_common_stroke_primary"
                         android:gravity="center"
                         android:singleLine="true"
-                        android:textColor="@color/text_foreground"
                         android:paddingVertical="4dp"
                         android:paddingHorizontal="10dp"
                         android:text="x3.0" />
                 </LinearLayout>
             </HorizontalScrollView>
 
-            <TextView
-                android:layout_width="wrap_content"
+            <!-- 长按倍速与缩放并排；宽度不足时可横向滚动，末端仍留内边距。 -->
+            <HorizontalScrollView
+                android:layout_width="match_parent"
                 android:layout_height="wrap_content"
                 android:layout_marginTop="16dp"
-                android:layout_marginBottom="10dp"
-                android:text="缩放"
-                android:textColor="?android:attr/textColorPrimary"
-                android:textSize="16sp"
-                android:textStyle="bold"
-                />
+                android:clipToPadding="false"
+                android:paddingEnd="16dp"
+                android:scrollbars="none">
 
-            <TextView
-                android:id="@+id/scale"
-                android:layout_width="wrap_content"
-                android:layout_height="wrap_content"
-                android:background="@drawable/bg_r_common_stroke_primary"
-                android:gravity="center"
-                android:singleLine="true"
-                android:textColor="@color/text_foreground"
-                android:paddingVertical="4dp"
-                android:paddingHorizontal="10dp"
-                android:drawableRight="@drawable/ic_change_20"
-                android:drawablePadding="8dp"
-                tools:text="16:9"
-                />
+                <LinearLayout
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:orientation="horizontal">
+
+                    <LinearLayout
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:layout_marginEnd="24dp"
+                        android:orientation="vertical">
+
+                        <TextView
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:layout_marginBottom="10dp"
+                            android:text="长按倍速"
+                            android:textColor="@color/text_foreground"
+                            android:textSize="16sp"
+                            android:textStyle="bold" />
+
+                        <com.github.tvbox.osc.ui.kit.SizedIconTextView
+                            android:id="@+id/long_press_speed"
+                            style="@style/WidgetBtn"
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:drawablePadding="8dp"
+                            android:drawableRight="@drawable/ic_change_20"
+                            android:gravity="center"
+                            android:paddingHorizontal="10dp"
+                            android:paddingVertical="4dp"
+                            android:singleLine="true"
+                            app:drawableIconSize="20dp"
+                            app:drawableTint="@color/text_foreground"
+                            tools:text="3.0x" />
+                    </LinearLayout>
+
+                    <LinearLayout
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:orientation="vertical">
+
+                        <TextView
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:layout_marginBottom="10dp"
+                            android:text="缩放"
+                            android:textColor="@color/text_foreground"
+                            android:textSize="16sp"
+                            android:textStyle="bold" />
+
+                        <!-- 图标尺寸由 app:drawableIconSize 指定，和长按倍速使用同一主题样式。 -->
+                        <com.github.tvbox.osc.ui.kit.SizedIconTextView
+                            android:id="@+id/scale"
+                            style="@style/WidgetBtn"
+                            android:layout_width="wrap_content"
+                            android:layout_height="wrap_content"
+                            android:drawablePadding="8dp"
+                            android:drawableRight="@drawable/ic_change_20"
+                            android:gravity="center"
+                            android:paddingHorizontal="10dp"
+                            android:paddingVertical="4dp"
+                            android:singleLine="true"
+                            app:drawableIconSize="20dp"
+                            app:drawableTint="@color/text_foreground"
+                            tools:text="16:9" />
+                    </LinearLayout>
+                </LinearLayout>
+            </HorizontalScrollView>
 
 
             <TextView
@@ -162,9 +211,14 @@
                 android:layout_marginTop="16dp"
                 android:layout_marginBottom="10dp"
                 android:text="跳过片头/片尾"
-                android:textColor="?android:attr/textColorPrimary"
+                android:textColor="@color/text_foreground"
                 android:textSize="16sp"
                 android:textStyle="bold"/>
+
+            <HorizontalScrollView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:scrollbars="none">
 
             <LinearLayout
                 android:layout_width="wrap_content"
@@ -173,18 +227,18 @@
                 android:gravity="center_vertical">
 
                 <ImageView
-                    android:id="@+id/decrease_start"
-                    android:layout_width="26dp"
-                    android:layout_height="26dp"
-                    android:src="@drawable/icon_back"
-                    app:tint="@color/text_foreground"
-                    />
+                        android:id="@+id/decrease_start"
+                        android:layout_width="20dp"
+                        android:layout_height="20dp"
+                        android:padding="2dp"
+                        android:src="@drawable/ic_seek_left"
+                        app:tint="@color/text_foreground"
+                />
                 <TextView
                     android:id="@+id/play_time_start"
                     android:layout_width="wrap_content"
                     android:layout_height="wrap_content"
                     android:layout_marginHorizontal="8dp"
-                    android:background="@drawable/bg_r_common_stroke_primary"
                     android:gravity="center"
                     android:singleLine="true"
                     android:textColor="@color/text_foreground"
@@ -193,17 +247,19 @@
                     tools:text="片头" />
                 <ImageView
                     android:id="@+id/increase_start"
-                    android:layout_width="26dp"
-                    android:layout_height="26dp"
-                    android:src="@drawable/icon_pre"
+                    android:layout_width="20dp"
+                    android:layout_height="20dp"
+                    android:padding="2dp"
+                    android:src="@drawable/ic_seek_right"
                     app:tint="@color/text_foreground"
                     />
 
                 <ImageView
                     android:id="@+id/decrease_end"
-                    android:layout_width="26dp"
-                    android:layout_height="26dp"
-                    android:src="@drawable/icon_back"
+                    android:layout_width="20dp"
+                    android:layout_height="20dp"
+                    android:padding="2dp"
+                    android:src="@drawable/ic_seek_left"
                     app:tint="@color/text_foreground"
                     android:layout_marginStart="10dp"
                     />
@@ -212,7 +268,6 @@
                     android:layout_width="wrap_content"
                     android:layout_height="wrap_content"
                     android:layout_marginHorizontal="8dp"
-                    android:background="@drawable/bg_r_common_stroke_primary"
                     android:gravity="center"
                     android:singleLine="true"
                     android:textColor="@color/text_foreground"
@@ -221,26 +276,26 @@
                     tools:text="片尾" />
                 <ImageView
                     android:id="@+id/increase_end"
-                    android:layout_width="26dp"
-                    android:layout_height="26dp"
-                    android:src="@drawable/icon_pre"
+                    android:layout_width="20dp"
+                    android:layout_height="20dp"
+                    android:padding="2dp"
+                    android:src="@drawable/ic_seek_right"
                     app:tint="@color/text_foreground"
                     />
 
-                <TextView
+                <TextView style="@style/WidgetBtn"
                     android:id="@+id/start_end_reset"
                     android:layout_width="wrap_content"
                     android:layout_height="wrap_content"
                     android:layout_marginEnd="8dp"
-                    android:background="@drawable/bg_r_common_stroke_primary"
                     android:gravity="center"
                     android:singleLine="true"
-                    android:textColor="@color/text_foreground"
                     android:paddingVertical="4dp"
                     android:paddingHorizontal="10dp"
                     android:layout_marginStart="10dp"
                     android:text="重置" />
             </LinearLayout>
+            </HorizontalScrollView>
 
 
             <TextView
@@ -249,46 +304,95 @@
                 android:layout_marginTop="16dp"
                 android:layout_marginBottom="10dp"
                 android:text="播放器"
-                android:textColor="?android:attr/textColorPrimary"
+                android:textColor="@color/text_foreground"
                 android:textSize="16sp"
                 android:textStyle="bold"/>
 
-            <LinearLayout
+            <HorizontalScrollView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:clipToPadding="false"
+                android:scrollbars="none">
+
+                <LinearLayout
+                    android:layout_width="wrap_content"
+                    android:layout_height="wrap_content"
+                    android:orientation="horizontal">
+
+                    <!-- 图标尺寸由 app:drawableIconSize 统一指定(见 ui/kit/SizedIconTextView) -->
+                    <com.github.tvbox.osc.ui.kit.SizedIconTextView style="@style/WidgetBtn"
+                        android:id="@+id/player"
+                        android:layout_width="wrap_content"
+                        android:layout_height="wrap_content"
+                        android:layout_marginEnd="8dp"
+                        android:gravity="center"
+                        android:singleLine="true"
+                        android:paddingVertical="4dp"
+                        android:paddingHorizontal="10dp"
+                        android:drawableRight="@drawable/ic_change_20"
+                        app:drawableTint="@color/text_foreground"
+                        app:drawableIconSize="20dp"
+                        android:drawablePadding="8dp"
+                        tools:text="Media3播放器" />
+                </LinearLayout>
+            </HorizontalScrollView>
+
+            <TextView
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
-                android:orientation="horizontal">
+                android:layout_marginTop="16dp"
+                android:layout_marginBottom="10dp"
+                android:text="渲染方式"
+                android:textColor="@color/text_foreground"
+                android:textSize="16sp"
+                android:textStyle="bold" />
+
+            <com.github.tvbox.osc.ui.kit.SizedIconTextView style="@style/WidgetBtn"
+                android:id="@+id/render_mode"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:gravity="center"
+                android:singleLine="true"
+                android:paddingVertical="4dp"
+                android:paddingHorizontal="10dp"
+                android:drawableRight="@drawable/ic_change_20"
+                app:drawableTint="@color/text_foreground"
+                app:drawableIconSize="20dp"
+                android:drawablePadding="8dp"
+                tools:text="TextureView" />
+
+            <LinearLayout
+                android:id="@+id/video_purify_section"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="16dp"
+                android:orientation="vertical"
+                android:visibility="gone"
+                tools:visibility="visible">
 
                 <TextView
-                    android:id="@+id/player"
                     android:layout_width="wrap_content"
                     android:layout_height="wrap_content"
-                    android:layout_marginEnd="8dp"
-                    android:background="@drawable/bg_r_common_stroke_primary"
-                    android:gravity="center"
-                    android:singleLine="true"
+                    android:layout_marginBottom="10dp"
+                    android:text="广告过滤"
                     android:textColor="@color/text_foreground"
-                    android:paddingVertical="4dp"
-                    android:paddingHorizontal="10dp"
-                    android:drawableRight="@drawable/ic_change_20"
-                    android:drawablePadding="8dp"
-                    tools:text="EXO" />
+                    android:textSize="16sp"
+                    android:textStyle="bold" />
 
-                <TextView
-                    android:id="@+id/decode"
+                <com.github.tvbox.osc.ui.kit.SizedIconTextView
+                    android:id="@+id/video_purify_row"
+                    style="@style/WidgetBtn"
                     android:layout_width="wrap_content"
                     android:layout_height="wrap_content"
-                    android:layout_marginEnd="8dp"
-                    android:background="@drawable/bg_r_common_stroke_primary"
-                    android:gravity="center"
-                    android:singleLine="true"
-                    android:textColor="@color/text_foreground"
-                    android:paddingVertical="4dp"
-                    android:paddingHorizontal="10dp"
-                    android:drawableRight="@drawable/ic_change_20"
                     android:drawablePadding="8dp"
-                    tools:text="硬解" />
-
-
+                    android:drawableRight="@drawable/ic_change_20"
+                    android:gravity="center"
+                    android:paddingHorizontal="10dp"
+                    android:paddingVertical="4dp"
+                    android:singleLine="true"
+                    app:drawableIconSize="20dp"
+                    app:drawableTint="@color/text_foreground"
+                    tools:text="过滤" />
             </LinearLayout>
 
             <TextView
@@ -296,101 +400,103 @@
                 android:layout_height="wrap_content"
                 android:layout_marginTop="16dp"
                 android:layout_marginBottom="10dp"
+                android:text="后台播放"
+                android:textColor="@color/text_foreground"
+                android:textSize="16sp"
+                android:textStyle="bold" />
+
+            <com.github.tvbox.osc.ui.kit.SizedIconTextView style="@style/WidgetBtn"
+                android:id="@+id/background_play"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:gravity="center"
+                android:singleLine="true"
+                android:paddingVertical="4dp"
+                android:paddingHorizontal="10dp"
+                android:drawableRight="@drawable/ic_change_20"
+                app:drawableTint="@color/text_foreground"
+                app:drawableIconSize="20dp"
+                android:drawablePadding="8dp"
+                tools:text="画中画" />
+
+            <TextView
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginTop="16dp"
+                android:layout_marginBottom="10dp"
                 android:text="其他"
-                android:textColor="?android:attr/textColorPrimary"
+                android:textColor="@color/text_foreground"
                 android:textSize="16sp"
                 android:textStyle="bold"/>
+
+            <HorizontalScrollView
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:scrollbars="none">
 
             <LinearLayout
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"
-                android:orientation="horizontal"
-                android:layout_marginBottom="20dp">
-                <TextView
-                    android:id="@+id/landscape_portrait"
-                    android:layout_width="wrap_content"
-                    android:layout_height="wrap_content"
-                    android:layout_marginEnd="8dp"
-                    android:background="@drawable/bg_r_common_stroke_primary"
-                    android:gravity="center"
-                    android:singleLine="true"
-                    android:textColor="@color/text_foreground"
-                    android:paddingVertical="4dp"
-                    android:paddingHorizontal="10dp"
-                    android:text="横竖屏"
-                    android:visibility="gone"
-                    tools:visibility="visible"
-                    />
-
-                <TextView
+                android:orientation="horizontal">
+                <TextView style="@style/WidgetBtn"
                     android:id="@+id/subtitle"
                     android:layout_width="wrap_content"
                     android:layout_height="wrap_content"
                     android:layout_marginEnd="8dp"
-                    android:background="@drawable/bg_r_common_stroke_primary"
                     android:gravity="center"
                     android:singleLine="true"
-                    android:textColor="@color/text_foreground"
                     android:paddingVertical="4dp"
                     android:paddingHorizontal="10dp"
                     android:text="字幕" />
 
-                <TextView
+                <TextView style="@style/WidgetBtn"
                     android:id="@+id/voice"
                     android:layout_width="wrap_content"
                     android:layout_height="wrap_content"
                     android:layout_marginEnd="8dp"
-                    android:background="@drawable/bg_r_common_stroke_primary"
                     android:gravity="center"
                     android:singleLine="true"
-                    android:textColor="@color/text_foreground"
                     android:paddingVertical="4dp"
                     android:paddingHorizontal="10dp"
                     android:text="音轨" />
 
 
-                <TextView
+                <TextView style="@style/WidgetBtn"
                     android:id="@+id/replay"
                     android:layout_width="wrap_content"
                     android:layout_height="wrap_content"
                     android:layout_marginEnd="8dp"
-                    android:background="@drawable/bg_r_common_stroke_primary"
                     android:gravity="center"
                     android:singleLine="true"
-                    android:textColor="@color/text_foreground"
                     android:paddingVertical="4dp"
                     android:paddingHorizontal="10dp"
                     android:text="重播" />
 
-                <TextView
+                <TextView style="@style/WidgetBtn"
                     android:id="@+id/refresh"
                     android:layout_width="wrap_content"
                     android:layout_height="wrap_content"
                     android:layout_marginEnd="8dp"
-                    android:background="@drawable/bg_r_common_stroke_primary"
                     android:gravity="center"
                     android:singleLine="true"
-                    android:textColor="@color/text_foreground"
                     android:paddingVertical="4dp"
                     android:paddingHorizontal="10dp"
                     android:text="刷新" />
 
-                <TextView
-                    android:id="@+id/download"
+                <TextView style="@style/WidgetBtn"
+                    android:id="@+id/lan_push"
                     android:layout_width="wrap_content"
                     android:layout_height="wrap_content"
                     android:layout_marginEnd="8dp"
-                    android:background="@drawable/bg_r_common_stroke_primary"
                     android:gravity="center"
                     android:singleLine="true"
-                    android:textColor="@color/text_foreground"
                     android:paddingVertical="4dp"
                     android:paddingHorizontal="10dp"
-                    android:text="下载"
-                    android:visibility="gone"
-                    tools:visibility="visible"/>
+                    android:text="推送到电脑"
+                    android:visibility="gone" />
 
             </LinearLayout>
+            </HorizontalScrollView>
 
         </LinearLayout>
     </ScrollView>

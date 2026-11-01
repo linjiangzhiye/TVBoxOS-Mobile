@@ -1,0 +1,99 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 网络不可用页:文字/按钮全部走主题资源(text_main·text_sub 文字;按钮走全局样式
+     BtnPrimary/BtnSecondary —— 底色/文字色/圆角/描边都取自 theme_colors.json 的 btn_* 与 theme_radii.json),
+     **不要**在这里手写 android:background + textColor:Material 按钮会套主题 backgroundTint,手写背景会被盖掉
+     (实测:次按钮文字与底色同色 → "看不见字")。
+     根部显式透明:BaseActivity 的页面背景层(PageBackgroundView)插在内容容器最底层,
+     避免样式给 ScrollView 补上背景色后遮住用户背景图。
+     可滚动组件按 AGENTS §六保留内边距并 clipToPadding=false(TV/横屏小高度下内容不贴边、不裁死)。 -->
+<ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:background="@android:color/transparent"
+    android:clipToPadding="false"
+    android:fillViewport="true"
+    android:paddingLeft="24dp"
+    android:paddingRight="24dp"
+    android:paddingTop="24dp"
+    android:paddingBottom="24dp">
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:gravity="center"
+        android:orientation="vertical">
+
+        <ImageView
+            android:layout_width="120dp"
+            android:layout_height="wrap_content"
+            android:contentDescription="@null"
+            android:scaleType="fitCenter"
+            android:src="@drawable/ic_no_network" />
+
+        <TextView
+            android:id="@+id/tv_no_network_title"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="18dp"
+            android:gravity="center"
+            android:text="@string/no_network_title"
+            android:textColor="@color/text_main"
+            android:textSize="20sp"
+            android:textStyle="bold" />
+
+        <TextView
+            android:id="@+id/tv_no_network_hint"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:gravity="center"
+            android:text="@string/no_network_hint"
+            android:textColor="@color/text_sub"
+            android:textSize="14sp" />
+
+        <!-- 触发原因副标题:排查/反馈时能一眼看到"为什么弹了这一屏"(由 NoNetworkActivity 按 EXTRA_REASON 填,
+             没有原因时整条隐藏)。用比正文更弱的色,不抢主文案 -->
+        <TextView
+            android:id="@+id/tv_no_network_reason"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="6dp"
+            android:gravity="center"
+            android:textColor="@color/text_sub"
+            android:textSize="12sp"
+            android:visibility="gone"
+            tools:text="原因：无网络" />
+
+        <LinearLayout
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="26dp"
+            android:gravity="center"
+            android:orientation="horizontal">
+
+            <!-- insetTop/Bottom 归零:MaterialButton 默认上下各 6dp inset,40dp 的可见高度只剩 ~28dp,
+                 视觉上比其它页面的按钮小一圈(全项目其它按钮也都是显式归零 inset + 定高) -->
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/btn_no_network_back"
+                style="@style/BtnSecondary"
+                android:layout_width="wrap_content"
+                android:layout_height="40dp"
+                android:insetTop="0dp"
+                android:insetBottom="0dp"
+                android:minWidth="140dp"
+                android:text="@string/no_network_back" />
+
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/btn_no_network_got_it"
+                style="@style/BtnPrimary"
+                android:layout_width="wrap_content"
+                android:layout_height="40dp"
+                android:layout_marginStart="12dp"
+                android:insetTop="0dp"
+                android:insetBottom="0dp"
+                android:minWidth="140dp"
+                android:text="@string/no_network_got_it" />
+        </LinearLayout>
+    </LinearLayout>
+</ScrollView>

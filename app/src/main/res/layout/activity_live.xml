@@ -17,48 +17,6 @@
 			android:layout_width="match_parent"
 			android:layout_height="300dp" />
 
-		<LinearLayout
-			android:id="@+id/tvRightSettingLayout"
-			android:layout_width="wrap_content"
-			android:layout_height="wrap_content"
-			android:layout_marginRight="-361dp"
-			android:background="@drawable/bg_channel_list"
-			android:gravity="center_vertical"
-			android:orientation="horizontal"
-			android:visibility="gone" >
-
-			<com.owen.tvrecyclerview.widget.TvRecyclerView
-				android:id="@+id/mSettingItemView"
-				android:layout_width="180dp"
-				android:layout_height="match_parent"
-				android:paddingLeft="5dp"
-				android:paddingTop="10dp"
-				android:paddingRight="5dp"
-				android:paddingBottom="10dp"
-				android:visibility="visible"
-				android:gravity= "center"
-				app:tv_selectedItemIsCentered="true"
-				app:tv_verticalSpacingWithMargins="10dp" />
-
-			<View
-				android:layout_width="1dp"
-				android:layout_height="match_parent"
-				android:background="@color/color_FFFFFF"
-				android:layout_gravity="center_horizontal" />
-
-			<com.owen.tvrecyclerview.widget.TvRecyclerView
-				android:id="@+id/mSettingGroupView"
-				android:layout_width="180dp"
-				android:layout_height="match_parent"
-				android:paddingLeft="5dp"
-				android:paddingTop="10dp"
-				android:paddingRight="5dp"
-				android:paddingBottom="10dp"
-				android:visibility="visible"
-				android:gravity= "center"
-				app:tv_selectedItemIsCentered="true"
-				app:tv_verticalSpacingWithMargins="10dp" />
-		</LinearLayout>
 
 	</RelativeLayout>
 
@@ -68,7 +26,7 @@
 		android:id="@+id/ll_epg"
 		android:layout_width="match_parent"
 		android:layout_height="100dp"
-		android:background="@drawable/bg_large_round_gray"
+		android:background="@drawable/bg_large_round_float"
 		android:layout_margin="10dp">
 
 		<LinearLayout
@@ -90,6 +48,7 @@
 				android:paddingTop="0dp"
 				android:singleLine="true"
 				android:text="中央 HD"
+				android:textColor="@color/text_foreground"
 				android:textStyle="bold"
 				android:textSize="16sp" />
 
@@ -106,6 +65,7 @@
 				android:visibility="gone"
 				tools:visibility="visible"
 				android:textSize="16sp"
+				android:textColor="@color/text_foreground"
 				android:textStyle="bold"
 				android:layout_marginTop="6dp"/>
 
@@ -120,20 +80,22 @@
 			android:gravity="center"
 			android:layout_alignParentBottom="true">
 
+			<!-- 上一个/下一个线路:图标缩小一半(padding 吃掉一半),但**点击区域保持 30dp** ——
+			     这两个 ImageView 本身就是按钮(LiveActivity 里 setOnClickListener),不能靠缩 view 来缩小图标 -->
 			<ImageView
 				android:id="@+id/ic_pre_source"
 				android:layout_width="30dp"
 				android:layout_height="30dp"
-				android:src="@drawable/icon_pre"
+				android:src="@drawable/ic_seek_right"
 				app:tint="@color/text_foreground"
 				android:rotation="-180"
-				android:padding="4dp"
+				android:padding="10dp"
 				/>
 			<TextView
 				android:id="@+id/tv_source"
 				android:layout_width="wrap_content"
 				android:layout_height="wrap_content"
-				android:text="源 1/1"
+				android:text="线路 1/1"
 				android:layout_marginHorizontal="14dp"
 				android:textSize="16sp"
 				android:textColor="@color/text_foreground"
@@ -142,34 +104,52 @@
 				android:id="@+id/ic_next_source"
 				android:layout_width="30dp"
 				android:layout_height="30dp"
-				android:src="@drawable/icon_pre"
+				android:src="@drawable/ic_seek_right"
 				app:tint="@color/text_foreground"
-				android:padding="4dp"
+				android:padding="10dp"
 				/>
 		</LinearLayout>
 
-		<ImageView
-			android:id="@+id/ic_cast"
-			android:layout_width="34dp"
-			android:layout_height="34dp"
-			android:src="@drawable/ic_cast"
-			app:tint="@color/text_foreground"
-			android:padding="4dp"
-			android:layout_marginTop="10dp"
-			android:layout_toLeftOf="@+id/ic_setting"
-			android:layout_marginRight="14dp"
-			/>
-		<ImageView
-			android:id="@+id/ic_setting"
-			android:layout_width="34dp"
-			android:layout_height="34dp"
-			android:src="@drawable/ic_player_setting"
-			app:tint="@color/text_foreground"
-			android:padding="4dp"
+		<!-- 右上角三个操作钮(刷新 / 投屏 / 设置)收进一个横向容器:
+		     位置由**容器**统一负责(贴右上角 + marginTop/marginEnd),子项同尺寸并由容器
+		     gravity=center_vertical 保证垂直对齐,彼此间距用各自的 marginStart ——
+		     不再让三个图标各写一套 layout_toLeftOf / layout_alignParentEnd + marginTop 拼相对位置
+		     (那样垂直对齐全靠各自的 marginTop 凑,改一个图标的高度或边距就会错位)。 -->
+		<LinearLayout
+			android:layout_width="wrap_content"
+			android:layout_height="wrap_content"
+			android:layout_alignParentTop="true"
 			android:layout_alignParentEnd="true"
-			android:layout_marginRight="30dp"
 			android:layout_marginTop="10dp"
-			/>
+			android:layout_marginEnd="30dp"
+			android:baselineAligned="false"
+			android:gravity="center_vertical"
+			android:orientation="horizontal">
+
+			<ImageView
+				android:id="@+id/ic_refresh"
+				android:layout_width="32dp"
+				android:layout_height="32dp"
+				android:src="@drawable/dkplayer_ic_action_replay"
+				app:tint="@color/text_foreground"
+				android:padding="4dp" />
+			<ImageView
+				android:id="@+id/ic_cast"
+				android:layout_width="30dp"
+				android:layout_height="30dp"
+				android:layout_marginStart="10dp"
+				android:src="@drawable/ic_cast"
+				app:tint="@color/text_foreground"
+				android:padding="4dp" />
+			<ImageView
+				android:id="@+id/ic_setting"
+				android:layout_width="32dp"
+				android:layout_height="32dp"
+				android:layout_marginStart="10dp"
+				android:src="@drawable/ic_setting"
+				app:tint="@color/text_foreground"
+				android:padding="4dp" />
+		</LinearLayout>
 
 	</RelativeLayout>
 
@@ -189,36 +169,46 @@
 			android:layout_height="match_parent"
 			android:baselineAligned="false"
 			android:padding="0dp"
-			android:background="@drawable/bg_large_round_gray"
+			android:background="@drawable/bg_large_round_float"
+			android:clipToOutline="true"
 			android:layout_marginHorizontal="10dp"
 			android:layout_marginBottom="10dp">
 
-			<androidx.recyclerview.widget.RecyclerView
-				android:id="@+id/mGroupGridView"
-				android:layout_width="0dp"
-				android:layout_weight="1"
-				android:layout_height="wrap_content"
-				android:fadeScrollbars="false"
-				android:listSelector="@drawable/item_bg_selector_left"
-				android:paddingHorizontal="10dp"
-				android:scrollbars="none"
-				android:layout_gravity="center"
-				android:layout_marginLeft="40dp"
-				tools:listitem="@layout/item_live_channel_group_new"/>
+		<!-- 分组列 / 频道列:两张列表都是"圆角卡片内部滚动",按全站卡片约定
+		     内边距 + clipToPadding=false(与订阅管理、「我的」页、观看历史/收藏/快搜一致):
+		     首末条目离卡片上下边各留 10dp,滚动过程内容可见地滑过 padding 区、不贴卡片边缘/圆角。
 
-			<androidx.recyclerview.widget.RecyclerView
-				android:id="@+id/mChannelGridView"
-				android:layout_width="0dp"
-				android:layout_weight="1"
-				android:layout_height="match_parent"
-				android:fadeScrollbars="false"
-				android:focusable="true"
-				android:listSelector="@drawable/item_bg_selector_right"
-				android:scrollbars="none"
-				android:layout_marginLeft="30dp"
-				android:layout_marginRight="40dp"
-				tools:listitem="@layout/item_live_channel_new"
-				/>
+		     ★ 宽度分工(别再让两列平分卡片;分组名短、频道名长,平分等于把分组列的空白
+		       全从频道名身上扣):
+		       - 分组列固定 @dimen/dp_120(分组名多为 2~4 字,足够;超长仍走 marquee);
+		       - 频道列 0dp + weight=1 吃掉剩余全部宽度 —— 频道名(尤其"电台"分组)才有地方放;
+		       两列各自 10dp 内边距已构成视觉间距,故外层不再加 40/30/40dp 外边距(纯空白)。 -->
+		<androidx.recyclerview.widget.RecyclerView
+			android:id="@+id/mGroupGridView"
+			android:layout_width="@dimen/dp_140"
+			android:layout_height="wrap_content"
+			android:fadeScrollbars="false"
+			android:paddingHorizontal="10dp"
+			android:paddingVertical="10dp"
+			android:scrollbars="none"
+			android:layout_gravity="center"
+			tools:listitem="@layout/item_live_channel_group_new"
+			android:clipToPadding="false" />
+
+		<androidx.recyclerview.widget.RecyclerView
+			android:id="@+id/mChannelGridView"
+			android:layout_width="0dp"
+			android:layout_weight="1"
+			android:layout_height="match_parent"
+			android:fadeScrollbars="false"
+			android:focusable="true"
+			android:scrollbars="none"
+			tools:listitem="@layout/item_live_channel_new"
+
+			android:paddingHorizontal="10dp"
+			android:paddingVertical="10dp"
+			android:clipToPadding="false"
+			/>
 		</LinearLayout>
 	</LinearLayout>
 <!--添加EPG显示，更改样式 by 龍-->
@@ -236,6 +226,7 @@
         android:paddingBottom="5dp"
         android:textSize="36dp"
         android:textStyle="bold"
+        android:textColor="@color/white"
         android:visibility="gone" />
 
 </LinearLayout>

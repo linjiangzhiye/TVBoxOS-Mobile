@@ -1,34 +1,49 @@
 package com.github.tvbox.osc.ui.fragment;
 
+import android.content.BroadcastReceiver;
+import android.content.Context;
 import android.content.Intent;
+import android.content.IntentFilter;
 import android.net.Uri;
+import android.os.Handler;
+import android.os.Looper;
 import android.text.TextUtils;
+import android.view.View;
 
 import com.blankj.utilcode.util.AppUtils;
 import com.blankj.utilcode.util.ClipboardUtils;
-import com.blankj.utilcode.util.ToastUtils;
+import com.github.tvbox.osc.util.AppBubble;
 import com.github.tvbox.osc.R;
-import com.github.tvbox.osc.base.BaseLazyFragment;
 import com.github.tvbox.osc.base.BaseVbFragment;
 import com.github.tvbox.osc.databinding.FragmentMyBinding;
+import com.github.tvbox.osc.config.SystemConfig;
 import com.github.tvbox.osc.ui.activity.CollectActivity;
 import com.github.tvbox.osc.ui.activity.DetailActivity;
+import com.github.tvbox.osc.ui.activity.DownloadActivity;
 import com.github.tvbox.osc.ui.activity.HistoryActivity;
 import com.github.tvbox.osc.ui.activity.LiveActivity;
-import com.github.tvbox.osc.ui.activity.LocalPlayActivity;
 import com.github.tvbox.osc.ui.activity.MovieFoldersActivity;
 import com.github.tvbox.osc.ui.activity.SettingActivity;
 import com.github.tvbox.osc.ui.activity.SubscriptionActivity;
 import com.github.tvbox.osc.ui.dialog.AboutDialog;
-import com.github.tvbox.osc.util.FastClickCheckUtil;
-import com.github.tvbox.osc.util.Utils;
+import com.github.tvbox.osc.ui.dialog.DialogCoordinator;
+import com.github.tvbox.osc.ui.dialog.DialogStyle;
+import com.github.tvbox.osc.ui.dialog.PopupKeyboardPolicy;
+import com.github.tvbox.osc.update.UpdateCheck;
+import com.github.tvbox.osc.update.UpdateInfo;
+import com.github.tvbox.osc.util.BroadcastUtils;
+import com.github.tvbox.osc.viewmodel.HolidayDisplayViewModel;
 import com.hjq.permissions.OnPermissionCallback;
 import com.hjq.permissions.Permission;
 import com.hjq.permissions.XXPermissions;
 import com.lxj.xpopup.XPopup;
-import com.lxj.xpopup.interfaces.OnInputConfirmListener;
+import com.lxj.xpopup.core.BasePopupView;
+import com.lxj.xpopup.interfaces.SimpleCallback;
+
+import androidx.lifecycle.ViewModelProvider;
 
 import java.util.Arrays;
+import java.util.Calendar;
 import java.util.List;
 
 /**
@@ -38,13 +53,41 @@ import java.util.List;
  */
 public class MyFragment extends BaseVbFragment<FragmentMyBinding> {
 
+    private boolean updateCheckInProgress;
+    private HolidayDisplayViewModel holidayDisplayViewModel;
+    private final Handler calendarHandler = new Handler(Looper.getMainLooper());
+    private final Runnable calendarDayRollover = () -> {
+        refreshCalendar();
+        scheduleCalendarMidnight();
+    };
+    private final BroadcastReceiver calendarClockReceiver = new BroadcastReceiver() {
+        @Override
+        public void onReceive(Context context, Intent intent) {
+            refreshCalendar();
+            scheduleCalendarMidnight();
+        }
+    };
+    private Context calendarReceiverContext;
 
     @Override
     protected void init() {
         mBinding.tvVersion.setText("v"+ AppUtils.getAppVersionName());
+        holidayDisplayViewModel = new ViewModelProvider(this,
+                new HolidayDisplayViewModel.Factory(requireContext()))
+                .get(HolidayDisplayViewModel.class);
+        holidayDisplayViewModel.getHolidayName().observe(getViewLifecycleOwner(), this::showHolidayName);
+        refreshCalendar();
 
         mBinding.addrPlay.setOnClickListener(v ->{
             new XPopup.Builder(getContext())
+                    .maxWidth(DialogStyle.centerWidthPx(getContext()))
+                    .moveUpToKeyboard(false)
+                    .setPopupCallback(new SimpleCallback() {
+                        @Override
+                        public void onCreated(BasePopupView popupView) {
+                            PopupKeyboardPolicy.afterFocus(popupView);
+                        }
+                    })
                     .asInputConfirm("播放", "", isPush(ClipboardUtils.getText().toString())?ClipboardUtils.getText():"", "地址", text -> {
                         if (!TextUtils.isEmpty(text)){
                             Intent newIntent = new Intent(mContext, DetailActivity.class);
@@ -60,9 +103,15 @@ public class MyFragment extends BaseVbFragment<FragmentMyBinding> {
 
         mBinding.tvSetting.setOnClickListener(v -> jumpActivity(SettingActivity.class));
 
-        mBinding.tvHistory.setOnClickListener(v -> jumpActivity(HistoryActivity.class));
+        mBinding.llSubscription.setOnClickListener(v -> jumpActivity(SubscriptionActivity.class));
 
-        mBinding.tvFavorite.setOnClickListener(v -> jumpActivity(CollectActivity.class));
+        mBinding.tvHistory.setOnClickListener(v -> jumpActivity(HistoryActivity.class));
+        mBinding.llCollect.setOnClickListener(v -> jumpActivity(CollectActivity.class));
+
+        mBinding.tvDownload.setOnClickListener(v -> {
+            if (SystemConfig.isInternalDownloadEnabled()) jumpActivity(DownloadActivity.class);
+        });
+        refreshDownloadEntry();
 
         mBinding.tvLocal.setOnClickListener(v -> {
             if (!XXPermissions.isGranted(mContext, Permission.MANAGE_EXTERNAL_STORAGE)) {
@@ -72,21 +121,120 @@ public class MyFragment extends BaseVbFragment<FragmentMyBinding> {
             }
         });
 
-        mBinding.llSubscription.setOnClickListener(v -> jumpActivity(SubscriptionActivity.class));
+        mBinding.llCheckUpdate.setOnClickListener(v -> checkUpdate());
 
         mBinding.llAbout.setOnClickListener(v -> {
-            new XPopup.Builder(mActivity)
-                    .asCustom(new AboutDialog(mActivity))
-                    .show();
+            // AboutDialog 是 AppBottomPopupView(底部抽屉):必须走 DialogCoordinator.bottom —— 它带的
+            // isViewMode(true) + hasNavigationBar(false) 才是"和其它抽屉同款"的弹法(贴底、不留导航栏缝、
+            // 手势条不闪)。原来走 center(...)(它只是 asCustom,不改位置但**少了这两个参数**),
+            // 结果是同一个抽屉面板在不同入口下弹出位置/底边观感不一致(用户口径:"关于的抽屉圆角和别的抽屉不一致")。
+            DialogCoordinator.bottom(mActivity, new AboutDialog(mActivity), 0).show();
+        });
+    }
+
+    @Override
+    public void onResume() {
+        super.onResume();
+        // 从设置页返回后立刻同步开关;GONE 让后续菜单项自动补位。
+        refreshDownloadEntry();
+        refreshCalendar();
+        startCalendarUpdates();
+    }
+
+    @Override
+    public void onPause() {
+        stopCalendarUpdates();
+        super.onPause();
+    }
+
+    @Override
+    public void onDestroyView() {
+        stopCalendarUpdates();
+        super.onDestroyView();
+    }
+
+    private void refreshCalendar() {
+        if (holidayDisplayViewModel != null) holidayDisplayViewModel.refresh();
+    }
+
+    private void showHolidayName(String holiday) {
+        if (getView() == null) return;
+        boolean visible = !TextUtils.isEmpty(holiday);
+        mBinding.tvCalendarFestival.setText(visible ? holiday : "");
+        mBinding.tvCalendarFestival.setVisibility(visible ? View.VISIBLE : View.GONE);
+    }
+
+    private void startCalendarUpdates() {
+        if (calendarReceiverContext == null) {
+            IntentFilter filter = new IntentFilter();
+            filter.addAction(Intent.ACTION_DATE_CHANGED);
+            filter.addAction(Intent.ACTION_TIME_CHANGED);
+            filter.addAction(Intent.ACTION_TIMEZONE_CHANGED);
+            Context context = requireContext();
+            BroadcastUtils.registerReceiverNotExported(context, calendarClockReceiver, filter);
+            calendarReceiverContext = context;
+        }
+        scheduleCalendarMidnight();
+    }
+
+    private void scheduleCalendarMidnight() {
+        calendarHandler.removeCallbacks(calendarDayRollover);
+        if (calendarReceiverContext == null) return;
+        Calendar now = Calendar.getInstance();
+        Calendar next = (Calendar) now.clone();
+        next.add(Calendar.DAY_OF_MONTH, 1);
+        next.set(Calendar.HOUR_OF_DAY, 0);
+        next.set(Calendar.MINUTE, 0);
+        next.set(Calendar.SECOND, 0);
+        next.set(Calendar.MILLISECOND, 0);
+        calendarHandler.postDelayed(calendarDayRollover,
+                Math.max(1000L, next.getTimeInMillis() - now.getTimeInMillis() + 1000L));
+    }
+
+    private void stopCalendarUpdates() {
+        calendarHandler.removeCallbacks(calendarDayRollover);
+        if (calendarReceiverContext != null) {
+            calendarReceiverContext.unregisterReceiver(calendarClockReceiver);
+            calendarReceiverContext = null;
+        }
+    }
+
+    private void refreshDownloadEntry() {
+        mBinding.tvDownload.setVisibility(SystemConfig.isInternalDownloadEnabled()
+                ? View.VISIBLE : View.GONE);
+    }
+
+    private void checkUpdate() {
+        if (updateCheckInProgress) return;
+        updateCheckInProgress = true;
+        UpdateCheck.check(mActivity, new UpdateCheck.Listener() {
+            @Override
+            public void onChecking() {
+            }
+
+            @Override
+            public boolean onResult(UpdateInfo newVersion) {
+                updateCheckInProgress = false;
+                if (!isResumed() || !getUserVisibleHint()) return true;
+                if (newVersion == null) {
+                    AppBubble.toast("已是最新版本");
+                    return true;
+                }
+                return false; // 复用现有更新说明弹窗，由 UpdateCheck 显示。
+            }
+
+            @Override
+            public void onFailed(String message) {
+                updateCheckInProgress = false;
+                if (isResumed() && getUserVisibleHint()) AppBubble.toast(message);
+            }
         });
     }
 
     private void showPermissionTipPopup(){
-        new XPopup.Builder(mActivity)
-                .isDarkTheme(Utils.isDarkTheme())
-                .asConfirm("提示","为了播放视频、音频等,我们需要访问您设备文件的读写权限", () -> {
-                    getPermission();
-                }).show();
+        // 统一主题化确认弹窗(替代 XPopup 默认 asConfirm)
+        com.github.tvbox.osc.ui.dialog.ConfirmDialog.show(mActivity, "提示",
+                "为了播放视频、音频等,我们需要访问您设备文件的读写权限", "去授权", this::getPermission);
     }
 
     private void getPermission(){
@@ -98,18 +246,18 @@ public class MyFragment extends BaseVbFragment<FragmentMyBinding> {
                         if (all) {
                             jumpActivity(MovieFoldersActivity.class);
                         }else {
-                            ToastUtils.showLong("部分权限未正常授予,请授权");
+                            AppBubble.toast("请授予所需权限");
                         }
                     }
 
                     @Override
                     public void onDenied(List<String> permissions, boolean never) {
                         if (never) {
-                            ToastUtils.showLong("读写文件权限被永久拒绝，请手动授权");
+                            AppBubble.toast("请在系统设置中授予文件权限");
                             // 如果是被永久拒绝就跳转到应用权限系统设置页面
                             XXPermissions.startPermissionActivity(mActivity, permissions);
                         } else {
-                            ToastUtils.showShort("获取权限失败");
+                            AppBubble.toast("获取权限失败");
                             showPermissionTipPopup();
                         }
                     }

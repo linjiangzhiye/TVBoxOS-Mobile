@@ -1,0 +1,115 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 更新下载信息弹窗:版本 + 当前下载链路 + 进度 + 暂停/继续 + 不再更新 + 安装(下载完成后) -->
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    xmlns:tools="http://schemas.android.com/tools"
+    android:layout_width="320dp"
+    android:layout_height="wrap_content"
+    android:background="@drawable/bg_dialog"
+    android:orientation="vertical"
+    android:padding="@dimen/dp_20">
+
+    <!-- 标题行:gravity=center_vertical —— 关闭键 40dp 比 16sp 的标题高,
+         不居中两者就会一高一低。本弹窗的关闭键尺寸是全站基准(见 styles.xml 的 DialogCloseButton) -->
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:gravity="center_vertical"
+        android:orientation="horizontal">
+
+        <TextView
+            android:id="@+id/update_title"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:singleLine="true"
+            android:text="APP更新下载"
+            android:textColor="@color/text_foreground"
+            android:textSize="16sp"
+            android:textStyle="bold" />
+
+        <ImageView
+            android:id="@+id/iv_close"
+            style="@style/DialogCloseButton"
+            app:tint="@color/text_foreground" />
+    </LinearLayout>
+
+    <TextView
+        android:id="@+id/update_version"
+        android:layout_width="wrap_content"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="@dimen/dp_10"
+        android:textColor="@color/text_foreground"
+        android:textSize="14sp"
+        tools:text="发现新版本 v3.2.0" />
+
+    <TextView
+        android:id="@+id/update_download_route"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="@dimen/dp_10"
+        android:maxLines="2"
+        android:textColor="@color/text_sub_foreground"
+        android:textSize="13sp"
+        tools:text="当前下载链路：Gitee（gitee.com）" />
+
+    <ProgressBar
+        android:id="@+id/update_progress"
+        style="?android:attr/progressBarStyleHorizontal"
+        android:layout_width="match_parent"
+        android:layout_height="6dp"
+        android:layout_marginTop="@dimen/dp_20"
+        android:max="100" />
+
+    <!-- 下载状态行(下载中 x% / 已暂停 / 下载完成 / 下载失败):右对齐。
+         这一行同时承担"进度"和"完成"两种文案,统一靠右,与左侧版本号形成左右分栏的观感。
+         width 用 match_parent + gravity=end(而不是 wrap_content + layout_gravity=end):
+         文案长度随百分比与大小变化,固定贴右边缘才不会看着左右跳。 -->
+    <TextView
+        android:id="@+id/update_progress_text"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="@dimen/dp_10"
+        android:gravity="end"
+        android:textColor="@color/text_foreground"
+        android:textSize="13sp"
+        tools:text="下载中 40% (12.3MB/30.5MB)" />
+
+    <LinearLayout
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="@dimen/dp_20"
+        android:orientation="horizontal">
+
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/btn_pause_resume"
+            style="@style/BtnSecondary"
+            android:layout_width="0dp"
+            android:layout_height="44dp"
+            android:layout_weight="1"
+            android:focusable="true"
+            android:text="暂停" />
+
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/btn_dismiss"
+            style="@style/BtnDangerGhost"
+            android:layout_width="0dp"
+            android:layout_height="44dp"
+            android:layout_marginLeft="@dimen/dp_10"
+            android:layout_weight="1"
+            android:focusable="true"
+            android:text="放弃更新" />
+
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/btn_install"
+            style="@style/BtnPrimary"
+            android:layout_width="0dp"
+            android:layout_height="44dp"
+            android:layout_marginLeft="@dimen/dp_10"
+            android:layout_weight="1"
+            android:focusable="true"
+            android:text="安装"
+            android:visibility="gone" />
+    </LinearLayout>
+
+</LinearLayout>

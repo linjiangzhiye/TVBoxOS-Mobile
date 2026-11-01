@@ -1,0 +1,49 @@
+package com.github.tvbox.osc.ui.activity
+
+import com.github.tvbox.osc.base.BaseVbActivity
+import com.github.tvbox.osc.R
+import com.github.tvbox.osc.databinding.ActivityDownloadBinding
+import com.github.tvbox.osc.ui.dialog.DownloadSettingsDialog
+import com.github.tvbox.osc.ui.fragment.DownloadFragment
+import com.github.tvbox.osc.util.Utils
+import com.lxj.xpopup.XPopup
+
+/**
+ * 下载页(我的-下载):内部按 正在下载 / 下载完成 两个 tab 展示。
+ * 标题栏:返回 + "下载管理" + 右侧齿轮(下载设置弹窗:并发 SelectDialog + 仅WiFi 开关,与全局设置页同一事实源)。
+ */
+class DownloadActivity : BaseVbActivity<ActivityDownloadBinding>() {
+
+    /** 内容区左右滑动切 tab 的手势追踪(只观察、不消费事件;见 TabSwipeHelper 的说明) */
+    private val swipeTracker by lazy {
+        com.github.tvbox.osc.ui.kit.TabSwipeHelper.tracker(this) { dir ->
+            // 左滑 = 下一个 tab(下载完成),右滑 = 上一个(正在下载);不在详情态时这个调用是空转
+            (supportFragmentManager.findFragmentById(mBinding.container.id) as? DownloadFragment)
+                ?.onTabSwipe(dir)
+        }
+    }
+
+    override fun dispatchTouchEvent(ev: android.view.MotionEvent): Boolean {
+        swipeTracker.onTouch(ev)
+        return super.dispatchTouchEvent(ev)
+    }
+
+    override fun init() {
+        supportFragmentManager.beginTransaction()
+            .replace(mBinding.container.id, DownloadFragment())
+            .commitAllowingStateLoss()
+        // 标题栏右侧齿轮:图标在布局里(iv_setting,尺寸/位置在 XML 调),点击 = 下载设置弹窗
+        mBinding.ivSetting.setOnClickListener {
+            XPopup.Builder(this)
+                .isDarkTheme(Utils.isDarkTheme()) // 遮罩/弹窗样式跟随主题
+                .asCustom(DownloadSettingsDialog(this))
+                .show()
+        }
+    }
+
+    override fun onBackPressed() {
+        val f = supportFragmentManager.findFragmentById(mBinding.container.id) as? DownloadFragment
+        if (f != null && f.onBackPressed()) return
+        super.onBackPressed()
+    }
+}

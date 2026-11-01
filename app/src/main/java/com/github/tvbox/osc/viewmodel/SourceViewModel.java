@@ -1,14 +1,12 @@
 package com.github.tvbox.osc.viewmodel;
 
+import android.os.Handler;
+import android.os.Looper;
 import android.text.TextUtils;
-
 import android.util.Base64;
 import androidx.lifecycle.MutableLiveData;
 import androidx.lifecycle.ViewModel;
 
-import com.blankj.utilcode.util.ToastUtils;
-import com.github.catvod.crawler.Spider;
-import com.github.tvbox.osc.api.ApiConfig;
 import com.github.tvbox.osc.base.App;
 import com.github.tvbox.osc.bean.AbsJson;
 import com.github.tvbox.osc.bean.AbsSortJson;
@@ -17,39 +15,40 @@ import com.github.tvbox.osc.bean.AbsXml;
 import com.github.tvbox.osc.bean.Movie;
 import com.github.tvbox.osc.bean.MovieSort;
 import com.github.tvbox.osc.bean.SourceBean;
-import com.github.tvbox.osc.event.RefreshEvent;
+import com.github.tvbox.osc.log.Category;
+import com.github.tvbox.osc.log.LogStore;
 import com.github.tvbox.osc.util.DefaultConfig;
-import com.github.tvbox.osc.util.HawkConfig;
+import com.github.tvbox.osc.util.HCallBack;
+import com.github.tvbox.osc.util.HttpClient;
+import com.github.tvbox.osc.util.HeavyTaskUtil;
 import com.github.tvbox.osc.util.LOG;
+import com.github.tvbox.osc.config.SystemConfig;
 import com.github.tvbox.osc.util.thunder.Thunder;
+import com.github.tvbox.osc.spiderapi.SourceConfigApi;
+import com.github.tvbox.osc.spiderapi.SourceConfigProviders;
 import com.google.gson.Gson;
-import com.google.gson.JsonArray;
-import com.google.gson.JsonElement;
-import com.google.gson.JsonObject;
 import com.google.gson.JsonParser;
 import com.google.gson.reflect.TypeToken;
-import com.lzy.okgo.OkGo;
-import com.lzy.okgo.callback.AbsCallback;
-import com.lzy.okgo.model.Response;
-import com.orhanobut.hawk.Hawk;
 import com.thoughtworks.xstream.XStream;
 import com.thoughtworks.xstream.io.xml.DomDriver;
+import com.thoughtworks.xstream.security.NoTypePermission;
 
-import org.greenrobot.eventbus.EventBus;
+import org.json.JSONArray;
 import org.json.JSONObject;
 
 import java.io.UnsupportedEncodingException;
 import java.util.ArrayList;
-import java.util.LinkedHashMap;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.Callable;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.function.Consumer;
 
 /**
  * @author pj567
@@ -57,9 +56,10 @@ import java.util.concurrent.TimeoutException;
  * @description:
  */
 public class SourceViewModel extends ViewModel {
+    /** “我的→播放链接”输入框投递用的虚拟源 key(本地构造详情,不查订阅) */
+    public static final String PUSH_AGENT_KEY = "push_agent";
     public MutableLiveData<AbsSortXml> sortResult;
     public MutableLiveData<AbsXml> listResult;
-    public MutableLiveData<AbsXml> searchResult;
     public MutableLiveData<AbsXml> quickSearchResult;
     public MutableLiveData<AbsXml> detailResult;
     public MutableLiveData<JSONObject> playResult;
@@ -67,354 +67,495 @@ public class SourceViewModel extends ViewModel {
     public SourceViewModel() {
         sortResult = new MutableLiveData<>();
         listResult = new MutableLiveData<>();
-        searchResult = new MutableLiveData<>();
         quickSearchResult = new MutableLiveData<>();
         detailResult = new MutableLiveData<>();
         playResult = new MutableLiveData<>();
+        // 源配置元信息契约(AppCompositionRoot 已注入 :spider 的 ApiConfig 实现;可注入 Fake)
+        sourceConfig = SourceConfigProviders.get();
     }
 
-    public static final ExecutorService spThreadPool = Executors.newSingleThreadExecutor();
+    /** 源配置元信息契约(源注册表/首页源/vip 解析旗标;不再直读 :spider 的 ApiConfig) */
+    private final SourceConfigApi sourceConfig;
+    /** 首页源可能在旧请求返回前被切换；后台解析完成后只发布最新一轮。 */
+    private final AtomicInteger homeSortEpoch = new AtomicInteger();
+    private final Handler homeSortMain = new Handler(Looper.getMainLooper());
+    private final AtomicInteger listEpoch = new AtomicInteger();
+    private final Handler listMain = new Handler(Looper.getMainLooper());
+    private final DetailRequestGate detailGate = new DetailRequestGate();
+    private final Handler detailMain = new Handler(Looper.getMainLooper());
+
+    /** 详情的旧回调即使已经排到主线程，也不能覆盖随后发起的新请求。 */
+    static final class DetailRequestGate {
+        private final AtomicInteger epoch = new AtomicInteger();
+        private volatile boolean cleared;
+
+        int begin() { return cleared ? -1 : epoch.incrementAndGet(); }
+        boolean isCurrent(int request) { return !cleared && request > 0 && epoch.get() == request; }
+        boolean deliverIfCurrent(int request, Runnable publish) {
+            if (!isCurrent(request)) return false;
+            publish.run();
+            return true;
+        }
+        boolean postIfCurrent(int request, Consumer<Runnable> post, Runnable publish) {
+            if (!isCurrent(request)) return false;
+            post.accept(() -> deliverIfCurrent(request, publish));
+            return true;
+        }
+        void invalidate() {
+            cleared = true;
+            epoch.incrementAndGet();
+        }
+    }
+
+    private void publishHomeSortResult(int epoch, AbsSortXml result) {
+        // 排队期间也可能切换源；在主线程真正投递 LiveData 时再次确认轮次。
+        homeSortMain.post(() -> {
+            if (homeSortEpoch.get() == epoch) sortResult.setValue(result);
+        });
+    }
+
+    private void publishListResult(int epoch, AbsXml result) {
+        listMain.post(() -> {
+            if (listEpoch.get() == epoch) listResult.setValue(result);
+        });
+    }
+
+    private void publishDetailResult(int epoch, AbsXml result) {
+        detailGate.postIfCurrent(epoch, task -> detailMain.post(task),
+                () -> detailResult.setValue(result));
+    }
+
+    /**
+     * 按源分道提交爬虫任务:同一 sourceKey 恒定同一单线程道(串行,保护 quickjs 上下文/jar 实例),
+     * 不同源并行,消除"一个慢详情/播放解析 head-of-line 阻塞其余接口"。
+     * (取代旧的 spThreadPool 全局单线程提交——该池现仅剩无 key 兜底用途,新代码一律走本方法)
+     */
+    private static void spExecute(String sourceKey, Runnable task) {
+        com.github.catvod.crawler.SpiderApi.executeSerial(sourceKey, task);
+    }
 
     // homeContent
     public void getSort(String sourceKey) {
+        final int epoch = homeSortEpoch.incrementAndGet();
         if (sourceKey == null) {
-            sortResult.postValue(null);
+            publishHomeSortResult(epoch, null);
             return;
         }
-        SourceBean sourceBean = ApiConfig.get().getSource(sourceKey);
+        SourceBean sourceBean = sourceConfig.getSource(sourceKey);
+        if (sourceBean == null) {
+            // 源不存在(订阅刚被换掉/删除):原来直接 sourceBean.getType() 抛 NPE →
+            // 首页永远收不到"本轮结束" → loading 一直转(与 getDetail 同一防御)
+            publishHomeSortResult(epoch, null);
+            return;
+        }
         int type = sourceBean.getType();
         if (type == 3) {
+            // 调试辅助:jar 源首页加载 trace(定位 jar 内 toast 触发源;tag=SpiderTrace)
+            android.util.Log.i("SpiderTrace", "[首页] " + sourceBean.getName() + " type=3 homeContent 开始");
+            long traceStart = System.currentTimeMillis();
             Runnable waitResponse = new Runnable() {
                 @Override
                 public void run() {
-                    ExecutorService executor = Executors.newSingleThreadExecutor();
-                    Future<String> future = executor.submit(new Callable<String>() {
-                        @Override
-                        public String call() throws Exception {
-                            Spider sp = ApiConfig.get().getCSP(sourceBean);
-                            return sp.homeContent(true);
-                        }
-                    });
-                    String sortJson = null;
+                    // 线程池治理(改进.txt §六):不再每轮 newSingleThreadExecutor 后 shutdown,
+                    // 直接提交应用级共享大池(HeavyTaskUtil),15s 超时 + cancel 语义不变
+                    ExecutorService executor = HeavyTaskUtil.getBigTaskExecutorService();
+                    boolean typedHit = false;
                     try {
-                        sortJson = future.get(15, TimeUnit.SECONDS);
-                    } catch (TimeoutException e) {
-                        e.printStackTrace();
-                        future.cancel(true);
-                    } catch (InterruptedException | ExecutionException e) {
-                        e.printStackTrace();
-                    } finally {
-                        if (sortJson != null) {
-                            AbsSortXml sortXml = sortJson(sortResult, sortJson);
-                            if (sortXml != null && Hawk.get(HawkConfig.HOME_REC, 0) == 1) {
-                                AbsXml absXml = json(null, sortJson, sourceBean.getKey());
-                                if (absXml != null && absXml.movie != null && absXml.movie.videoList != null && absXml.movie.videoList.size() > 0) {
-                                    sortXml.videoList = absXml.movie.videoList;
-                                    sortResult.postValue(sortXml);
-                                } else {
-                                    getHomeRecList(sourceBean, null, new HomeRecCallback() {
-                                        @Override
-                                        public void done(List<Movie.Video> videos) {
-                                            sortXml.videoList = videos;
-                                            sortResult.postValue(sortXml);
-                                        }
-                                    });
-                                }
-                            } else {
-                                sortResult.postValue(sortXml);
+                        AbsSortXml sortXml = null;
+                        List<Movie.Video> embedded = null; // 同响应内嵌首页视频(若有)
+                        // 强类型试点:homeContent 解析下沉 :spider(15s 超时保护,与旧字符串链路一致)
+                        Future<AbsSortXml> typedFuture = executor.submit(new Callable<AbsSortXml>() {
+                            @Override
+                            public AbsSortXml call() {
+                                return com.github.tvbox.osc.spiderapi.SpiderHomeProviders.get()
+                                        .homeContent(sourceBean.getKey(), true);
                             }
-                        } else {
-                            sortResult.postValue(null);
-                        }
+                        });
                         try {
-                            executor.shutdown();
-                        } catch (Throwable th) {
-                            th.printStackTrace();
+                            sortXml = typedFuture.get(15, TimeUnit.SECONDS);
+                        } catch (TimeoutException e) {
+                            e.printStackTrace();
+                            typedFuture.cancel(true);
+                        } catch (InterruptedException | ExecutionException e) {
+                            e.printStackTrace();
                         }
+                        typedHit = sortXml != null;
+                        if (typedHit) {
+                            // impl 已把响应内嵌 list(首页视频)解析到 sortXml.videoList
+                            embedded = sortXml.videoList;
+                        } else {
+                            android.util.Log.w("SpiderBridge", "home(typed) 无结果/超时,回退字符串通道: key="
+                                    + sourceBean.getKey());
+                            // 字符串通道回退:旧链路语义(拉串后按 sortJson 解析)
+                            Future<String> stringFuture = executor.submit(new Callable<String>() {
+                                @Override
+                                public String call() throws Exception {
+                                    return com.github.tvbox.osc.spiderapi.SpiderContentProviders.get()
+                                            .homeContent(sourceBean.getKey(), true);
+                                }
+                            });
+                            String sortJson = null;
+                            try {
+                                sortJson = stringFuture.get(15, TimeUnit.SECONDS);
+                            } catch (TimeoutException e) {
+                                e.printStackTrace();
+                                stringFuture.cancel(true);
+                            } catch (InterruptedException | ExecutionException e) {
+                                e.printStackTrace();
+                            }
+                            if (sortJson != null) {
+                                sortXml = sortJson(sortJson);
+                                // 旧 json() 语义:同响应可能内嵌首页视频(list)
+                                if (sortXml != null && sortXml.list != null && sortXml.list.videoList != null
+                                        && !sortXml.list.videoList.isEmpty()) {
+                                    embedded = sortXml.list.videoList;
+                                }
+                            }
+                        }
+                        publishHomeSort(sourceBean, sortXml, embedded, epoch);
+                    } catch (Throwable th) {
+                        // 每条路径都必须让首页收到"本轮结束"(与 getList 同一教训):
+                        // 原来只 printStackTrace,源抛异常/网络被快速失败时 sortResult 永不发射 →
+                        // 首屏 loading 一直转(离线冷启动 + 从"网络不可用"页返回就是这个现象)
+                        th.printStackTrace();
+                        publishHomeSortResult(epoch, null);
+                    } finally {
+                        android.util.Log.i("SpiderTrace", "[首页] " + sourceBean.getName()
+                                + " homeContent 结束 耗时=" + (System.currentTimeMillis() - traceStart)
+                                + "ms typed=" + typedHit);
                     }
                 }
             };
-            spThreadPool.execute(waitResponse);
+            spExecute(sourceBean.getKey(), waitResponse);
         } else if (type == 0 || type == 1) {
-            OkGo.<String>get(sourceBean.getApi())
-                    .tag(sourceBean.getKey() + "_sort")
-                    .execute(new AbsCallback<String>() {
+            HttpClient.get(sourceBean.getApi(), null, sourceBean.getKey() + "_sort", new HCallBack() {
                         @Override
-                        public String convertResponse(okhttp3.Response response) throws Throwable {
-                            if (response.body() != null) {
-                                return response.body().string();
-                            } else {
-                                throw new IllegalStateException("网络请求错误");
-                            }
-                        }
-
-                        @Override
-                        public void onSuccess(Response<String> response) {
-                            AbsSortXml sortXml = null;
-                            if (type == 0) {
-                                String xml = response.body();
-                                sortXml = sortXml(sortResult, xml);
-                            } else if (type == 1) {
-                                String json = response.body();
-                                sortXml = sortJson(sortResult, json);
-                            }
-                            if (sortXml != null && Hawk.get(HawkConfig.HOME_REC, 0) == 1 && sortXml.list != null && sortXml.list.videoList != null && sortXml.list.videoList.size() > 0) {
-                                ArrayList<String> ids = new ArrayList<>();
-                                for (Movie.Video vod : sortXml.list.videoList) {
-                                    ids.add(vod.id);
-                                }
-                                AbsSortXml finalSortXml = sortXml;
-                                getHomeRecList(sourceBean, ids, new HomeRecCallback() {
-                                    @Override
-                                    public void done(List<Movie.Video> videos) {
-                                        finalSortXml.videoList = videos;
-                                        sortResult.postValue(finalSortXml);
+                        public void onSuccess(String content) {
+                            // HttpClient 在主线程回调；XML/JSON 解析不能占住开屏最后几帧。
+                            final boolean homeRecEnabled = SystemConfig.getHomeRec() == 1;
+                            HeavyTaskUtil.executeBigTask(() -> {
+                                if (homeSortEpoch.get() != epoch) return;
+                                try {
+                                    AbsSortXml sortXml = type == 0 ? sortXml(content) : sortJson(content);
+                                    if (homeSortEpoch.get() != epoch) return;
+                                    if (sortXml != null && homeRecEnabled && sortXml.list != null
+                                            && sortXml.list.videoList != null && !sortXml.list.videoList.isEmpty()) {
+                                        ArrayList<String> ids = new ArrayList<>();
+                                        for (Movie.Video vod : sortXml.list.videoList) ids.add(vod.id);
+                                        AbsSortXml finalSortXml = sortXml;
+                                        getHomeRecList(sourceBean, ids, videos -> {
+                                            finalSortXml.videoList = videos;
+                                            publishHomeSortResult(epoch, finalSortXml);
+                                        });
+                                    } else {
+                                        publishHomeSortResult(epoch, sortXml);
                                     }
-                                });
-                            } else {
-                                sortResult.postValue(sortXml);
-                            }
+                                } catch (Throwable th) {
+                                    th.printStackTrace();
+                                    publishHomeSortResult(epoch, null);
+                                }
+                            });
                         }
 
                         @Override
-                        public void onError(Response<String> response) {
-                            super.onError(response);
-                            sortResult.postValue(null);
+                        public void onError(Throwable e) {
+                            publishHomeSortResult(epoch, null);
                         }
                     });
         }else if (type == 4) {
-            OkGo.<String>get(sourceBean.getApi())
-                .tag(sourceBean.getKey() + "_sort")
-                .params("filter", "true")
-                .execute(new AbsCallback<String>() {
+            Map<String, String> sortParams = new HashMap<>();
+            sortParams.put("filter", "true");
+            HttpClient.get(sourceBean.getApi(), sortParams, null, sourceBean.getKey() + "_sort", new HCallBack() {
                     @Override
-                    public String convertResponse(okhttp3.Response response) throws Throwable {
-                        if (response.body() != null) {
-                            return response.body().string();
-                        } else {
-                            throw new IllegalStateException("网络请求错误");
-                        }
-                    }
-
-                    @Override
-                    public void onSuccess(Response<String> response) {
-                        String sortJson  = response.body();
-                        if (sortJson != null) {
-                            AbsSortXml sortXml = sortJson(sortResult, sortJson);
-                            if (sortXml != null && Hawk.get(HawkConfig.HOME_REC, 0) == 1) {
-                                AbsXml absXml = json(null, sortJson, sourceBean.getKey());
-                                if (absXml != null && absXml.movie != null && absXml.movie.videoList != null && absXml.movie.videoList.size() > 0) {
-                                    sortXml.videoList = absXml.movie.videoList;
-                                    sortResult.postValue(sortXml);
-                                } else {
-                                    getHomeRecList(sourceBean, null, new HomeRecCallback() {
-                                        @Override
-                                        public void done(List<Movie.Video> videos) {
+                    public void onSuccess(String sortJson) {
+                        final boolean homeRecEnabled = SystemConfig.getHomeRec() == 1;
+                        HeavyTaskUtil.executeBigTask(() -> {
+                            if (homeSortEpoch.get() != epoch) return;
+                            try {
+                                AbsSortXml sortXml = sortJson == null ? null : sortJson(sortJson);
+                                if (homeSortEpoch.get() != epoch) return;
+                                if (sortXml != null && homeRecEnabled) {
+                                    AbsXml absXml = json(null, sortJson, sourceBean.getKey());
+                                    if (absXml != null && absXml.movie != null && absXml.movie.videoList != null
+                                            && !absXml.movie.videoList.isEmpty()) {
+                                        sortXml.videoList = absXml.movie.videoList;
+                                        publishHomeSortResult(epoch, sortXml);
+                                    } else {
+                                        getHomeRecList(sourceBean, null, videos -> {
                                             sortXml.videoList = videos;
-                                            sortResult.postValue(sortXml);
-                                        }
-                                    });
+                                            publishHomeSortResult(epoch, sortXml);
+                                        });
+                                    }
+                                } else {
+                                    publishHomeSortResult(epoch, sortXml);
                                 }
-                            } else {
-                                sortResult.postValue(sortXml);
+                            } catch (Throwable th) {
+                                th.printStackTrace();
+                                publishHomeSortResult(epoch, null);
                             }
-                        } else {
-                            sortResult.postValue(null);
-                        }
+                        });
                     }
 
                     @Override
-                    public void onError(Response<String> response) {
-                        super.onError(response);
-                        sortResult.postValue(null);
+                    public void onError(Throwable e) {
+                        publishHomeSortResult(epoch, null);
                     }
                 });
         } else {
-            sortResult.postValue(null);
+            publishHomeSortResult(epoch, null);
         }
     }
     // categoryContent
     public void getList(MovieSort.SortData sortData, int page) {
-        SourceBean homeSourceBean = ApiConfig.get().getHomeSourceBean();
+        final int epoch = listEpoch.incrementAndGet();
+        SourceBean homeSourceBean = sourceConfig.getHomeSourceBean();
         int type = homeSourceBean.getType();
         if (type == 3) {
-            spThreadPool.execute(new Runnable() {
+            spExecute(homeSourceBean.getKey(), new Runnable() {
                 @Override
                 public void run() {
+                    if (listEpoch.get() != epoch) return;
                     try {
-                        Spider sp = ApiConfig.get().getCSP(homeSourceBean);
-                        json(listResult, sp.categoryContent(sortData.id, page + "", true, sortData.filterSelect), homeSourceBean.getKey());
+                        // type3 的强类型实现和旧字符串通道最终都调用同一个爬虫、同一个解析器。
+                        // 失败后再次回退只会重复请求该源（尤其会让异常的分类接口再抛一次）。
+                        com.github.tvbox.osc.bean.AbsXml typed =
+                                com.github.tvbox.osc.spiderapi.SpiderHomeProviders.get().category(
+                                        homeSourceBean.getKey(), sortData.id, page + "", true, sortData.filterSelect);
+                        if (typed != null && typed.movie != null) {
+                            absXml(typed, homeSourceBean.getKey());
+                            publishListResult(epoch, typed);
+                        } else {
+                            publishListResult(epoch, null);
+                        }
                     } catch (Throwable th) {
-                        th.printStackTrace();
+                        // 异常也必须收尾，避免分类页的加载动画一直盖住列表。
+                        LogStore.fail(Category.SUBSCRIPTION, "分类加载异常: " + homeSourceBean.getName()
+                                + " 第" + page + "页, " + th);
+                        publishListResult(epoch, null);
                     }
                 }
             });
-        } else if (type == 0 || type == 1) {
-            OkGo.<String>get(homeSourceBean.getApi())
-                    .tag(homeSourceBean.getApi())
-                    .params("ac", type == 0 ? "videolist" : "detail")
-                    .params("t", sortData.id)
-                    .params("pg", page)
-                    .params(sortData.filterSelect)
-                    .params("f", (sortData.filterSelect == null || sortData.filterSelect.size() <= 0) ? "" : new JSONObject(sortData.filterSelect).toString())
-                    .execute(new AbsCallback<String>() {
+        } else if (type == 0 || type == 1 || type == 4) {
+            // HTTP 源分类列表契约化:typed 优先;失败/空结果回退旧 HttpClient 直连(行为兜底)
+            final MovieSort.SortData finalSortData = sortData;
+            final int finalPage = page;
+            spExecute(homeSourceBean.getKey(), new Runnable() {
+                @Override
+                public void run() {
+                    if (listEpoch.get() != epoch) return;
+                    com.github.tvbox.osc.bean.AbsXml typed = null;
+                    try {
+                        typed = com.github.tvbox.osc.spiderapi.SpiderHomeProviders.get().category(
+                                homeSourceBean.getKey(), finalSortData.id, finalPage + "", true,
+                                finalSortData.filterSelect);
+                    } catch (Throwable th) {
+                        th.printStackTrace();
+                    }
+                    if (typed != null && typed.movie != null) {
+                        absXml(typed, homeSourceBean.getKey());
+                        publishListResult(epoch, typed);
+                        return;
+                    }
+                    android.util.Log.i("SpiderBridge", "category(typed/http) 不可用,回退旧路径: key="
+                            + homeSourceBean.getKey() + " tid=" + finalSortData.id + " pg=" + finalPage);
+                    try {
+                        if (listEpoch.get() != epoch) return;
+                        fetchListHttpLegacy(homeSourceBean, type, finalSortData, finalPage, epoch);
+                    } catch (Throwable th) {
+                        // 兜底:回退路径自身也炸时同样要收尾,别让调用方一直等
+                        th.printStackTrace();
+                        publishListResult(epoch, null);
+                    }
+                }
+            });
+        } else {
+            publishListResult(epoch, null);
+        }
+    }
+
+    /** type0/1/4 分类列表旧路径:HttpClient 直连拼参(typed 失败时的行为兜底,与原实现逐字一致) */
+    private void fetchListHttpLegacy(final SourceBean homeSourceBean, final int type,
+                                     final MovieSort.SortData sortData, final int page, final int epoch) {
+        if (type == 0 || type == 1) {
+            Map<String, String> listParams = new HashMap<>();
+            listParams.put("ac", type == 0 ? "videolist" : "detail");
+            listParams.put("t", sortData.id);
+            listParams.put("pg", String.valueOf(page));
+            if (sortData.filterSelect != null) {
+                for (Map.Entry<String, String> entry : sortData.filterSelect.entrySet()) {
+                    listParams.put(entry.getKey(), entry.getValue());
+                }
+            }
+            listParams.put("f", (sortData.filterSelect == null || sortData.filterSelect.size() <= 0) ? "" : new JSONObject(sortData.filterSelect).toString());
+            HttpClient.get(homeSourceBean.getApi(), listParams, null, homeSourceBean.getApi(), new HCallBack() {
 
                         @Override
-                        public String convertResponse(okhttp3.Response response) throws Throwable {
-                            if (response.body() != null) {
-                                return response.body().string();
-                            } else {
-                                throw new IllegalStateException("网络请求错误");
-                            }
+                        public void onSuccess(String content) {
+                            parseListHttpResponse(epoch, content, type == 0, false,
+                                    homeSourceBean.getKey());
                         }
 
                         @Override
-                        public void onSuccess(Response<String> response) {
-                            if (type == 0) {
-                                String xml = response.body();
-                                xml(listResult, xml, homeSourceBean.getKey());
-                            } else {
-                                String json = response.body();
-                                json(listResult, json, homeSourceBean.getKey());
-                            }
-                        }
-
-                        @Override
-                        public void onError(Response<String> response) {
-                            super.onError(response);
-                            listResult.postValue(null);
+                        public void onError(Throwable e) {
+                            publishListResult(epoch, null);
                         }
                     });
-        }else if (type == 4) {
-            String ext= "";
+        } else if (type == 4) {
+            String ext = "";
             if (sortData.filterSelect != null && sortData.filterSelect.size() > 0) {
                 try {
                     String selectExt = new JSONObject(sortData.filterSelect).toString();
-                    ext = Base64.encodeToString(selectExt.getBytes("UTF-8"), Base64.DEFAULT |  Base64.NO_WRAP);
+                    ext = Base64.encodeToString(selectExt.getBytes("UTF-8"), Base64.DEFAULT | Base64.NO_WRAP);
                     LOG.i(ext);
                 } catch (UnsupportedEncodingException e) {
                     e.printStackTrace();
                 }
-            }else {
-                ext = Base64.encodeToString("{}".getBytes(), Base64.DEFAULT |  Base64.NO_WRAP);
+            } else {
+                ext = Base64.encodeToString("{}".getBytes(), Base64.DEFAULT | Base64.NO_WRAP);
             }
-            OkGo.<String>get(homeSourceBean.getApi())
-                .tag(homeSourceBean.getApi())
-                .params("ac", "detail")
-                .params("filter", "true")
-                .params("t", sortData.id)
-                .params("pg", page)
-                .params("ext", ext)
-                .execute(new AbsCallback<String>() {
+            Map<String, String> listExtParams = new HashMap<>();
+            listExtParams.put("ac", "detail");
+            listExtParams.put("filter", "true");
+            listExtParams.put("t", sortData.id);
+            listExtParams.put("pg", String.valueOf(page));
+            listExtParams.put("ext", ext);
+            HttpClient.get(homeSourceBean.getApi(), listExtParams, null, homeSourceBean.getApi(), new HCallBack() {
                     @Override
-                    public String convertResponse(okhttp3.Response response) throws Throwable {
-                        if (response.body() != null) {
-                            return response.body().string();
-                        } else {
-                            throw new IllegalStateException("网络请求错误");
-                        }
+                    public void onSuccess(String json) {
+                        parseListHttpResponse(epoch, json, false, true,
+                                homeSourceBean.getKey());
                     }
 
                     @Override
-                    public void onSuccess(Response<String> response) {
-                        String json = response.body();
-                        LOG.i(json);
-                        json(listResult, json, homeSourceBean.getKey());
-                    }
-
-                    @Override
-                    public void onError(Response<String> response) {
-                        super.onError(response);
-                        listResult.postValue(null);
+                    public void onError(Throwable e) {
+                        publishListResult(epoch, null);
                     }
                 });
         } else {
-            listResult.postValue(null);
+            publishListResult(epoch, null);
         }
+    }
+
+    private void parseListHttpResponse(int epoch, String response, boolean isXml,
+                                       boolean logResponse, String sourceKey) {
+        if (listEpoch.get() != epoch) return;
+        HeavyTaskUtil.executeBigTask(() -> {
+            if (listEpoch.get() != epoch) return;
+            AbsXml parsed;
+            try {
+                if (logResponse) LOG.i(response);
+                parsed = isXml
+                        ? com.github.tvbox.osc.spiderapi.AbsXmlParser.parseXml(response, sourceKey)
+                        : com.github.tvbox.osc.spiderapi.AbsXmlParser.parseJson(response, sourceKey);
+            } catch (Exception error) {
+                parsed = null;
+            }
+            publishListResult(epoch, parsed);
+        });
     }
 
     interface HomeRecCallback {
         void done(List<Movie.Video> videos);
     }
-//    homeVideoContent
+
+    /**
+     * 发布 type=3 首页结果(typed 命中或字符串回退共用):
+     * homeRec=1 且有内嵌首页视频 → 富化后直接发布;无内嵌 → 走 homeVideoContent(typed)补推荐;
+     * homeRec=0 → 仅发布分类。
+     */
+    private void publishHomeSort(final SourceBean sourceBean, AbsSortXml sortXml,
+                                 List<Movie.Video> embedded, int epoch) {
+        if (sortXml == null) {
+            publishHomeSortResult(epoch, null);
+            return;
+        }
+        if (homeSortEpoch.get() != epoch) return;
+        if (SystemConfig.getHomeRec() == 1) {
+            if (embedded != null && !embedded.isEmpty()) {
+                // 同响应内嵌首页视频:与旧 json() 语义一致做富化(sourceKey 归属/urlBean 拆分)
+                AbsXml wrap = new AbsXml();
+                Movie movie = new Movie();
+                movie.videoList = embedded;
+                wrap.movie = movie;
+                absXml(wrap, sourceBean.getKey());
+                sortXml.videoList = embedded;
+                publishHomeSortResult(epoch, sortXml);
+            } else {
+                getHomeRecList(sourceBean, null, new HomeRecCallback() {
+                    @Override
+                    public void done(List<Movie.Video> videos) {
+                        sortXml.videoList = videos;
+                        publishHomeSortResult(epoch, sortXml);
+                    }
+                });
+            }
+        } else {
+            publishHomeSortResult(epoch, sortXml);
+        }
+    }
+    // homeVideoContent：回调可能来自网络主线程或爬虫工作线程，调用方统一切回主线程发布。
     void getHomeRecList(SourceBean sourceBean, ArrayList<String> ids, HomeRecCallback callback) {
         int type = sourceBean.getType();
         if (type == 3) {
             Runnable waitResponse = new Runnable() {
                 @Override
                 public void run() {
-                    ExecutorService executor = Executors.newSingleThreadExecutor();
-                    Future<String> future = executor.submit(new Callable<String>() {
+                    // 线程池治理(改进.txt §六):不再每轮 newSingleThreadExecutor 后 shutdown,
+                    ExecutorService executor = HeavyTaskUtil.getBigTaskExecutorService();
+                    Future<com.github.tvbox.osc.bean.AbsXml> future = executor.submit(new Callable<com.github.tvbox.osc.bean.AbsXml>() {
                         @Override
-                        public String call() throws Exception {
-                            Spider sp = ApiConfig.get().getCSP(sourceBean);
-                            return sp.homeVideoContent();
+                        public com.github.tvbox.osc.bean.AbsXml call() throws Exception {
+                            // 强类型试点:解析下沉 :spider(带 15s 超时保护,与旧字符串链路一致)
+                            return com.github.tvbox.osc.spiderapi.SpiderHomeProviders.get()
+                                    .homeVideoContent(sourceBean.getKey());
                         }
                     });
-                    String sortJson = null;
+                    com.github.tvbox.osc.bean.AbsXml result = null;
                     try {
-                        sortJson = future.get(15, TimeUnit.SECONDS);
+                        result = future.get(15, TimeUnit.SECONDS);
                     } catch (TimeoutException e) {
                         e.printStackTrace();
                         future.cancel(true);
                     } catch (InterruptedException | ExecutionException e) {
                         e.printStackTrace();
                     } finally {
-                        if (sortJson != null) {
-                            AbsXml absXml = json(null, sortJson, sourceBean.getKey());
-                            if (absXml != null && absXml.movie != null && absXml.movie.videoList != null) {
-                                callback.done(absXml.movie.videoList);
-                            } else {
-                                callback.done(null);
-                            }
+                        if (result != null && result.movie != null && result.movie.videoList != null) {
+                            absXml(result, sourceBean.getKey());
+                            android.util.Log.d("SpiderBridge", "homeVideo(typed) 命中: key=" + sourceBean.getKey()
+                                    + " size=" + result.movie.videoList.size());
+                            callback.done(result.movie.videoList);
                         } else {
+                            android.util.Log.w("SpiderBridge", "homeVideo(typed) 无结果,回退空列表: key=" + sourceBean.getKey());
                             callback.done(null);
-                        }
-                        try {
-                            executor.shutdown();
-                        } catch (Throwable th) {
-                            th.printStackTrace();
                         }
                     }
                 }
             };
-            spThreadPool.execute(waitResponse);
+            spExecute(sourceBean.getKey(), waitResponse);
         } else if (type == 0 || type == 1) {
-            OkGo.<String>get(sourceBean.getApi())
-                    .tag("detail")
-                    .params("ac", sourceBean.getType() == 0 ? "videolist" : "detail")
-                    .params("ids", TextUtils.join(",", ids))
-                    .execute(new AbsCallback<String>() {
+            Map<String, String> homeRecParams = new HashMap<>();
+            homeRecParams.put("ac", sourceBean.getType() == 0 ? "videolist" : "detail");
+            homeRecParams.put("ids", TextUtils.join(",", ids));
+            HttpClient.get(sourceBean.getApi(), homeRecParams, null, "detail", new HCallBack() {
 
                         @Override
-                        public String convertResponse(okhttp3.Response response) throws Throwable {
-                            if (response.body() != null) {
-                                return response.body().string();
-                            } else {
-                                throw new IllegalStateException("网络请求错误");
-                            }
+                        public void onSuccess(String content) {
+                            HeavyTaskUtil.executeBigTask(() -> {
+                                try {
+                                    AbsXml absXml = sourceBean.getType() == 0
+                                            ? xml(null, content, sourceBean.getKey())
+                                            : json(null, content, sourceBean.getKey());
+                                    callback.done(absXml != null && absXml.movie != null
+                                            ? absXml.movie.videoList : null);
+                                } catch (Throwable th) {
+                                    th.printStackTrace();
+                                    callback.done(null);
+                                }
+                            });
                         }
 
                         @Override
-                        public void onSuccess(Response<String> response) {
-                            AbsXml absXml;
-                            if (sourceBean.getType() == 0) {
-                                String xml = response.body();
-                                absXml = xml(null, xml, sourceBean.getKey());
-                            } else {
-                                String json = response.body();
-                                absXml = json(null, json, sourceBean.getKey());
-                            }
-                            if (absXml != null && absXml.movie != null && absXml.movie.videoList != null) {
-                                callback.done(absXml.movie.videoList);
-                            } else {
-                                callback.done(null);
-                            }
-                        }
-
-                        @Override
-                        public void onError(Response<String> response) {
-                            super.onError(response);
+                        public void onError(Throwable e) {
                             callback.done(null);
                         }
                     });
@@ -424,234 +565,436 @@ public class SourceViewModel extends ViewModel {
     }
     // detailContent
     public void getDetail(String sourceKey, String id) {
-        SourceBean sourceBean = ApiConfig.get().getSource(sourceKey);
+        final int epoch = detailGate.begin();
+        if (!detailGate.isCurrent(epoch)) return;
+        if (PUSH_AGENT_KEY.equals(sourceKey)) {
+            // “我的→播放链接”入口(历史遗留 push 通道):本地构造单集详情,不依赖订阅里
+            // 存在名为 push_agent 的爬虫源——默认订阅没有该源,原实现 getSource 返回 null
+            // 后直接发布空结果,详情页永远空态(用户口径“输入磁力识别不了”)。
+            publishPushAgentDetail(epoch, id);
+            return;
+        }
+        SourceBean sourceBean = sourceConfig.getSource(sourceKey);
+        if (sourceBean == null) {
+            // 源不存在(订阅变更/失效等),通知空结果,避免崩溃
+            publishDetailResult(epoch, null);
+            return;
+        }
         int type = sourceBean.getType();
         if (type == 3) {
-            spThreadPool.execute(new Runnable() {
+            spExecute(sourceKey, new Runnable() {
                 @Override
                 public void run() {
+                    if (!detailGate.isCurrent(epoch)) return;
                     try {
-                        Spider sp = ApiConfig.get().getCSP(sourceBean);
+                        // 强类型试点:解析下沉 :spider(SpiderDetailImpl);失败回退字符串通道(行为不变)
+                        com.github.tvbox.osc.bean.AbsXml typed =
+                                com.github.tvbox.osc.spiderapi.SpiderDetailProviders.get().detail(sourceKey, id);
+                        if (!detailGate.isCurrent(epoch)) return;
+                        if (typed != null && typed.movie != null) {
+                            absXml(typed, sourceBean.getKey());
+                            checkThunder(typed, 0, epoch);
+                            return;
+                        }
+                        android.util.Log.i("SpiderBridge", "detail(typed) 不可用,回退字符串通道: key=" + sourceKey + " id=" + id);
                         List<String> ids = new ArrayList<>();
                         ids.add(id);
-                        json(detailResult, sp.detailContent(ids), sourceBean.getKey());
+                        String payload = com.github.tvbox.osc.spiderapi.SpiderContentProviders.get()
+                                .detailContent(sourceBean.getKey(), ids);
+                        if (!detailGate.isCurrent(epoch)) return;
+                        publishParsedDetail(epoch, json(null, payload, sourceBean.getKey()));
                     } catch (Throwable th) {
                         th.printStackTrace();
+                        // 详情取回空/抛异常也要投递结果,否则详情页永远停在 loading(无失败提示)
+                        android.util.Log.e("SpiderBridge", "detail 失败,投递空结果: key=" + sourceKey + " id=" + id + " " + th);
+                        publishDetailResult(epoch, null);
                     }
                 }
             });
         } else if (type == 0 || type == 1|| type == 4) {
-            OkGo.<String>get(sourceBean.getApi())
-                    .tag("detail")
-                    .params("ac", type == 0 ? "videolist" : "detail")
-                    .params("ids", id)
-                    .execute(new AbsCallback<String>() {
-
-                        @Override
-                        public String convertResponse(okhttp3.Response response) throws Throwable {
-                            if (response.body() != null) {
-                                return response.body().string();
-                            } else {
-                                throw new IllegalStateException("网络请求错误");
-                            }
+            spExecute(sourceBean.getKey(), new Runnable() {
+                @Override
+                public void run() {
+                    if (!detailGate.isCurrent(epoch)) return;
+                    try {
+                        // type0/1/4 HTTP 源契约化:typed detail(SpiderDetailImpl 按类型拼参拉取+解析)
+                        // 成功即发布;失败回退旧 HttpClient 直连(行为兜底)
+                        com.github.tvbox.osc.bean.AbsXml typed =
+                                com.github.tvbox.osc.spiderapi.SpiderDetailProviders.get().detail(sourceKey, id);
+                        if (!detailGate.isCurrent(epoch)) return;
+                        if (typed != null && typed.movie != null) {
+                            absXml(typed, sourceBean.getKey());
+                            checkThunder(typed, 0, epoch);
+                            return;
                         }
-
-                        @Override
-                        public void onSuccess(Response<String> response) {
-                            if (type == 0) {
-                                String xml = response.body();
-                                xml(detailResult, xml, sourceBean.getKey());
-                            } else {
-                                String json = response.body();
-                                LOG.i(json);
-                                json(detailResult, json, sourceBean.getKey());
-                            }
-                        }
-
-                        @Override
-                        public void onError(Response<String> response) {
-                            super.onError(response);
-                            detailResult.postValue(null);
-                        }
-                    });
-        } else {
-            detailResult.postValue(null);
-        }
-    }
-    // searchContent
-    public void getSearch(String sourceKey, String wd) {
-        SourceBean sourceBean = ApiConfig.get().getSource(sourceKey);
-        int type = sourceBean.getType();
-        if (type == 3) {
-            try {
-                Spider sp = ApiConfig.get().getCSP(sourceBean);
-                String search = sp.searchContent(wd, false);
-                if(!TextUtils.isEmpty(search)){
-                    json(searchResult, search, sourceBean.getKey());
-                } else {
-                    json(searchResult, "", sourceBean.getKey());
+                        android.util.Log.i("SpiderBridge", "detail(typed/http) 不可用,回退旧路径: key=" + sourceKey + " id=" + id);
+                    } catch (Throwable th) {
+                        th.printStackTrace();
+                    }
+                    if (detailGate.isCurrent(epoch)) fetchDetailHttpLegacy(sourceBean, type, id, epoch);
                 }
-            } catch (Throwable th) {
-                th.printStackTrace();
-                json(searchResult, "", sourceBean.getKey());
-            }
-        } else if (type == 0 || type == 1) {
-            OkGo.<String>get(sourceBean.getApi())
-                    .params("wd", wd)
-                    .params(type == 1 ? "ac" : null, type == 1 ? "detail" : null)
-                    .tag("search")
-                    .execute(new AbsCallback<String>() {
-                        @Override
-                        public String convertResponse(okhttp3.Response response) throws Throwable {
-                            if (response.body() != null) {
-                                return response.body().string();
-                            } else {
-                                throw new IllegalStateException("网络请求错误");
-                            }
-                        }
-
-                        @Override
-                        public void onSuccess(Response<String> response) {
-                            if (type == 0) {
-                                String xml = response.body();
-                                xml(searchResult, xml, sourceBean.getKey());
-                            } else {
-                                String json = response.body();
-                                json(searchResult, json, sourceBean.getKey());
-                            }
-                        }
-
-                        @Override
-                        public void onError(Response<String> response) {
-                            super.onError(response);
-                            // searchResult.postValue(null);
-                            EventBus.getDefault().post(new RefreshEvent(RefreshEvent.TYPE_SEARCH_RESULT, null));
-                        }
-                    });
-        }else if (type == 4) {
-            OkGo.<String>get(sourceBean.getApi())
-                .params("wd", wd)
-                .params("ac" ,"detail")
-                .params("quick" ,"false")
-                .tag("search")
-                .execute(new AbsCallback<String>() {
-                    @Override
-                    public String convertResponse(okhttp3.Response response) throws Throwable {
-                        if (response.body() != null) {
-                            return response.body().string();
-                        } else {
-                            throw new IllegalStateException("网络请求错误");
-                        }
-                    }
-
-                    @Override
-                    public void onSuccess(Response<String> response) {
-                            String json = response.body();
-                        LOG.i(json);
-                            json(searchResult, json, sourceBean.getKey());
-                    }
-
-                    @Override
-                    public void onError(Response<String> response) {
-                        super.onError(response);
-                        // searchResult.postValue(null);
-                        EventBus.getDefault().post(new RefreshEvent(RefreshEvent.TYPE_SEARCH_RESULT, null));
-                    }
-                });
+            });
         } else {
-            searchResult.postValue(null);
+            publishDetailResult(epoch, null);
         }
     }
+
+    /** type0/1/4 详情旧路径:HttpClient 直连拼参(typed 失败时的行为兜底,与原实现逐字一致) */
+    private void fetchDetailHttpLegacy(final SourceBean sourceBean, final int type,
+                                       final String id, final int epoch) {
+        if (!detailGate.isCurrent(epoch)) return;
+        Map<String, String> detailParams =
+                com.github.tvbox.osc.spiderapi.HttpSourceParams.detail(type, id);
+        if (detailParams == null) {
+            publishDetailResult(epoch, null);
+            return;
+        }
+        HttpClient.get(sourceBean.getApi(), detailParams, null, "detail", new HCallBack() {
+
+                    @Override
+                    public void onSuccess(String content) {
+                        if (!detailGate.isCurrent(epoch)) return;
+                        if (type == 0) {
+                            String xml = content;
+                            publishParsedDetail(epoch, xml(null, xml, sourceBean.getKey()));
+                        } else {
+                            String json = content;
+                            LOG.i(json);
+                            publishParsedDetail(epoch, json(null, json, sourceBean.getKey()));
+                        }
+                    }
+
+                    @Override
+                    public void onError(Throwable e) {
+                        publishDetailResult(epoch, null);
+                    }
+                });
+    }
+    /**
+     * 主搜索"每源一批"结果直调监听(改进.txt §五 收口):替代 FastSearch 场景的
+     * TYPE_SEARCH_RESULT EventBus 投递。回调线程不保证主线程,宿主自行切主线程。
+     */
+    public interface SearchBatchListener {
+        void onSearchBatch(String sourceKey, AbsXml data, long epoch);
+    }
+
+    private volatile SearchBatchListener searchBatchListener;
+
+    /** 注入/清除搜索批次监听(宿主销毁前必须置 null 防悬垂) */
+    public void setSearchBatchListener(SearchBatchListener listener) {
+        this.searchBatchListener = listener;
+    }
+
+    private void deliverSearchBatch(String sourceKey, AbsXml data, long epoch) {
+        SearchBatchListener listener = searchBatchListener;
+        if (listener != null) listener.onSearchBatch(sourceKey, data, epoch);
+    }
+
+    /**
+     * 聚合搜索翻页"每源一批"结果直调监听(与首屏 [SearchBatchListener] 分开,宿主单独记账):
+     * 翻页批次不该影响首屏"全部来源已返回"的完成态,也不该被首屏批次统计口径干扰。
+     * 回调线程不保证主线程,宿主自行切主线程。
+     */
+    public interface SearchPageBatchListener {
+        /** @param sourceKey 来源 key;@param data 该页解析结果(空页/失败为 null);@param page 该页页码(>=2) */
+        void onSearchPageBatch(String sourceKey, AbsXml data, int page, long epoch);
+    }
+
+    private volatile SearchPageBatchListener searchPageBatchListener;
+
+    /** 注入/清除翻页批次监听(宿主销毁前必须置 null 防悬垂) */
+    public void setSearchPageBatchListener(SearchPageBatchListener listener) {
+        searchPageBatchListener = listener;
+    }
+
+    private void deliverSearchPageBatch(String sourceKey, AbsXml data, int page, long epoch) {
+        SearchPageBatchListener listener = searchPageBatchListener;
+        if (listener != null) listener.onSearchPageBatch(sourceKey, data, page, epoch);
+    }
+
     // searchContent
-    public void getQuickSearch(String sourceKey, String wd) {
-        SourceBean sourceBean = ApiConfig.get().getSource(sourceKey);
+    public void getSearch(String sourceKey, String wd, long epoch) {
+        SourceBean sourceBean = sourceConfig.getSource(sourceKey);
+        if (sourceBean == null) {
+            deliverSearchBatch(sourceKey, null, epoch);
+            return;
+        }
         int type = sourceBean.getType();
         if (type == 3) {
             try {
-                Spider sp = ApiConfig.get().getCSP(sourceBean);
-                json(quickSearchResult, sp.searchContent(wd, true), sourceBean.getKey());
+                // 强类型试点:解析下沉 :spider;失败回退字符串通道(行为不变)
+                com.github.tvbox.osc.bean.AbsXml typed =
+                        com.github.tvbox.osc.spiderapi.SpiderSearchProviders.get().search(sourceBean.getKey(), wd, false);
+                if (typed != null && typed.movie != null) {
+                    absXml(typed, sourceBean.getKey());
+                    deliverSearchBatch(sourceKey, typed, epoch);
+                    return;
+                }
+                // 正式 typed 实现已经调用同一 SpiderContentImpl；空结果或失败再走字符串
+                // 通道只会对同一来源、同一关键词重发请求，慢源因此占池位两轮。
+                if (com.github.tvbox.osc.spiderapi.SpiderSearchProviders.isInstalled()) {
+                    deliverSearchBatch(sourceKey, null, epoch);
+                    return;
+                }
+                android.util.Log.i("SpiderBridge", "search(typed) 不可用,回退字符串通道: key=" + sourceBean.getKey()
+                        + " word=" + wd);
+                String search = com.github.tvbox.osc.spiderapi.SpiderContentProviders.get()
+                        .searchContent(sourceBean.getKey(), wd, false);
+                deliverSearchBatch(sourceKey, parseSearchPayload(search, sourceKey, 1), epoch);
+            } catch (Throwable th) {
+                th.printStackTrace();
+                deliverSearchBatch(sourceKey, null, epoch);
+            }
+        } else if (type == 0 || type == 1 || type == 4) {
+            // HTTP 源搜索契约化:typed 优先;失败/空结果回退旧 HttpClient 直连(行为兜底)
+            com.github.tvbox.osc.bean.AbsXml typed = null;
+            try {
+                typed = com.github.tvbox.osc.spiderapi.SpiderSearchProviders.get()
+                        .search(sourceBean.getKey(), wd, false);
             } catch (Throwable th) {
                 th.printStackTrace();
             }
-        } else if (type == 0 || type == 1) {
-            OkGo.<String>get(sourceBean.getApi())
-                    .params("wd", wd)
-                    .params(type == 1 ? "ac" : null, type == 1 ? "detail" : null)
-                    .tag("quick_search")
-                    .execute(new AbsCallback<String>() {
-                        @Override
-                        public String convertResponse(okhttp3.Response response) throws Throwable {
-                            if (response.body() != null) {
-                                return response.body().string();
-                            } else {
-                                throw new IllegalStateException("网络请求错误");
-                            }
-                        }
+            if (typed != null && typed.movie != null) {
+                absXml(typed, sourceBean.getKey());
+                deliverSearchBatch(sourceKey, typed, epoch);
+                return;
+            }
+            // typed HTTP 已用同一 URL/参数和解析器；空批次不应再发一次异步 GET。
+            if (com.github.tvbox.osc.spiderapi.SpiderSearchProviders.isInstalled()) {
+                deliverSearchBatch(sourceKey, null, epoch);
+                return;
+            }
+            android.util.Log.i("SpiderBridge", "search(typed/http) 不可用,回退旧路径: key=" + sourceBean.getKey()
+                    + " word=" + wd);
+            fetchSearchHttpLegacy(sourceBean, type, wd, epoch);
+        } else {
+            // 未支持的源类型:也要投一批"空结果"通知宿主,否则宿主的"全部来源已返回/第一波收尾"
+            // 记账永远等不到这一路(原实现只 searchResult.postValue(null),而该 LiveData 已无人观察),
+            // 第二波只能干等兜底超时,完成态也一直不落。
+            deliverSearchBatch(sourceKey, null, epoch);
+        }
+    }
 
-                        @Override
-                        public void onSuccess(Response<String> response) {
-                            if (type == 0) {
-                                String xml = response.body();
-                                xml(quickSearchResult, xml, sourceBean.getKey());
-                            } else {
-                                String json = response.body();
-                                json(quickSearchResult, json, sourceBean.getKey());
-                            }
-                        }
+    /**
+     * 聚合搜索"加载更多":取某源的第 page 页(page 从 2 起;首页走 [getSearch])。
+     * <p>
+     * 结果经 [SearchPageBatchListener] 投递(与首屏 [SearchBatchListener] 分开,宿主单独记账,
+     * 翻页批次不会干扰首屏"全部来源已返回"的完成态);本页没有更多时投递 null 数据。
+     * <p>
+     * type3(JS/JAR)走 [SpiderContentApi#searchContent(String,String,boolean,String)] 重载;
+     * type0/1/4 走 HTTP 拼参(与首屏同一套 HttpSourceParams,额外带 pg)。
+     */
+    public void getSearchPaged(final String sourceKey, final String wd, final int page, final long epoch) {
+        final SourceBean sourceBean = sourceConfig.getSource(sourceKey);
+        if (sourceBean == null || page <= 1 || TextUtils.isEmpty(wd)) {
+            deliverSearchPageBatch(sourceKey, null, page, epoch);
+            return;
+        }
+        final int type = sourceBean.getType();
+        if (type == 3) {
+            try {
+                String search = com.github.tvbox.osc.spiderapi.SpiderContentProviders.get()
+                        .searchContent(sourceBean.getKey(), wd, false, String.valueOf(page));
+                deliverSearchPageBatch(sourceKey, parseSearchPayload(search, sourceBean.getKey(), 1), page, epoch);
+            } catch (Throwable th) {
+                th.printStackTrace();
+                deliverSearchPageBatch(sourceKey, null, page, epoch);
+            }
+            return;
+        }
+        if (type == 0 || type == 1 || type == 4) {
+            Map<String, String> searchParams = com.github.tvbox.osc.spiderapi.HttpSourceParams.search(type, wd, false);
+            if (searchParams == null) {
+                deliverSearchPageBatch(sourceKey, null, page, epoch);
+                return;
+            }
+            searchParams.put("pg", String.valueOf(page));
+            HttpClient.get(sourceBean.getApi(), searchParams, null, "search", new HCallBack() {
+                @Override
+                public void onSuccess(String content) {
+                    deliverSearchPageBatch(sourceKey, parseSearchPayload(content, sourceBean.getKey(), type), page, epoch);
+                }
 
-                        @Override
-                        public void onError(Response<String> response) {
-                            super.onError(response);
-                            // quickSearchResult.postValue(null);
-                            EventBus.getDefault().post(new RefreshEvent(RefreshEvent.TYPE_QUICK_SEARCH_RESULT, null));
-                        }
-                    });
-        }else if (type == 4) {
-            OkGo.<String>get(sourceBean.getApi())
-                .params("wd", wd)
-                .params("ac" ,"detail")
-                .params("quick" ,"true")
-                .tag("search")
-                .execute(new AbsCallback<String>() {
+                @Override
+                public void onError(Throwable e) {
+                    deliverSearchPageBatch(sourceKey, null, page, epoch);
+                }
+            });
+            return;
+        }
+        deliverSearchPageBatch(sourceKey, null, page, epoch);
+    }
+
+    /** 搜索响应串 → AbsXml(type0 走 XML 解析,其余走 JSON);空内容/解析失败返回 null */
+    private AbsXml parseSearchPayload(String content, String sourceKey, int type) {
+        if (TextUtils.isEmpty(content)) return null;
+        try {
+            return type == 0
+                    ? com.github.tvbox.osc.spiderapi.AbsXmlParser.parseXml(content, sourceKey)
+                    : com.github.tvbox.osc.spiderapi.AbsXmlParser.parseJson(content, sourceKey);
+        } catch (Throwable th) {
+            return null;
+        }
+    }
+
+    /** type0/1/4 聚合搜索旧路径:HttpClient 直连拼参(typed 失败时的行为兜底,与原实现逐字一致) */
+    private void fetchSearchHttpLegacy(final SourceBean sourceBean, final int type, final String wd, final long epoch) {
+        Map<String, String> searchParams = com.github.tvbox.osc.spiderapi.HttpSourceParams.search(type, wd, false);
+        if (searchParams == null) {
+            deliverSearchBatch(sourceBean.getKey(), null, epoch);
+            return;
+        }
+        HttpClient.get(sourceBean.getApi(), searchParams, null, "search", new HCallBack() {
                     @Override
-                    public String convertResponse(okhttp3.Response response) throws Throwable {
-                        if (response.body() != null) {
-                            return response.body().string();
-                        } else {
-                            throw new IllegalStateException("网络请求错误");
-                        }
+                    public void onSuccess(String content) {
+                        deliverSearchBatch(sourceBean.getKey(),
+                                parseSearchPayload(content, sourceBean.getKey(), type), epoch);
                     }
 
                     @Override
-                    public void onSuccess(Response<String> response) {
-                        String json = response.body();
-                        LOG.i(json);
-                        json(quickSearchResult, json, sourceBean.getKey());
-                    }
-
-                    @Override
-                    public void onError(Response<String> response) {
-                        super.onError(response);
-                        // searchResult.postValue(null);
-                        EventBus.getDefault().post(new RefreshEvent(RefreshEvent.TYPE_SEARCH_RESULT, null));
+                    public void onError(Throwable e) {
+                        deliverSearchBatch(sourceBean.getKey(), null, epoch);
                     }
                 });
+    }
+    // searchContent
+    /**
+     * 快速搜索(详情页"来源"快搜弹窗)"每源一批"结果直调监听:替代历史 EventBus 快搜批次投递。
+     * 回调线程不保证主线程,宿主自行切主线程。
+     */
+    public interface QuickSearchBatchListener {
+        void onQuickSearchBatch(AbsXml data);
+    }
+
+    private volatile QuickSearchBatchListener quickSearchBatchListener;
+
+    /** 注入/清除快速搜索批次监听(宿主销毁前必须置 null 防悬垂) */
+    public void setQuickSearchBatchListener(QuickSearchBatchListener listener) {
+        this.quickSearchBatchListener = listener;
+    }
+
+    private void deliverQuickSearchBatch(AbsXml data) {
+        QuickSearchBatchListener listener = quickSearchBatchListener;
+        if (listener != null) listener.onQuickSearchBatch(data);
+    }
+
+    public void getQuickSearch(String sourceKey, String wd) {
+        SourceBean sourceBean = sourceConfig.getSource(sourceKey);
+        int type = sourceBean.getType();
+        if (type == 3) {
+            try {
+                // 强类型试点:quick 搜索解析下沉 :spider;失败回退字符串通道
+                com.github.tvbox.osc.bean.AbsXml typed =
+                        com.github.tvbox.osc.spiderapi.SpiderSearchProviders.get().search(sourceBean.getKey(), wd, true);
+                if (typed != null && typed.movie != null) {
+                    absXml(typed, sourceBean.getKey());
+                    deliverQuickSearchBatch(typed);
+                    return;
+                }
+                android.util.Log.i("SpiderBridge", "quickSearch(typed) 不可用,回退字符串通道: key=" + sourceBean.getKey()
+                        + " word=" + wd);
+                json(quickSearchResult, com.github.tvbox.osc.spiderapi.SpiderContentProviders.get()
+                        .searchContent(sourceBean.getKey(), wd, true), sourceBean.getKey());
+            } catch (Throwable th) {
+                th.printStackTrace();
+            }
+        } else if (type == 0 || type == 1 || type == 4) {
+            // HTTP 源快速搜索契约化:typed 优先;失败/空结果回退旧 HttpClient 直连(行为兜底)
+            com.github.tvbox.osc.bean.AbsXml typed = null;
+            try {
+                typed = com.github.tvbox.osc.spiderapi.SpiderSearchProviders.get()
+                        .search(sourceBean.getKey(), wd, true);
+            } catch (Throwable th) {
+                th.printStackTrace();
+            }
+            if (typed != null && typed.movie != null) {
+                absXml(typed, sourceBean.getKey());
+                deliverQuickSearchBatch(typed);
+                return;
+            }
+            android.util.Log.i("SpiderBridge", "quickSearch(typed/http) 不可用,回退旧路径: key=" + sourceBean.getKey()
+                    + " word=" + wd);
+            fetchQuickSearchHttpLegacy(sourceBean, type, wd);
         } else {
             quickSearchResult.postValue(null);
         }
     }
+
+    /** type0/1/4 快速搜索旧路径:HttpClient 直连拼参(typed 失败时的行为兜底,与原实现逐字一致;
+     *  tag 与原实现一致——type4 用 "search",type0/1 用 "quick_search",保取消语义) */
+    private void fetchQuickSearchHttpLegacy(final SourceBean sourceBean, final int type, final String wd) {
+        Map<String, String> quickParams = com.github.tvbox.osc.spiderapi.HttpSourceParams.search(type, wd, true);
+        if (quickParams == null) {
+            quickSearchResult.postValue(null);
+            return;
+        }
+        HttpClient.get(sourceBean.getApi(), quickParams, null,
+                type == 4 ? "search" : "quick_search", new HCallBack() {
+                    @Override
+                    public void onSuccess(String content) {
+                        if (type == 0) {
+                            String xml = content;
+                            xml(quickSearchResult, xml, sourceBean.getKey());
+                        } else {
+                            String json = content;
+                            json(quickSearchResult, json, sourceBean.getKey());
+                        }
+                    }
+
+                    @Override
+                    public void onError(Throwable e) {
+                        // quickSearchResult.postValue(null);
+                        deliverQuickSearchBatch(null);
+                    }
+                });
+    }
     // playerContent
+    private void postPlayFailure(String progressKey, String url) {
+        JSONObject failure = new JSONObject();
+        try {
+            failure.put("proKey", progressKey);
+            failure.put("key", url);
+            failure.put("playError", true);
+        } catch (Throwable ignored) { }
+        playResult.postValue(failure);
+    }
+
     public void getPlay(String sourceKey, String playFlag, String progressKey, String url, String subtitleKey) {
-        SourceBean sourceBean = ApiConfig.get().getSource(sourceKey);
+        if (PUSH_AGENT_KEY.equals(sourceKey)) {
+            // push_agent 直链播放:无爬虫可解析,视频格式直接播,其余走默认解析嗅探。
+            JSONObject result = new JSONObject();
+            try {
+                result.put("key", url);
+                result.put("parse", DefaultConfig.isVideoFormat(url) ? 0 : 1);
+                result.put("url", url);
+                result.put("proKey", progressKey);
+                result.put("subtKey", subtitleKey);
+                result.put("playUrl", "");
+                result.put("flag", playFlag);
+                playResult.postValue(result);
+            } catch (Throwable th) {
+                th.printStackTrace();
+                postPlayFailure(progressKey, url);
+            }
+            return;
+        }
+        SourceBean sourceBean = sourceConfig.getSource(sourceKey);
+        if (sourceBean == null) {
+            // 源不存在(订阅变更/push 通道失效):投递失败而非 NPE——
+            // NPE 会甩到 PlayFragment.play() 同步段,加载圈永不解除且无任何提示。
+            android.util.Log.e("SpiderBridge", "getPlay 源不存在,投递失败: key=" + sourceKey + " url=" + url);
+            postPlayFailure(progressKey, url);
+            return;
+        }
         int type = sourceBean.getType();
         if (type == 3) {
-            spThreadPool.execute(new Runnable() {
+            spExecute(sourceBean.getKey(), new Runnable() {
                 @Override
                 public void run() {
-                    Spider sp = ApiConfig.get().getCSP(sourceBean);
                     try {
-                        String json = sp.playerContent(playFlag, url, ApiConfig.get().getVipParseFlags());
-                        JSONObject result = new JSONObject(json);
+                        String json = com.github.tvbox.osc.spiderapi.SpiderContentProviders.get()
+                                .playerContent(sourceBean.getKey(), playFlag, url, sourceConfig.getVipParseFlags());
+                        JSONObject result = normalizePlayerResult(new JSONObject(json));
                         result.put("key", url);
                         result.put("proKey", progressKey);
                         result.put("subtKey", subtitleKey);
@@ -660,7 +1003,7 @@ public class SourceViewModel extends ViewModel {
                         playResult.postValue(result);
                     } catch (Throwable th) {
                         th.printStackTrace();
-                        playResult.postValue(null);
+                        postPlayFailure(progressKey, url);
                     }
                 }
             });
@@ -683,29 +1026,20 @@ public class SourceViewModel extends ViewModel {
                 playResult.postValue(result);
             } catch (Throwable th) {
                 th.printStackTrace();
-                playResult.postValue(null);
+                postPlayFailure(progressKey, url);
             }
         } else if (type == 4) {
-            OkGo.<String>get(sourceBean.getApi())
-                .params("play", url)
-                .params("flag" ,playFlag)
-                .tag("play")
-                .execute(new AbsCallback<String>() {
+            Map<String, String> playParams = com.github.tvbox.osc.spiderapi.HttpSourceParams.play(type, url, playFlag);
+            if (playParams == null) {
+                postPlayFailure(progressKey, url);
+                return;
+            }
+            HttpClient.get(sourceBean.getApi(), playParams, null, "play", new HCallBack() {
                     @Override
-                    public String convertResponse(okhttp3.Response response) throws Throwable {
-                        if (response.body() != null) {
-                            return response.body().string();
-                        } else {
-                            throw new IllegalStateException("网络请求错误");
-                        }
-                    }
-
-                    @Override
-                    public void onSuccess(Response<String> response) {
-                        String json = response.body();
+                    public void onSuccess(String json) {
                         LOG.i(json);
                         try {
-                            JSONObject result = new JSONObject(json);
+                            JSONObject result = normalizePlayerResult(new JSONObject(json));
                             result.put("key", url);
                             result.put("proKey", progressKey);
                             result.put("subtKey", subtitleKey);
@@ -714,134 +1048,103 @@ public class SourceViewModel extends ViewModel {
                             playResult.postValue(result);
                         } catch (Throwable th) {
                             th.printStackTrace();
-                            playResult.postValue(null);
+                            postPlayFailure(progressKey, url);
                         }
                     }
 
                     @Override
-                    public void onError(Response<String> response) {
-                        super.onError(response);
-                        playResult.postValue(null);
+                    public void onError(Throwable e) {
+                        postPlayFailure(progressKey, url);
                     }
                 });
         }else {
-            playResult.postValue(null);
+            postPlayFailure(progressKey, url);
         }
     }
 
-    private MovieSort.SortFilter getSortFilter(JsonObject obj) {
-        String key = obj.get("key").getAsString();
-        String name = obj.get("name").getAsString();
-        JsonArray kv = obj.getAsJsonArray("value");
-        LinkedHashMap<String, String> values = new LinkedHashMap<>();
-        for (JsonElement ele : kv) {
-            JsonObject ele_obj = ele.getAsJsonObject();
-            String values_key=ele_obj.has("n")?ele_obj.get("n").getAsString():"";
-            String values_value=ele_obj.has("v")?ele_obj.get("v").getAsString():"";
-            values.put(values_key, values_value);
-        }
-        MovieSort.SortFilter filter = new MovieSort.SortFilter();
-        filter.key = key;
-        filter.name = name;
-        filter.values = values;
-        return filter;
-    }
-
-    private AbsSortXml sortJson(MutableLiveData<AbsSortXml> result, String json) {
+    /**
+     * 播放结果 url 归一化(对齐 AVBox 的 normalizePlayerResult):爬虫/HTTP 接口源返回的 url
+     * 可能带内部协议前缀,或是以 JSON 数组形式给出多条候选,需要在进解析链之前统一处理。
+     * <p>处理项:
+     * <ul>
+     *   <li>{@code proxy://} 前缀 → 替换为本地代理入口({@link DefaultConfig#checkReplaceProxy}),并置 parse=0 直接播;</li>
+     *   <li>{@code video://} 前缀 → 去掉前缀,置 parse=1 走解析;</li>
+     *   <li>url 是 {@code [...]} JSON 数组 → 逐项替换 proxy://video:// 前缀后回写数组,置 parse=0;</li>
+     *   <li>url 本身是直链视频格式(且无 parse/jx 且 playUrl 为空)→ 补 parse=0 直接播。</li>
+     * </ul>
+     * <p>url 为空时原样返回(空地址兜底由 PlayFragment 的 onPlayAddressMissing 负责,这里不越权)。
+     */
+    private static JSONObject normalizePlayerResult(JSONObject result) {
+        if (result == null) return result;
         try {
-            JsonObject obj = JsonParser.parseString(json).getAsJsonObject();
-            AbsSortJson sortJson = new Gson().fromJson(obj, new TypeToken<AbsSortJson>() {
-            }.getType());
-            AbsSortXml data = sortJson.toAbsSortXml();
-            try {
-                if (obj.has("filters")) {
-                    LinkedHashMap<String, ArrayList<MovieSort.SortFilter>> sortFilters = new LinkedHashMap<>();
-                    JsonObject filters = obj.getAsJsonObject("filters");
-                    for (String key : filters.keySet()) {
-                        ArrayList<MovieSort.SortFilter> sortFilter = new ArrayList<>();
-                        JsonElement one = filters.get(key);
-                        if (one.isJsonObject()) {
-                            sortFilter.add(getSortFilter(one.getAsJsonObject()));
-                        } else {
-                            for (JsonElement ele : one.getAsJsonArray()) {
-                                sortFilter.add(getSortFilter(ele.getAsJsonObject()));
-                            }
-                        }
-                        sortFilters.put(key, sortFilter);
-                    }
-                    for (MovieSort.SortData sort : data.classes.sortList) {
-                        if (sortFilters.containsKey(sort.id) && sortFilters.get(sort.id) != null) {
-                            sort.filters = sortFilters.get(sort.id);
+            String playUrl = result.optString("playUrl", "");
+            String url = result.optString("url", "");
+            if (TextUtils.isEmpty(url)) return result;
+            if (url.startsWith("[") && url.endsWith("]")) {
+                JSONArray array = new JSONArray(url);
+                for (int i = 0; i < array.length(); i++) {
+                    Object item = array.opt(i);
+                    if (item instanceof String) {
+                        String str = (String) item;
+                        if (str.startsWith("proxy://")) {
+                            array.put(i, DefaultConfig.checkReplaceProxy(str));
+                        } else if (str.startsWith("video://")) {
+                            array.put(i, str.substring("video://".length()));
                         }
                     }
                 }
-            } catch (Throwable th) {
-
+                result.put("url", array.toString());
+                result.put("parse", 0);
+                return result;
             }
-            return data;
-        } catch (Exception e) {
-            return null;
+            if (url.startsWith("video://")) {
+                result.put("url", url.substring("video://".length()));
+                result.put("parse", 1);
+            } else if (url.startsWith("proxy://")) {
+                result.put("url", DefaultConfig.checkReplaceProxy(url));
+                result.put("parse", 0);
+            } else if (TextUtils.isEmpty(playUrl)
+                    && DefaultConfig.isVideoFormat(url)
+                    && !result.has("parse")
+                    && !result.has("jx")) {
+                result.put("parse", 0);
+            }
+        } catch (Throwable th) {
+            LOG.e("SourceViewModel normalizePlayerResult: " + th.getMessage());
         }
+        return result;
     }
 
-    private AbsSortXml sortXml(MutableLiveData<AbsSortXml> result, String xml) {
-        try {
-            XStream xstream = new XStream(new DomDriver());//创建Xstram对象
-            xstream.autodetectAnnotations(true);
-            xstream.processAnnotations(AbsSortXml.class);
-            xstream.ignoreUnknownElements();
-            AbsSortXml data = (AbsSortXml) xstream.fromXML(xml);
-            for (MovieSort.SortData sort : data.classes.sortList) {
-                if (sort.filters == null) {
-                    sort.filters = new ArrayList<>();
-                }
-            }
-            return data;
-        } catch (Exception e) {
-            return null;
-        }
+    private AbsSortXml sortJson(String json) {
+        // 解析已抽到 SortParser(纯静态、可单测);发布由调用方完成
+        return com.github.tvbox.osc.spiderapi.SortParser.parseSortJson(json);
     }
 
-    private void absXml(AbsXml data, String sourceKey) {
-        if (data.movie != null && data.movie.videoList != null) {
-            for (Movie.Video video : data.movie.videoList) {
-                if (video.urlBean != null && video.urlBean.infoList != null) {
-                    for (Movie.Video.UrlBean.UrlInfo urlInfo : video.urlBean.infoList) {
-                        String[] str = null;
-                        if (urlInfo.urls.contains("#")) {
-                            str = urlInfo.urls.split("#");
-                        } else {
-                            str = new String[]{urlInfo.urls};
-                        }
-                        List<Movie.Video.UrlBean.UrlInfo.InfoBean> infoBeanList = new ArrayList<>();
-//                        for (String s : str) {
-//                            if (s.contains("$")) {
-//                                String[] ss = s.split("\\$");
-//                                if (ss.length >= 2) {
-//                                    infoBeanList.add(new Movie.Video.UrlBean.UrlInfo.InfoBean(ss[0], ss[1]));
-//                                }
-//                                //infoBeanList.add(new Movie.Video.UrlBean.UrlInfo.InfoBean(s.substring(0, s.indexOf("$")), s.substring(s.indexOf("$") + 1)));
-//                            }
-//                        }
-                        for (String s : str) {
-                            String[] ss = s.split("\\$");
-                            if (ss.length > 0) {
-                                if (ss.length >= 2) {
-                                    infoBeanList.add(new Movie.Video.UrlBean.UrlInfo.InfoBean(ss[0], ss[1]));
-                                } else {
-                                    infoBeanList.add(new Movie.Video.UrlBean.UrlInfo.InfoBean((infoBeanList.size() + 1) + "", ss[0]));
-                                }
-                            }
-                        }
-                        urlInfo.beanList = infoBeanList;
-                    }
-                }
-                video.sourceKey = sourceKey;
-            }
-        }
+    /**
+     * XStream 反序列化安全白名单:关闭默认"任意类型许可",仅放行业务 bean 包(及其嵌套类)
+     * 与基础 JDK 类型。订阅/详情 XML 来自第三方数据源,若无白名单,恶意 XML 可让 XStream
+     * 实例化任意类触发 gadget 链(潜在 RCE)。调用时机:processAnnotations 之后、fromXML 之前。
+     */
+    private AbsSortXml sortXml(String xml) {
+        // 解析已抽到 SortParser(纯静态、可单测)
+        return com.github.tvbox.osc.spiderapi.SortParser.parseSortXml(xml);
     }
 
-    public void checkThunder(AbsXml data, int index) {
+    private void publishParsedDetail(int epoch, AbsXml data) {
+        if (!detailGate.isCurrent(epoch)) return;
+        if (data == null) publishDetailResult(epoch, null);
+        else checkThunder(data, 0, epoch);
+    }
+
+    private void checkThunder(AbsXml data, int index, int epoch) {
+        if (!detailGate.isCurrent(epoch) || data == null) return;
+        if (!SystemConfig.isThunderP2pEnabled()) {
+            // 迅雷通道关闭:跳过解析,但详情结果必须照常发布——本方法是详情成功路径的
+            // 唯一发布点(typed 与 legacy 两条路都经此),直接 return 会让 detailResult
+            // 永不触发、详情页永远停在 loading(2733df2c 引入的回归:开关默认关即全量触发)。
+            if (index == 0) publishDetailResult(epoch, data);
+            return;
+        }
         boolean thunderParse = false;
         if (data.movie != null && data.movie.videoList != null && data.movie.videoList.size() == 1) {
             Movie.Video video = data.movie.videoList.get(0);
@@ -850,6 +1153,7 @@ public class SourceViewModel extends ViewModel {
                 thunderLoop:
                 for (int idx=0;idx<video.urlBean.infoList.size();idx++) {
                     Movie.Video.UrlBean.UrlInfo urlInfo = video.urlBean.infoList.get(idx);
+                    if (urlInfo.beanList == null) continue; // 防御:无线路列表不判雷
                     for (Movie.Video.UrlBean.UrlInfo.InfoBean infoBean : urlInfo.beanList) {
                         if(Thunder.isSupportUrl(infoBean.url)){
                             hasThunder=true;
@@ -862,16 +1166,18 @@ public class SourceViewModel extends ViewModel {
                     Thunder.parse(App.getInstance(), video.urlBean, new Thunder.ThunderCallback() {
                         @Override
                         public void status(int code, String info) {
+                            if (!detailGate.isCurrent(epoch)) return;
                             if (code >= 0) {
                                 LOG.i(info);
                             } else {
                                 video.urlBean.infoList.get(0).beanList.get(0).name = info;
-                                detailResult.postValue(data);
+                                publishDetailResult(epoch, data);
                             }
                         }
 
                         @Override
                         public void list(Map<Integer, String> urlMap) {
+                            if (!detailGate.isCurrent(epoch)) return;
                             for (int key : urlMap.keySet()) {
                                 String playList=urlMap.get(key);
                                 video.urlBean.infoList.get(key).urls = playList;
@@ -892,7 +1198,7 @@ public class SourceViewModel extends ViewModel {
                                 }
                                 video.urlBean.infoList.get(key).beanList = infoBeanList;
                             }
-                            detailResult.postValue(data);
+                            publishDetailResult(epoch, data);
                         }
 
                         @Override
@@ -904,98 +1210,96 @@ public class SourceViewModel extends ViewModel {
             }
         }
         if (!thunderParse && index==0) {
-            detailResult.postValue(data);
+            publishDetailResult(epoch, data);
         }
     }
 
+    /**
+     * push_agent(“播放链接”输入框)本地详情:把用户手工输入的地址包成单集影片。
+     * 磁力/迅雷/荐片经 checkThunder 走迅雷通道解析(受 isThunderP2pEnabled 开关控制,
+     * 关闭时原样发布,PlayFragment.play 会给出去设置的提示);http/https 直链
+     * thunderParse=false,原样发布,点播放即起播。
+     */
+    private void publishPushAgentDetail(int epoch, String url) {
+        if (!detailGate.isCurrent(epoch) || TextUtils.isEmpty(url)) {
+            publishDetailResult(epoch, null);
+            return;
+        }
+        url = url.trim();
+        Movie.Video.UrlBean.UrlInfo.InfoBean infoBean =
+                new Movie.Video.UrlBean.UrlInfo.InfoBean("播放", url);
+        Movie.Video.UrlBean.UrlInfo urlInfo = new Movie.Video.UrlBean.UrlInfo();
+        urlInfo.flag = "直链";
+        urlInfo.urls = "播放$" + url;
+        urlInfo.beanList = new ArrayList<>();
+        urlInfo.beanList.add(infoBean);
+        Movie.Video.UrlBean urlBean = new Movie.Video.UrlBean();
+        urlBean.infoList = new ArrayList<>();
+        urlBean.infoList.add(urlInfo);
+        Movie.Video video = new Movie.Video();
+        video.id = url;
+        video.name = "直链播放";
+        video.type = "直链";
+        video.sourceKey = PUSH_AGENT_KEY;
+        video.urlBean = urlBean;
+        Movie movie = new Movie();
+        movie.videoList = new ArrayList<>();
+        movie.videoList.add(video);
+        AbsXml data = new AbsXml();
+        data.movie = movie;
+        absXml(data, PUSH_AGENT_KEY);
+        checkThunder(data, 0, epoch);
+    }
+
+
+    /**
+     * typed/字符串通道统一归一:回填 sourceKey + 把线路串拆成 beanList
+     * (typed 端即使只给 urls 文本,也能保证 checkThunder/选集可用)。
+     * 发布副作用(postValue/直调监听)仍由调用方各自完成。
+     */
+    private void absXml(com.github.tvbox.osc.bean.AbsXml typed, String sourceKey) {
+        if (typed != null) {
+            com.github.tvbox.osc.spiderapi.AbsXmlParser.normalize(typed, sourceKey);
+        }
+    }
+
+    /** 解析结果发布(原 xml/json 尾部副作用统一;data=null 表示解析失败,按原语义发布 null) */
+    private void publishDetailPayload(MutableLiveData<AbsXml> result, AbsXml data) {
+        if (quickSearchResult == result) {
+            deliverQuickSearchBatch(data);
+        } else if (result != null) {
+            if (result == detailResult)
+                throw new IllegalStateException("详情结果必须携带请求代次");
+            result.postValue(data);
+        }
+    }
 
     private AbsXml xml(MutableLiveData<AbsXml> result, String xml, String sourceKey) {
+        AbsXml data;
         try {
-            XStream xstream = new XStream(new DomDriver());//创建Xstram对象
-            xstream.autodetectAnnotations(true);
-            xstream.processAnnotations(AbsXml.class);
-            xstream.ignoreUnknownElements();
-            if (xml.contains("<year></year>")) {
-                xml = xml.replace("<year></year>", "<year>0</year>");
-            }
-            if (xml.contains("<state></state>")) {
-                xml = xml.replace("<state></state>", "<state>0</state>");
-            }
-            AbsXml data = (AbsXml) xstream.fromXML(xml);
-            absXml(data, sourceKey);
-            if (searchResult == result) {
-                EventBus.getDefault().post(new RefreshEvent(RefreshEvent.TYPE_SEARCH_RESULT, data));
-            } else if (quickSearchResult == result) {
-                EventBus.getDefault().post(new RefreshEvent(RefreshEvent.TYPE_QUICK_SEARCH_RESULT, data));
-            } else if (result != null) {
-                if (result == detailResult) {
-                    checkThunder(data,0);
-                } else {
-                    result.postValue(data);
-                }
-            }
-            return data;
+            data = com.github.tvbox.osc.spiderapi.AbsXmlParser.parseXml(xml, sourceKey);
         } catch (Exception e) {
-            if (searchResult == result) {
-                EventBus.getDefault().post(new RefreshEvent(RefreshEvent.TYPE_SEARCH_RESULT, null));
-            } else if (quickSearchResult == result) {
-                EventBus.getDefault().post(new RefreshEvent(RefreshEvent.TYPE_QUICK_SEARCH_RESULT, null));
-            } else if (result != null) {
-                result.postValue(null);
-            }
-            return null;
+            data = null;
         }
+        publishDetailPayload(result, data);
+        return data;
     }
 
     private AbsXml json(MutableLiveData<AbsXml> result, String json, String sourceKey) {
+        AbsXml data;
         try {
-            // 测试数据
-            /*json = "{\n" +
-                    "\t\"list\": [{\n" +
-                    "\t\t\"vod_id\": \"137133\",\n" +
-                    "\t\t\"vod_name\": \"磁力测试\",\n" +
-                    "\t\t\"vod_pic\": \"https:/img9.doubanio.com/view/photo/s_ratio_poster/public/p2656327176.webp\",\n" +
-                    "\t\t\"type_name\": \"剧情 / 爱情 / 古装\",\n" +
-                    "\t\t\"vod_year\": \"2022\",\n" +
-                    "\t\t\"vod_area\": \"中国大陆\",\n" +
-                    "\t\t\"vod_remarks\": \"40集全\",\n" +
-                    "\t\t\"vod_actor\": \"刘亦菲\",\n" +
-                    "\t\t\"vod_director\": \"杨阳\",\n" +
-                    "\t\t\"vod_content\": \"　　在钱塘开茶铺的赵盼儿（刘亦菲 饰）惊闻未婚夫、新科探花欧阳旭（徐海乔 饰）要另娶当朝高官之女，不甘命运的她誓要上京讨个公道。在途中她遇到了出自权门但生性正直的皇城司指挥顾千帆（陈晓 饰），并卷入江南一场大案，两人不打不相识从而结缘。赵盼儿凭借智慧解救了被骗婚而惨遭虐待的“江南第一琵琶高手”宋引章（林允 饰）与被苛刻家人逼得离家出走的豪爽厨娘孙三娘（柳岩 饰），三位姐妹从此结伴同行，终抵汴京，见识世间繁华。为了不被另攀高枝的欧阳旭从东京赶走，赵盼儿与宋引章、孙三娘一起历经艰辛，将小小茶坊一步步发展为汴京最大的酒楼，揭露了负心人的真面目，收获了各自的真挚感情和人生感悟，也为无数平凡女子推开了一扇平等救赎之门。\",\n" +
-                    "\t\t\"vod_play_from\": \"磁力测试\",\n" +
-                    "\t\t\"vod_play_url\": \"0$magnet:?xt=urn:btih:9e9358b946c427962533472efdd2efd9e9e38c67&dn=%e9%98%b3%e5%85%89%e7%94%b5%e5%bd%b1www.ygdy8.com.%e7%83%ad%e8%a1%80.2022.BD.1080P.%e9%9f%a9%e8%af%ad%e4%b8%ad%e8%8b%b1%e5%8f%8c%e5%ad%97.mkv&tr=udp%3a%2f%2ftracker.opentrackr.org%3a1337%2fannounce&tr=udp%3a%2f%2fexodus.desync.com%3a6969%2fannounce\"\n" +
-                    "\t}]\n" +
-                    "}";*/
-            AbsJson absJson = new Gson().fromJson(json, new TypeToken<AbsJson>() {
-            }.getType());
-            AbsXml data = absJson.toAbsXml();
-            absXml(data, sourceKey);
-            if (searchResult == result) {
-                EventBus.getDefault().post(new RefreshEvent(RefreshEvent.TYPE_SEARCH_RESULT, data));
-            } else if (quickSearchResult == result) {
-                EventBus.getDefault().post(new RefreshEvent(RefreshEvent.TYPE_QUICK_SEARCH_RESULT, data));
-            } else if (result != null) {
-                if (result == detailResult) {
-                    checkThunder(data,0);
-                } else {
-                    result.postValue(data);
-                }
-            }
-            return data;
+            data = com.github.tvbox.osc.spiderapi.AbsXmlParser.parseJson(json, sourceKey);
         } catch (Exception e) {
-            if (searchResult == result) {
-                EventBus.getDefault().post(new RefreshEvent(RefreshEvent.TYPE_SEARCH_RESULT, null));
-            } else if (quickSearchResult == result) {
-                EventBus.getDefault().post(new RefreshEvent(RefreshEvent.TYPE_QUICK_SEARCH_RESULT, null));
-            } else if (result != null) {
-                result.postValue(null);
-            }
-            return null;
+            data = null;
         }
+        publishDetailPayload(result, data);
+        return data;
     }
-
     @Override
     protected void onCleared() {
+        homeSortEpoch.incrementAndGet();
+        listEpoch.incrementAndGet();
+        detailGate.invalidate();
         super.onCleared();
     }
 }

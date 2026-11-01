@@ -1,0 +1,344 @@
+package com.github.tvbox.osc.log.internal;
+
+import android.util.Log;
+
+import androidx.annotation.Nullable;
+
+import com.github.tvbox.osc.log.LogConfig;
+import com.github.tvbox.osc.log.LogEntry;
+import com.github.tvbox.osc.log.LogFilter;
+import com.github.tvbox.osc.log.db.LogDatabase;
+
+import java.util.ArrayList;
+import java.util.Collections;
+import java.util.List;
+import java.util.concurrent.Callable;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
+
+/**
+ * 结构化业务日志仓储（internal：仅供 log 模块内部使用，勿被外部模块引用）。
+ * <p>
+ * 只做 Room 相关的最稳定职责：
+ * <ul>
+ *   <li>批量写入（写走单线程 executor，与 {@link #query} 的读通道分离，避免写突发阻塞查询）；</li>
+ *   <li>条件查询 / 任务维度查询（读走独立 executor，同步阻塞至结果，页面调用放后台线程）；</li>
+ *   <li>按保留天数清理 / 清空 / 防膨胀 trim；</li>
+ *   <li>每日定时清理排定。</li>
+ * </ul>
+ * 采集队列与批量调度在 {@link LogCollector}，本类不持有业务门控状态。
+ * 降级安全：db 为 null（未 init 的 no-op 实例）时查询返回 null、写入空操作。
+ */
+public final class LogRepository {
+
+    private static final int MAX_ROWS = 20_000;
+    private static final long DAY_MS = 24L * 3600 * 1000;
+    private static final long QUERY_TIMEOUT_MS = 5_000;
+    private static final long CLEAR_TIMEOUT_MS = 10_000;
+
+    private final LogDatabase db;
+    private final BatchWriter batchWriter;
+
+    /** Only write-batch failures count here; cleanup and query failures have separate outcomes. */
+    private final Object writeOutcomeLock = new Object();
+    private long writeFailureCount;
+    private long acknowledgedWriteFailureCount;
+
+    interface BatchWriter {
+        void insertAll(List<LogEntry> batch);
+        int count();
+        void trimTo(int keep);
+    }
+
+    /** 写通道：所有落库/清理/清空串行，避免 Room 并发写 */
+    private final ExecutorService writeExecutor = Executors.newSingleThreadExecutor(r -> {
+        Thread t = new Thread(r, "tvbox-log-write");
+        t.setDaemon(true);
+        writeThread = t;
+        return t;
+    });
+
+    /** 写通道线程引用：崩溃路径要"等落库完成",必须能识别"当前就在写线程上"(否则会自己等自己) */
+    private volatile Thread writeThread;
+
+    /** 读通道：与写通道分离，查询不排队等写 */
+    private final ExecutorService queryExecutor = Executors.newSingleThreadExecutor(r -> {
+        Thread t = new Thread(r, "tvbox-log-query");
+        t.setDaemon(true);
+        return t;
+    });
+
+    /** 每日按保留天数清理的定时器（仅真正落库时使用） */
+    private final ScheduledExecutorService cleanupScheduler = Executors.newSingleThreadScheduledExecutor(r -> {
+        Thread t = new Thread(r, "tvbox-log-cleanup");
+        t.setDaemon(true);
+        return t;
+    });
+
+    /** 每日定时清理是否已排定（防重复排定） */
+    private volatile boolean dailyCleanupScheduled = false;
+
+    public LogRepository(@Nullable LogDatabase db) {
+        this.db = db;
+        this.batchWriter = db == null ? null : new BatchWriter() {
+            @Override public void insertAll(List<LogEntry> batch) { db.logDao().insertAll(batch); }
+            @Override public int count() { return db.logDao().count(); }
+            @Override public void trimTo(int keep) { db.logDao().trimTo(keep); }
+        };
+    }
+
+    /** JVM test seam for the write barrier; production always uses the Room constructor. */
+    LogRepository(BatchWriter batchWriter) {
+        this.db = null;
+        this.batchWriter = batchWriter;
+    }
+
+    /** 降级模式（未 init / no-op）判断 */
+    public boolean isNoop() {
+        return db == null;
+    }
+
+    public boolean isWriteThread() {
+        return Thread.currentThread() == writeThread;
+    }
+
+    // ------------------------------------------------------------------
+    // 写通道（批量落库）
+    // ------------------------------------------------------------------
+
+    /** 批量落库 + 超上限 trim（写 executor 串行执行）；降级模式空操作 */
+    public void insertAllAsync(final List<LogEntry> batch) {
+        if (batchWriter == null || batch == null || batch.isEmpty()) return;
+        try {
+            writeExecutor.execute(() -> insertBatch(batch));
+        } catch (Throwable failure) {
+            recordWriteFailure();
+            logWriteFailure("无法排入业务日志写队列", failure);
+        }
+    }
+
+    /**
+     * 批量落库并<b>等待写完</b>（崩溃路径专用）。
+     * <p>
+     * 未捕获异常处理完紧接着就是 CAOC 的 {@code killProcess + System.exit}，异步落库几乎必然来不及,
+     * "首次崩溃查不到栈"就是这么来的。这里同步等一次,超时也返回(绝不因为写日志把崩溃处理卡死)。
+     *
+     * @param timeoutMs 最长等待毫秒数
+     * @return true=已落库(或降级模式无需落库);false=超时未完成
+     */
+    public boolean insertAllBlocking(final List<LogEntry> batch, long timeoutMs) {
+        if (batchWriter == null || batch == null || batch.isEmpty()) return true;
+        if (Thread.currentThread() == writeThread) {
+            // 极端情况:崩溃就发生在写线程上 —— 不能再往自己身上提交任务等它,直接同步写
+            return insertBatch(batch);
+        }
+        try {
+            Future<Boolean> future = writeExecutor.submit(() -> insertBatch(batch));
+            return future.get(Math.max(1L, timeoutMs), TimeUnit.MILLISECONDS);
+        } catch (InterruptedException interrupted) {
+            Thread.currentThread().interrupt();
+            return false;
+        } catch (Throwable th) {
+            logWriteFailure("业务日志等待落库失败/超时", th);
+            return false;
+        }
+    }
+
+    /** Wait for queued batches and report failures since the previous completed write barrier once. */
+    public boolean awaitWrites(long timeoutMs) {
+        if (batchWriter == null) return true;
+        final long previouslyAcknowledged;
+        synchronized (writeOutcomeLock) {
+            previouslyAcknowledged = acknowledgedWriteFailureCount;
+        }
+        if (Thread.currentThread() == writeThread) {
+            return acknowledgeWriteFailures(previouslyAcknowledged, currentWriteFailureCount());
+        }
+        try {
+            // The returned count is sampled on the write thread after all earlier batches.
+            Future<Long> barrier = writeExecutor.submit(this::currentWriteFailureCount);
+            long failuresThroughBarrier = barrier.get(Math.max(1L, timeoutMs), TimeUnit.MILLISECONDS);
+            return acknowledgeWriteFailures(previouslyAcknowledged, failuresThroughBarrier);
+        } catch (InterruptedException interrupted) {
+            Thread.currentThread().interrupt();
+            return false;
+        } catch (Throwable th) {
+            logWriteFailure("等待业务日志写入失败/超时", th);
+            return false;
+        }
+    }
+
+    /** 单线程写通道的实际写入体(异步/同步两条路径共用) */
+    private boolean insertBatch(List<LogEntry> batch) {
+        try {
+            batchWriter.insertAll(batch);
+            if (batchWriter.count() > MAX_ROWS) {
+                batchWriter.trimTo(MAX_ROWS);
+            }
+            return true;
+        } catch (Throwable th) {
+            recordWriteFailure();
+            logWriteFailure("日志落库失败", th);
+            return false;
+        }
+    }
+
+    private void recordWriteFailure() {
+        synchronized (writeOutcomeLock) { writeFailureCount++; }
+    }
+
+    private long currentWriteFailureCount() {
+        synchronized (writeOutcomeLock) { return writeFailureCount; }
+    }
+
+    private boolean acknowledgeWriteFailures(long previouslyAcknowledged, long throughBarrier) {
+        synchronized (writeOutcomeLock) {
+            acknowledgedWriteFailureCount = Math.max(acknowledgedWriteFailureCount, throughBarrier);
+        }
+        return throughBarrier == previouslyAcknowledged;
+    }
+
+    private static void logWriteFailure(String message, Throwable failure) {
+        // Never let the asynchronous writer's diagnostic escape into the uncaught-exception path.
+        try { Log.e("LogRepository", message, failure); }
+        catch (Throwable ignored) { }
+    }
+
+    /** 按保留天数清理（异步）；降级模式空操作 */
+    public void deleteBeforeAsync(int retentionDays) {
+        if (db == null) return;
+        final long before = System.currentTimeMillis() - Math.max(1, retentionDays) * DAY_MS;
+        writeExecutor.execute(() -> {
+            try {
+                db.logDao().deleteBefore(before);
+            } catch (Throwable th) {
+                Log.e("LogRepository", "日志清理失败", th);
+            }
+        });
+    }
+
+    /** 清空全部业务日志（异步）；降级模式空操作 */
+    public void clearAllAsync() {
+        if (db == null) return;
+        writeExecutor.execute(() -> {
+            try {
+                db.logDao().clearAll();
+            } catch (Throwable th) {
+                Log.e("LogRepository", "日志清空失败", th);
+            }
+        });
+    }
+
+    /** 缓存管理页专用：在写队列中清空并等待完成，随后尽力回收本日志库空闲页。 */
+    public boolean clearAllBlocking() {
+        if (db == null) return true;
+        if (Thread.currentThread() == writeThread) return clearAndCompact();
+        try {
+            return writeExecutor.submit(this::clearAndCompact)
+                    .get(CLEAR_TIMEOUT_MS, TimeUnit.MILLISECONDS);
+        } catch (InterruptedException error) {
+            Thread.currentThread().interrupt();
+            return false;
+        } catch (Throwable error) {
+            Log.e("LogRepository", "等待业务日志清空失败", error);
+            return false;
+        }
+    }
+
+    private boolean clearAndCompact() {
+        try {
+            db.logDao().clearAll();
+        } catch (Throwable error) {
+            Log.e("LogRepository", "业务日志清空失败", error);
+            return false;
+        }
+        try {
+            // 只操作本模块的 tvbox_log.db；Room 数据库保持打开，绝不删除活跃 DB 文件。
+            db.getOpenHelper().getWritableDatabase().execSQL("VACUUM");
+            try (android.database.Cursor cursor = db.getOpenHelper().getWritableDatabase()
+                    .query("PRAGMA wal_checkpoint(TRUNCATE)")) {
+                if (cursor.moveToFirst() && cursor.getInt(0) != 0)
+                    Log.w("LogRepository", "日志数据库 WAL 暂时无法截断");
+            }
+        } catch (Throwable error) {
+            // 内容已清空；压缩失败不把清空结果误报成失败，后续 SQLite 仍可复用空闲页。
+            Log.w("LogRepository", "日志记录已清空，数据库文件压缩暂未完成", error);
+        }
+        return true;
+    }
+
+    // ------------------------------------------------------------------
+    // 读通道（同步阻塞至结果；页面调用建议放后台线程）
+    // ------------------------------------------------------------------
+
+    /** 组合筛选查询:取最近的分页结果,页内按时间正序返回;降级模式返回 null。 */
+    @Nullable
+    public List<LogEntry> query(final LogFilter f) {
+        if (db == null) return null;
+        return chronologicalPage(await(() -> db.logDao().query(
+                f.category, f.subType, f.minLevel, f.taskKey,
+                f.fromTs, f.toTs, f.keyword, f.limit, f.offset)));
+    }
+
+    /** 任务维度视图:最近的分页结果按时间正序返回;降级模式返回 null。 */
+    @Nullable
+    public List<LogEntry> queryByTask(String taskKey, int limit, int offset) {
+        if (db == null) return null;
+        return chronologicalPage(await(() -> db.logDao().queryByTask(taskKey, limit, offset)));
+    }
+
+    @Nullable
+    static List<LogEntry> chronologicalPage(@Nullable List<LogEntry> newestFirst) {
+        if (newestFirst == null) return null;
+        // 先限量选出最近的记录,再反转整条记录;不能把多行详情或异常栈逐行倒序。
+        List<LogEntry> chronological = new ArrayList<>(newestFirst);
+        Collections.reverse(chronological);
+        return chronological;
+    }
+
+    /** 逻辑内容大小，必须由后台调用；查询失败返回 null，不能误报 0 字节。 */
+    @Nullable
+    public Long contentBytes() {
+        if (db == null) return 0L;
+        return await(() -> db.logDao().contentBytes());
+    }
+
+    private <T> T await(Callable<T> callable) {
+        try {
+            Future<T> f = queryExecutor.submit(callable);
+            return f.get(QUERY_TIMEOUT_MS, TimeUnit.MILLISECONDS);
+        } catch (Throwable th) {
+            Log.e("LogRepository", "日志查询失败", th);
+            return null;
+        }
+    }
+
+    // ------------------------------------------------------------------
+    // 运维：每日定时清理（排定一次，按 LogConfig 保留天数）
+    // ------------------------------------------------------------------
+
+    /**
+     * 排定每日定时清理(只排一次):按 LogConfig 保留天数删除到期业务日志。
+     * 开启日志或应用启动(开启状态)时调用；降级模式（db 为 null）不排定。
+     */
+    public void scheduleDailyCleanup() {
+        if (db == null) return;
+        if (dailyCleanupScheduled) return;
+        synchronized (this) {
+            if (dailyCleanupScheduled) return;
+            dailyCleanupScheduled = true;
+        }
+        try {
+            cleanupScheduler.scheduleAtFixedRate(() -> {
+                try {
+                    deleteBeforeAsync(LogConfig.getRetentionDays());
+                } catch (Throwable ignored) {
+                }
+            }, 0L, 1L, TimeUnit.DAYS);
+        } catch (Throwable ignored) {
+        }
+    }
+}

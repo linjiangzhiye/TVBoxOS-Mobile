@@ -14,15 +14,16 @@
 
     <com.airbnb.lottie.LottieAnimationView
         android:id="@+id/play_loading"
-        android:layout_width="30dp"
-        android:layout_height="30dp"
+        android:layout_width="72dp"
+        android:layout_height="72dp"
         android:layout_gravity="center"
+        android:tag="vod_control_loading"
         app:lottie_autoPlay="true"
-        android:scaleType="centerCrop"
-        app:lottie_fileName="anim_loading.json"
-        app:lottie_speed="2"
+        android:scaleType="fitCenter"
+        app:lottie_fileName="loading/glowing_fish_loader/glowing_fish_loader.json"
+        app:lottie_speed="1"
         app:lottie_loop="true"
-        app:lottie_repeatMode="reverse"/>
+        app:lottie_repeatMode="restart"/>
 
     <ImageView
         android:id="@+id/play_load_error"
@@ -32,7 +33,7 @@
         android:alpha="0.75"
         android:focusable="false"
         android:focusableInTouchMode="false"
-        android:src="@drawable/icon_error"
+        android:src="@drawable/ic_error"
         android:visibility="gone"
         tools:visibility="visible" />
 
@@ -41,8 +42,9 @@
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
         android:layout_gravity="center"
-        android:layout_marginTop="@dimen/dp_50"
-        android:textColor="@color/white"
+        android:layout_marginTop="42dp"
+        android:textColor="@color/color_FFFFFF"
+        android:textSize="16sp"
         tools:text="1111111111111"
 
          />

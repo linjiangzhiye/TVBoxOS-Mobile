@@ -1,0 +1,288 @@
+package com.github.tvbox.osc.util.cache;
+
+import static org.junit.Assert.assertEquals;
+import static org.junit.Assert.assertFalse;
+import static org.junit.Assert.assertNotNull;
+import static org.junit.Assert.assertTrue;
+
+import org.junit.Assume;
+import org.junit.Rule;
+import org.junit.Test;
+import org.junit.rules.TemporaryFolder;
+
+import java.io.File;
+import java.io.IOException;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.util.Arrays;
+import java.util.HashSet;
+import java.util.concurrent.atomic.AtomicLong;
+
+public class CacheCatalogTest {
+    @Rule public TemporaryFolder temporaryFolder = new TemporaryFolder();
+
+    @Test public void onlyKnownStaleFilesAreClearedAndAllBytesRemainAccountedFor() throws Exception {
+        File internal = temporaryFolder.newFolder("internal");
+        File external = temporaryFolder.newFolder("external");
+        File staleImage = write(internal, "image_viewer/img_old", "image old", true);
+        File recentImage = write(internal, "image_viewer/img_recent", "image recent", false);
+        File staleArchive = write(internal, "mbox_config_123.zip", "archive", true);
+        File staleExport = write(external, "subscription_export/list.zip", "export", true);
+        File subtitle = write(internal, "zimu/subtitle.srt", "subtitle", true);
+        File unknown = write(internal, "unknown.dat", "unknown", true);
+        File video = write(external, "exo-video-cache/span", "video", true);
+        CacheCatalog catalog = new CacheCatalog(internal, external, () -> {});
+
+        CacheCatalog.Snapshot before = catalog.scan();
+        long expected = Arrays.asList(staleImage, recentImage, staleArchive, staleExport,
+                subtitle, unknown, video).stream().mapToLong(File::length).sum();
+        assertEquals(expected, before.totalBytes);
+        assertEquals(expected, before.clearableBytes + before.protectedBytes);
+        assertEquals(staleImage.length() + staleArchive.length() + staleExport.length(),
+                size(before, CacheCatalog.TEMP_FILES));
+
+        CacheCatalog.ClearResult result = catalog.clear(new HashSet<>(Arrays.asList(
+                CacheCatalog.TEMP_FILES)));
+        assertTrue(result.failures.isEmpty());
+        assertFalse(staleImage.exists());
+        assertFalse(staleArchive.exists());
+        assertFalse(staleExport.exists());
+        assertTrue(recentImage.exists());
+        assertTrue(subtitle.exists());
+        assertTrue(unknown.exists());
+        assertTrue(video.exists());
+        assertEquals(recentImage.length() + subtitle.length() + unknown.length() + video.length(),
+                result.after.totalBytes);
+    }
+
+    @Test public void symlinkCannotEscapeCacheRootDuringScanOrClear() throws Exception {
+        File internal = temporaryFolder.newFolder("internal");
+        File outside = write(temporaryFolder.getRoot(), "outside.dat", "must survive", true);
+        File viewer = new File(internal, "image_viewer");
+        assertTrue(viewer.mkdir());
+        File link = new File(viewer, "img_old");
+        try {
+            Files.createSymbolicLink(link.toPath(), outside.toPath());
+        } catch (IOException | UnsupportedOperationException | SecurityException error) {
+            Assume.assumeNoException("Symbolic links unavailable on this host", error);
+        }
+        CacheCatalog catalog = new CacheCatalog(internal, null, () -> {});
+        assertEquals(0, catalog.scan().totalBytes);
+        CacheCatalog.ClearResult result = catalog.clear(
+                new HashSet<>(Arrays.asList(CacheCatalog.TEMP_FILES)));
+        assertTrue(result.failures.isEmpty());
+        assertTrue(outside.exists());
+        assertTrue(link.exists());
+    }
+
+    @Test public void redirectedCacheRootCannotBeScannedOrCleared() throws Exception {
+        File outside = temporaryFolder.newFolder("outside-cache");
+        File stale = write(outside, "image_viewer/img_old", "must survive", true);
+        File image = write(outside, "image_http_cache/journal", "must survive", true);
+        File alias = new File(temporaryFolder.getRoot(), "cache-alias");
+        try {
+            Files.createSymbolicLink(alias.toPath(), outside.toPath());
+        } catch (IOException | UnsupportedOperationException | SecurityException error) {
+            Assume.assumeNoException("Symbolic links unavailable on this host", error);
+        }
+        CacheCatalog catalog = new CacheCatalog(alias, null,
+                () -> { throw new AssertionError("Image cache evictor must not run"); });
+
+        assertEquals(0L, catalog.scan().totalBytes);
+        CacheCatalog.ClearResult result = catalog.clear(new HashSet<>(Arrays.asList(
+                CacheCatalog.TEMP_FILES, CacheCatalog.IMAGE_HTTP)));
+        assertTrue(result.failures.containsKey(CacheCatalog.TEMP_FILES));
+        assertTrue(result.failures.containsKey(CacheCatalog.IMAGE_HTTP));
+        assertTrue(stale.exists());
+        assertTrue(image.exists());
+    }
+
+    @Test public void aliasInParentPathDoesNotHideRealCacheRoot() throws Exception {
+        File realParent = temporaryFolder.newFolder("real-parent");
+        File actualRoot = new File(realParent, "cache");
+        assertTrue(actualRoot.mkdir());
+        File stale = write(actualRoot, "image_viewer/img_old", "safe to clear", true);
+        File parentAlias = new File(temporaryFolder.getRoot(), "parent-alias");
+        try {
+            Files.createSymbolicLink(parentAlias.toPath(), realParent.toPath());
+        } catch (IOException | UnsupportedOperationException | SecurityException error) {
+            Assume.assumeNoException("Symbolic links unavailable on this host", error);
+        }
+        CacheCatalog catalog = new CacheCatalog(new File(parentAlias, "cache"), null, () -> {});
+
+        assertEquals(stale.length(), catalog.scan().totalBytes);
+        CacheCatalog.ClearResult result = catalog.clear(
+                new HashSet<>(Arrays.asList(CacheCatalog.TEMP_FILES)));
+        assertTrue(result.failures.isEmpty());
+        assertFalse(stale.exists());
+    }
+
+    @Test public void sourceCachesAreCountedButProtectedFromCleanup() throws Exception {
+        File internal = temporaryFolder.newFolder("internal");
+        File files = temporaryFolder.newFolder("files");
+        File jar = write(files, "csp.jar", "source jar", true);
+        File config = write(files, "0123456789abcdef0123456789abcdef", "source config", true);
+        write(files, "poster/cover.jpg", "saved poster", true);
+        CacheCatalog catalog = new CacheCatalog(internal, null, files, () -> {});
+
+        CacheCatalog.Snapshot before = catalog.scan();
+        assertEquals(jar.length() + config.length(), before.totalBytes);
+        assertEquals(0L, before.clearableBytes);
+        assertEquals(before.totalBytes, before.protectedBytes);
+
+        CacheCatalog.ClearResult after = catalog.clear(new HashSet<>(Arrays.asList(
+                CacheCatalog.TEMP_FILES)));
+        assertTrue(after.failures.isEmpty());
+        assertTrue(jar.exists());
+        assertTrue(config.exists());
+        assertEquals(before.totalBytes, after.after.totalBytes);
+    }
+
+    @Test public void runtimeLogsCanBeClearedWithoutTouchingOtherCategories() throws Exception {
+        File internal = temporaryFolder.newFolder("internal-logs");
+        File files = temporaryFolder.newFolder("files-logs");
+        File sourceJar = write(files, "csp.jar", "keep source", true);
+        File image = write(internal, "image_http_cache/journal", "keep image", true);
+        AtomicLong logBytes = new AtomicLong(1_024);
+        CacheCatalog.LogCacheAccess logs = new CacheCatalog.LogCacheAccess() {
+            @Override public long bytes() { return logBytes.get(); }
+            @Override public boolean clear() { logBytes.set(0L); return true; }
+        };
+        CacheCatalog catalog = new CacheCatalog(internal, null, files, () -> {}, logs);
+
+        CacheCatalog.Snapshot before = catalog.scan();
+        assertEquals(1_024L, size(before, CacheCatalog.LOGS));
+        assertEquals(1_024L + sourceJar.length() + image.length(), before.totalBytes);
+
+        CacheCatalog.ClearResult result = catalog.clear(new HashSet<>(Arrays.asList(CacheCatalog.LOGS)));
+        assertTrue(result.failures.isEmpty());
+        assertTrue(result.clearedIds.contains(CacheCatalog.LOGS));
+        assertEquals(0L, size(result.after, CacheCatalog.LOGS));
+        assertEquals(sourceJar.length() + image.length(), result.after.totalBytes);
+        assertTrue(sourceJar.exists());
+        assertTrue(image.exists());
+    }
+
+    @Test public void unavailableLogSizeDoesNotHideOtherClearableCache() throws Exception {
+        File internal = temporaryFolder.newFolder("internal-log-error");
+        File stale = write(internal, "mbox_config_older.zip", "stale export", true);
+        CacheCatalog.LogCacheAccess logs = new CacheCatalog.LogCacheAccess() {
+            @Override public long bytes() { throw new IllegalStateException("database busy"); }
+            @Override public boolean clear() { throw new AssertionError("Unavailable logs cannot be cleared"); }
+        };
+        CacheCatalog catalog = new CacheCatalog(internal, null, null, () -> {}, logs);
+
+        CacheCatalog.Snapshot snapshot = catalog.scan();
+        assertTrue(snapshot.logSizeUnavailable);
+        assertEquals(stale.length(), snapshot.totalBytes);
+        for (CacheCatalog.Entry entry : snapshot.entries)
+            if (CacheCatalog.LOGS.equals(entry.id)) assertFalse(entry.clearable);
+        CacheCatalog.ClearResult result = catalog.clear(new HashSet<>(Arrays.asList(CacheCatalog.TEMP_FILES)));
+        assertFalse(stale.exists());
+        assertTrue(result.failures.isEmpty());
+    }
+
+    /**
+     * 爬虫 jar 拿到的是 App 的 Context，登录态可能写在 files/ 里而不是 /sdcard。
+     * 这类凭据必须同样能被列出并清理，否则会出现"清完凭据、重启 App，扫码状态还在"。
+     */
+    @Test public void credentialsInAppPrivateFilesAreFoundAndCleared() throws Exception {
+        File internal = temporaryFolder.newFolder("internal");
+        File external = temporaryFolder.newFolder("external");
+        File files = temporaryFolder.newFolder("files");
+        File credential = write(files, "tvfan/Cloud-drive.txt", "cookie=abc", false);
+        CacheCatalog catalog = new CacheCatalog(internal, external, files, () -> {});
+
+        CacheCatalog.Snapshot snapshot = catalog.scan();
+        assertTrue(size(snapshot, CacheCatalog.CLOUD_CREDENTIALS) > 0);
+        String detail = null;
+        for (CacheCatalog.Entry entry : snapshot.entries)
+            if (CacheCatalog.CLOUD_CREDENTIALS.equals(entry.id)) detail = entry.detail;
+        assertNotNull(detail);
+        assertTrue(detail.contains("应用私有"));
+        assertTrue(detail.contains("Cloud-drive.txt"));
+
+        CacheCatalog.ClearResult result =
+                catalog.clear(new HashSet<>(Arrays.asList(CacheCatalog.CLOUD_CREDENTIALS)));
+        assertFalse(credential.exists());
+        assertTrue(result.failures.isEmpty());
+    }
+
+    /**
+     * 爬虫 jar 常把 token 塞在 {@code files/spider/} 这类子目录里，浅层递归要能找到；
+     * 图片缓存目录里的同名文件不参与，避免把缓存框架自己的文件当成凭据删掉。
+     */
+    @Test public void credentialsNestedInUnknownSubdirAreFound() throws Exception {
+        File internal = temporaryFolder.newFolder("internal");
+        File external = temporaryFolder.newFolder("external");
+        File files = temporaryFolder.newFolder("files");
+        File nested = write(files, "spider/quark_cookie.txt", "token=abc", false);
+        File cachedImage = write(internal, "image_http_cache/cookie.txt", "not a credential", false);
+        CacheCatalog catalog = new CacheCatalog(internal, external, files, () -> {});
+
+        CacheCatalog.Snapshot snapshot = catalog.scan();
+        assertTrue(size(snapshot, CacheCatalog.CLOUD_CREDENTIALS) > 0);
+
+        catalog.clear(new HashSet<>(Arrays.asList(CacheCatalog.CLOUD_CREDENTIALS)));
+        assertFalse(nested.exists());
+        assertTrue(cachedImage.exists());
+    }
+
+    /**
+     * 0 字节凭据必须能被看见：登录失败但文件被创建出来时就是空文件，源只看"文件存在"
+     * 就当成已登录 —— 表现正是"既不弹二维码、也没有播放地址"，清掉才能重新扫码。
+     */
+    @Test public void emptyCredentialFileIsFoundAndCleared() throws Exception {
+        File internal = temporaryFolder.newFolder("internal");
+        File external = temporaryFolder.newFolder("external");
+        File files = temporaryFolder.newFolder("files");
+        File empty = write(files, "tvfan/Cloud-drive.txt", "", false);
+        CacheCatalog catalog = new CacheCatalog(internal, external, files, () -> {});
+
+        CacheCatalog.Snapshot snapshot = catalog.scan();
+        String detail = null;
+        for (CacheCatalog.Entry entry : snapshot.entries)
+            if (CacheCatalog.CLOUD_CREDENTIALS.equals(entry.id)) detail = entry.detail;
+        assertNotNull(detail);
+        assertTrue(detail.contains("Cloud-drive.txt"));
+        assertTrue(detail.contains("空文件"));
+
+        catalog.clear(new HashSet<>(Arrays.asList(CacheCatalog.CLOUD_CREDENTIALS)));
+        assertFalse(empty.exists());
+    }
+
+    /**
+     * 本地文件服务会把「约定目录下的凭据文件」放给回环上的爬虫读取；
+     * 同目录的笔记、其他目录的同名文件、不存在的路径都不能被放行。
+     */
+    @Test public void onlyKnownCredentialFilesAreExposedToLocalReaders() throws Exception {
+        File external = temporaryFolder.newFolder("external");
+        File cloudDrive = write(external, "tvfan/Cloud-drive.txt", "cookie=abc", false);
+        File userNote = write(external, "tvfan/note.txt", "my own notes", false);
+        File elsewhere = write(external, "Documents/cookie.txt", "not a spider file", false);
+        File notCreatedYet = new File(external, "tvfan/cookie.txt");
+
+        assertTrue(CacheCatalog.isCloudCredential(cloudDrive, external));
+        assertFalse(CacheCatalog.isCloudCredential(userNote, external));
+        assertFalse(CacheCatalog.isCloudCredential(elsewhere, external));
+        assertFalse(CacheCatalog.isCloudCredential(notCreatedYet, external));
+        assertFalse(CacheCatalog.isCloudCredential(cloudDrive, null));
+    }
+
+    private static File write(File root, String relative, String contents, boolean stale)
+            throws IOException {
+        File target = new File(root, relative);
+        File parent = target.getParentFile();
+        if (!parent.exists() && !parent.mkdirs()) throw new IOException("Cannot create test directory");
+        Files.write(target.toPath(), contents.getBytes(StandardCharsets.UTF_8));
+        if (stale && !target.setLastModified(System.currentTimeMillis() - 48L * 60 * 60 * 1000))
+            throw new IOException("Cannot set test file timestamp");
+        return target;
+    }
+
+    private static long size(CacheCatalog.Snapshot snapshot, String id) {
+        for (CacheCatalog.Entry entry : snapshot.entries)
+            if (id.equals(entry.id)) return entry.sizeBytes;
+        throw new AssertionError("Missing category " + id);
+    }
+}

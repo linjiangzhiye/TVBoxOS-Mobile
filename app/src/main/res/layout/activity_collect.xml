@@ -6,13 +6,11 @@
     xmlns:tools="http://schemas.android.com/tools"
     android:orientation="vertical">
 
-    <com.hjq.bar.TitleBar
+    <com.github.tvbox.osc.ui.kit.AppTitleBar
         android:id="@+id/title_bar"
         android:layout_width="match_parent"
-        android:layout_height="60dp"
-        app:title="收藏"
-        app:lineVisible="false"
-        app:rightIcon="@drawable/ic_clear"/>
+        android:layout_height="wrap_content"
+        app:title="收藏"/>
 
     <TextView
         android:id="@+id/top_tip"
@@ -22,12 +20,36 @@
         android:layout_marginVertical="10dp"
         android:visibility="gone"
         tools:visibility="visible"
-        android:text="长按取消收藏"/>
+        android:text="长按多选收藏"
+        android:textColor="@color/text_sub_foreground" />
 
-    <androidx.recyclerview.widget.RecyclerView
-        android:id="@+id/mGridView"
+    <FrameLayout
         android:layout_width="match_parent"
-        android:layout_height="match_parent"
-        android:paddingHorizontal="10dp"
-        android:paddingTop="10dp"/>
+        android:layout_height="0dp"
+        android:layout_weight="1">
+
+        <androidx.recyclerview.widget.RecyclerView
+            android:id="@+id/mGridView"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent"
+            android:paddingHorizontal="10dp"
+            android:paddingTop="10dp"
+            android:paddingBottom="10dp"
+            android:clipToPadding="false" />
+
+        <!-- 空态:无收藏时展示(公共组件) -->
+        <include
+            android:id="@+id/ll_empty"
+            layout="@layout/view_empty"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent"
+            android:visibility="gone" />
+    </FrameLayout>
+
+    <com.github.tvbox.osc.ui.kit.SelectActionBar
+        android:id="@+id/select_action_bar"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:visibility="gone"
+        tools:visibility="visible" />
 </LinearLayout>

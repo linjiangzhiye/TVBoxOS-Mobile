@@ -1,28 +1,45 @@
 package com.github.tvbox.osc.server;
 
 import android.annotation.SuppressLint;
+import android.content.ContentUris;
 import android.content.Context;
+import android.database.Cursor;
+import android.net.Uri;
 import android.net.wifi.WifiManager;
 import android.os.Environment;
+import android.os.Handler;
+import android.os.Looper;
+import android.os.ParcelFileDescriptor;
+import android.provider.MediaStore;
 import android.util.Base64;
 
 import com.github.tvbox.osc.R;
-import com.github.tvbox.osc.api.ApiConfig;
 import com.github.tvbox.osc.base.App;
-import com.github.tvbox.osc.event.ServerEvent;
+import com.github.tvbox.osc.cast.CastMediaDns;
+import com.github.tvbox.osc.config.SystemConfig;
+import com.github.tvbox.osc.config.LanSessionConfig;
+import com.github.tvbox.osc.log.Category;
+import com.github.tvbox.osc.log.LogStore;
+import com.github.tvbox.osc.service.LanServerService;
+import com.github.tvbox.osc.transfer.ConfigDataExchange;
+import com.github.tvbox.osc.transfer.ConfigBundle;
+import com.github.tvbox.osc.transfer.SubscriptionImportFiles;
 import com.github.tvbox.osc.util.FileUtils;
+import com.github.tvbox.osc.util.HeavyTaskUtil;
+import com.github.tvbox.osc.util.MediaRelayCleanup;
 import com.github.tvbox.osc.util.OkGoHelper;
+import com.github.tvbox.osc.util.DiagnosticLogLimiter;
+import xyz.doikki.videoplayer.player.PlaybackErrorReporter;
 import com.google.gson.Gson;
 import com.google.gson.JsonArray;
 import com.google.gson.JsonObject;
 
-import org.greenrobot.eventbus.EventBus;
-
-import java.io.BufferedOutputStream;
 import java.io.ByteArrayInputStream;
+import java.io.ByteArrayOutputStream;
+import java.io.BufferedInputStream;
 import java.io.File;
 import java.io.FileInputStream;
-import java.io.FileOutputStream;
+import java.io.FilterInputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.net.Inet4Address;
@@ -31,19 +48,39 @@ import java.net.NetworkInterface;
 import java.net.SocketException;
 import java.text.SimpleDateFormat;
 import java.util.ArrayList;
+import java.util.ArrayDeque;
 import java.util.Arrays;
 import java.util.Calendar;
 import java.util.Comparator;
 import java.util.Date;
 import java.util.Enumeration;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
+import java.util.Set;
+import java.util.UUID;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
-import java.util.zip.ZipEntry;
-import java.util.zip.ZipFile;
+import java.security.SecureRandom;
+import java.security.MessageDigest;
+import java.nio.charset.StandardCharsets;
+import java.util.Locale;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.FutureTask;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.zip.GZIPInputStream;
 
 import fi.iki.elonen.NanoHTTPD;
+import okhttp3.Request;
+import org.brotli.dec.BrotliInputStream;
+
+import com.github.tvbox.osc.share.ShareException;
+import com.github.tvbox.osc.share.SharePackage;
+import com.github.tvbox.osc.share.transport.lan.LanImportReceiver;
+import com.github.tvbox.osc.share.transport.lan.LanShareEndpoints;
+import com.github.tvbox.osc.share.transport.lan.LanShareOptions;
+import com.github.tvbox.osc.share.transport.lan.LanShareSession;
 
 /**
  * @author pj567
@@ -52,7 +89,7 @@ import fi.iki.elonen.NanoHTTPD;
  */
 public class RemoteServer extends NanoHTTPD {
     private Context mContext;
-    public static int serverPort = 9978;
+    public static volatile int serverPort = 9978;
     private boolean isStarted = false;
     private DataReceiver mDataReceiver;
     private ArrayList < RequestProcess > getRequestList = new ArrayList < > ();
@@ -60,19 +97,1199 @@ public class RemoteServer extends NanoHTTPD {
 
     public static String m3u8Content;
 
+    /** 每台设备独立的配对会话；踢出时撤销该设备的 Cookie 或请求头令牌。 */
+    private volatile String pairingCode;
+    /** 只给本进程的本地文件读取使用，不通过 HTTP 响应或配对接口发布。 */
+    private final String localReadToken = generateToken();
+    private final Map<String, FailedPairing> failedPairings = new ConcurrentHashMap<>();
+    private long lastPlaybackAuthDeniedLogAt;
+    private final Map<String, LanDevice> devices = new ConcurrentHashMap<>();
+    private volatile long lastSessionsSavedAt;
+    private final AtomicBoolean sessionsSaveQueued = new AtomicBoolean();
+    private volatile boolean sessionsPersistenceClosed;
+    private static final long ACTIVE_DEVICE_WINDOW_MS = 60000;
+    private static final long SESSION_WINDOW_MS = 600000;
+    private static final long MAX_PLAYBACK_TIME_MS = TimeUnit.DAYS.toMillis(7);
+    private volatile EpisodeCast episodeCast;
+    /** 最近一次成功发布的浏览器投屏，不随详情页面生命周期结束。 */
+    private volatile String activeBrowserId;
+    private final Handler mainHandler = new Handler(Looper.getMainLooper());
+
+    /** 局域网分享会话(令牌 → 会话);由 AppLanShareHost 桥接驱动 */
+    private final Map<String, ShareSession> shareSessions = new ConcurrentHashMap<>();
+    /** 上传接收口(长期存在,由 LanShareHost.setImportReceiver 设置/清除) */
+    private volatile LanImportReceiver shareImportReceiver;
+    private volatile String shareImportToken;
+
+    public interface NextEpisodeHandler {
+        boolean playNext();
+        default boolean selectEpisode(int index) { return false; }
+    }
+
+    private static final class EpisodeCast {
+        final String owner;
+        final String deviceId;
+        final NextEpisodeHandler handler;
+        volatile List<String> episodes;
+        volatile int selectedIndex;
+
+        EpisodeCast(String owner, String deviceId, List<String> episodes, int selectedIndex,
+                    NextEpisodeHandler handler) {
+            this.owner = owner;
+            this.deviceId = deviceId;
+            this.episodes = new ArrayList<>(episodes);
+            this.selectedIndex = selectedIndex;
+            this.handler = handler;
+        }
+    }
+
+    /** 浏览器实际播放状态的不可变快照，仅供当前投屏页面读取。 */
+    public static final class BrowserPlaybackState {
+        public final long positionMs;
+        public final long durationMs;
+        public final boolean paused;
+        public final long updatedAtMs;
+        public final long revision;
+        public final boolean active;
+        public final boolean online;
+        public final String title;
+        public final String deviceName;
+
+        private BrowserPlaybackState(long positionMs, long durationMs, boolean paused,
+                                     long updatedAtMs, long revision, boolean online, String title,
+                                     String deviceName) {
+            this.positionMs = positionMs;
+            this.durationMs = durationMs;
+            this.paused = paused;
+            this.updatedAtMs = updatedAtMs;
+            this.revision = revision;
+            this.active = true;
+            this.online = online;
+            this.title = title;
+            this.deviceName = deviceName;
+        }
+    }
+
+    /** 详情页可重建的定位快照；与页面 owner 和临时选集回调分开保存。 */
+    public static final class BrowserCastDetail {
+        public final String sessionId;
+        public final String sourceKey;
+        public final String vodId;
+        public final String vodName;
+        public final String playFlag;
+        public final int selectedIndex;
+        public final boolean reverseSort;
+        public final String episodeName;
+        public final String episodeUrl;
+
+        private BrowserCastDetail(String sessionId, String sourceKey, String vodId,
+                                  String vodName, String playFlag, int selectedIndex,
+                                  boolean reverseSort, String episodeName, String episodeUrl) {
+            this.sessionId = sessionId;
+            this.sourceKey = sourceKey;
+            this.vodId = vodId;
+            this.vodName = vodName;
+            this.playFlag = playFlag;
+            this.selectedIndex = selectedIndex;
+            this.reverseSort = reverseSort;
+            this.episodeName = episodeName;
+            this.episodeUrl = episodeUrl;
+        }
+
+        BrowserCastDetail withSelectedIndex(int index) {
+            return new BrowserCastDetail(sessionId, sourceKey, vodId, vodName,
+                    playFlag, index, reverseSort, episodeName, episodeUrl);
+        }
+    }
+
+    static BrowserCastDetail nextBrowserCastDetail(BrowserCastDetail previous,
+                                                    String sourceKey, String vodId,
+                                                    String vodName, String playFlag,
+                                                    int selectedIndex, boolean reverseSort,
+                                                    String episodeName, String episodeUrl) {
+        String sessionId = previous != null && sourceKey.equals(previous.sourceKey)
+                && vodId.equals(previous.vodId) ? previous.sessionId : UUID.randomUUID().toString();
+        return new BrowserCastDetail(sessionId, sourceKey, vodId, vodName, playFlag,
+                selectedIndex, reverseSort, episodeName, episodeUrl);
+    }
+
+    static boolean browserCastSessionMatches(BrowserCastDetail detail, String sessionId) {
+        return detail != null && sessionId != null && sessionId.equals(detail.sessionId);
+    }
+
+    static final class BrowserPlaybackCommand {
+        final long id;
+        final long revision;
+        final String action;
+        final long positionMs;
+
+        BrowserPlaybackCommand(long id, long revision, String action, long positionMs) {
+            this.id = id;
+            this.revision = revision;
+            this.action = action;
+            this.positionMs = positionMs;
+        }
+    }
+
+    /** 浏览器按 ID 顺序执行并确认；队列满时拒绝新命令，不能默默覆盖先前操作。 */
+    static final class BrowserCommandQueue {
+        private static final int CAPACITY = 32;
+        private final ArrayDeque<BrowserPlaybackCommand> pending = new ArrayDeque<>();
+        private long lastIssuedId;
+
+        boolean enqueue(long revision, String action, long positionMs) {
+            if (pending.size() >= CAPACITY || lastIssuedId == Long.MAX_VALUE) return false;
+            pending.addLast(new BrowserPlaybackCommand(++lastIssuedId, revision, action, positionMs));
+            return true;
+        }
+
+        boolean acknowledge(long lastCommandId) {
+            if (lastCommandId < 0 || lastCommandId > lastIssuedId) return false;
+            while (!pending.isEmpty() && pending.peekFirst().id <= lastCommandId)
+                pending.removeFirst();
+            return true;
+        }
+
+        List<BrowserPlaybackCommand> pending() {
+            return new ArrayList<>(pending);
+        }
+
+        void clear() {
+            pending.clear();
+        }
+    }
+
+    private static final Gson GSON = new Gson();
+    private static final Pattern CAST_MEDIA_ID = Pattern.compile("[0-9a-f]{32}");
+    private static final Pattern CAST_MEDIA_RANGE = Pattern.compile("bytes=(?:\\d+-\\d*|-\\d+)");
+    private static final long SLOW_CAST_READ_MS = 3000;
+    // NanoHTTPD 2.3.1 的 Status 枚举没有 502，插件代理返回空清单时单独定义网关错误。
+    private static final Response.IStatus PROXY_BAD_GATEWAY = new Response.IStatus() {
+        @Override public int getRequestStatus() { return 502; }
+        @Override public String getDescription() { return "502 Bad Gateway"; }
+    };
+
+    private static String deviceRef(LanDevice device) {
+        return device.id.substring(0, Math.min(8, device.id.length()));
+    }
+
+    private static void logMediaFailure(LanDevice device, String reason) {
+        synchronized (device) {
+            if (device.loggedMediaFailureRevision == device.playbackRevision) return;
+            device.loggedMediaFailureRevision = device.playbackRevision;
+        }
+        LogStore.fail(Category.PLAYER, "局域网投屏取流失败 device=" + deviceRef(device)
+                + " revision=" + device.playbackRevision + " reason=" + reason);
+    }
+
+    private static void logSlowCastRead(LanDevice device, String stage, long elapsedMs, long bytes) {
+        if (elapsedMs < SLOW_CAST_READ_MS) return;
+        long now = System.currentTimeMillis();
+        synchronized (device) {
+            if (now - device.lastSlowMediaLogAt < TimeUnit.MINUTES.toMillis(1)) return;
+            device.lastSlowMediaLogAt = now;
+        }
+        LogStore.log(Category.PLAYER, "局域网投屏取流耗时 device=" + deviceRef(device)
+                + " revision=" + device.playbackRevision + " stage=" + stage
+                + " elapsedMs=" + elapsedMs + " bytes=" + bytes);
+    }
+
+    private synchronized void logPlaybackAuthDenied() {
+        long now = System.currentTimeMillis();
+        if (now - lastPlaybackAuthDeniedLogAt < 60000) return;
+        lastPlaybackAuthDeniedLogAt = now;
+        LogStore.fail(Category.SYSTEM, "局域网播放状态鉴权失败 reason=session_missing_or_expired");
+    }
+
+    private static final class FailedPairing {
+        int count;
+        long windowStart;
+    }
+
+    public static final class LanDevice {
+        public final String id;
+        public final String name;
+        public final String ip;
+        public final String kind;
+        public final long connectedAt;
+        public volatile long lastSeen;
+        private final String token;
+        private volatile JsonObject playback;
+        private volatile long playbackRevision;
+        private volatile BrowserCastDetail browserCastDetail;
+        private long browserPositionMs;
+        private long browserDurationMs;
+        private boolean browserPaused;
+        private long browserStateUpdatedAtMs;
+        private final BrowserCommandQueue browserCommands = new BrowserCommandQueue();
+        private volatile long nextRequestedRevision;
+        private volatile long loggedMediaFailureRevision = -1;
+        private volatile long lastSlowMediaLogAt;
+        private volatile long loggedPlaybackEventRevision = -1;
+        private final Set<String> loggedPlaybackEvents = ConcurrentHashMap.newKeySet();
+        private final Set<String> castProxyPaths = ConcurrentHashMap.newKeySet();
+        private final Map<String, CastMedia> castMedia = new ConcurrentHashMap<>();
+        private final Map<String, String> castMediaByUrl = new HashMap<>();
+        private volatile okhttp3.OkHttpClient castClient;
+
+        private LanDevice(String token, String name, String ip, String kind) {
+            this.id = generateToken();
+            this.token = token;
+            this.name = name;
+            this.ip = ip;
+            this.kind = kind;
+            this.connectedAt = System.currentTimeMillis();
+            this.lastSeen = connectedAt;
+        }
+
+        private LanDevice(LanSessionConfig.Record saved) {
+            this.id = saved.id;
+            this.token = saved.token;
+            this.name = saved.name;
+            this.ip = saved.ip;
+            this.kind = saved.kind;
+            this.connectedAt = saved.connectedAt;
+            this.lastSeen = saved.lastSeen;
+        }
+
+        public String currentTitle() {
+            JsonObject state = playback;
+            return state != null && state.has("title") ? state.get("title").getAsString() : "";
+        }
+    }
+
+    private static final class CastMedia {
+        final String url;
+        final Map<String, String> headers;
+        final String headerOrigin;
+        final String inlinePlaylist;
+        final okhttp3.OkHttpClient client;
+        volatile boolean playlistHint;
+        volatile long revision;
+        volatile long lastRegisteredAt;
+
+        CastMedia(String url, Map<String, String> headers, long revision,
+                  boolean playlistHint, String inlinePlaylist, String headerOrigin,
+                  okhttp3.OkHttpClient client) {
+            this.url = url;
+            this.headers = headers;
+            this.headerOrigin = headerOrigin;
+            this.inlinePlaylist = inlinePlaylist;
+            this.playlistHint = playlistHint;
+            this.client = client;
+            this.revision = revision;
+            this.lastRegisteredAt = System.currentTimeMillis();
+        }
+    }
+
+    private static void clearCastMedia(LanDevice device) {
+        okhttp3.OkHttpClient previousClient;
+        synchronized (device) {
+            device.castMedia.clear();
+            device.castMediaByUrl.clear();
+            previousClient = device.castClient;
+            device.castClient = null;
+        }
+        // Revocation is immediate; closing TLS sockets can perform network I/O.
+        // Release only this cast's old pool, off the UI thread and device monitor.
+        MediaRelayCleanup.evictConnections(previousClient);
+    }
+
+    public List<LanDevice> connectedDevices() {
+        long now = System.currentTimeMillis();
+        ArrayList<LanDevice> active = new ArrayList<>();
+        for (LanDevice device : pairedDevices()) {
+            if (now - device.lastSeen <= ACTIVE_DEVICE_WINDOW_MS) active.add(device);
+        }
+        return active;
+    }
+
+    public List<LanDevice> pairedDevices() {
+        long now = System.currentTimeMillis();
+        ArrayList<LanDevice> paired = new ArrayList<>();
+        boolean expired = false;
+        for (LanDevice device : devices.values()) {
+            if (now - device.lastSeen > SESSION_WINDOW_MS) {
+                if (devices.remove(device.token, device)) {
+                    synchronized (this) {
+                        if (device.id.equals(activeBrowserId)) {
+                            activeBrowserId = null;
+                            EpisodeCast cast = episodeCast;
+                            if (cast != null && device.id.equals(cast.deviceId)) episodeCast = null;
+                            revokeBrowserPlayback(device);
+                            notifyBrowserCastChanged();
+                        } else {
+                            device.browserCastDetail = null;
+                            clearCastMedia(device);
+                        }
+                    }
+                    expired = true;
+                    LogStore.log(Category.SYSTEM, "局域网配对会话过期 device=" + deviceRef(device));
+                }
+            }
+            else paired.add(device);
+        }
+        if (expired) persistSessions(true);
+        paired.sort((a, b) -> Long.compare(b.lastSeen, a.lastSeen));
+        return paired;
+    }
+
+    public synchronized boolean kickDevice(String id) {
+        if (id == null) return false;
+        for (LanDevice device : devices.values()) {
+            if (id.equals(device.id)) {
+                EpisodeCast cast = episodeCast;
+                if (cast != null && id.equals(cast.deviceId)) clearEpisodeCast();
+                boolean removed = devices.remove(device.token, device);
+                if (removed) {
+                    if (device.id.equals(activeBrowserId)) {
+                        activeBrowserId = null;
+                        revokeBrowserPlayback(device);
+                        notifyBrowserCastChanged();
+                    } else {
+                        device.browserCastDetail = null;
+                        clearCastMedia(device);
+                    }
+                    persistSessions(true);
+                    LogStore.log(Category.SYSTEM, "局域网设备已踢出 device=" + deviceRef(device));
+                }
+                return removed;
+            }
+        }
+        return false;
+    }
+
+    public synchronized void setEpisodeCast(String owner, String deviceId, List<String> episodes, int selectedIndex,
+                               NextEpisodeHandler handler) {
+        EpisodeCast previous = episodeCast;
+        if (previous != null && !previous.deviceId.equals(deviceId)) {
+            for (LanDevice device : devices.values()) {
+                if (device.id.equals(previous.deviceId)) {
+                    device.playback = null;
+                    resetBrowserPlayback(device);
+                    device.browserCastDetail = null;
+                    device.castProxyPaths.clear();
+                    clearCastMedia(device);
+                    if (device.id.equals(activeBrowserId)) {
+                        activeBrowserId = null;
+                        notifyBrowserCastChanged();
+                    }
+                    break;
+                }
+            }
+        }
+        episodeCast = new EpisodeCast(owner, deviceId, episodes, selectedIndex, handler);
+        for (LanDevice device : devices.values()) {
+            if (device.id.equals(deviceId) && device.playback != null) {
+                JsonObject state = device.playback.deepCopy();
+                addEpisodeState(state, episodeCast);
+                device.playback = state;
+                break;
+            }
+        }
+    }
+
+    public synchronized void clearEpisodeCast(String owner) {
+        EpisodeCast cast = episodeCast;
+        if (cast != null && owner != null && owner.equals(cast.owner)) episodeCast = null;
+    }
+
+    public synchronized void clearEpisodeCast() {
+        episodeCast = null;
+    }
+
+    /** 登记当前投屏的详情定位；同一视频换线路、换集或排序时沿用 sessionId。 */
+    public synchronized BrowserCastDetail setBrowserCastDetail(String owner, String sourceKey,
+                                                                String vodId, String vodName,
+                                                                String playFlag, int selectedIndex,
+                                                                boolean reverseSort,
+                                                                String episodeName,
+                                                                String episodeUrl) {
+        if (sourceKey == null || sourceKey.trim().isEmpty() || sourceKey.length() > 8192
+                || vodId == null || vodId.trim().isEmpty() || vodId.length() > 8192
+                || selectedIndex < 0 || selectedIndex > 100000) return null;
+        LanDevice device = currentBrowserDevice(owner, false);
+        if (device == null) return null;
+        EpisodeCast cast = episodeCast;
+        if (cast == null) return null;
+        cast.selectedIndex = selectedIndex;
+        BrowserCastDetail detail = nextBrowserCastDetail(device.browserCastDetail,
+                sourceKey, vodId, vodName == null ? "" : vodName,
+                playFlag == null ? "" : playFlag, selectedIndex, reverseSort,
+                episodeName == null ? "" : episodeName,
+                episodeUrl == null ? "" : episodeUrl);
+        device.browserCastDetail = detail;
+        notifyBrowserCastChanged();
+        return detail;
+    }
+
+    /** 只把新详情页的选集回调接回现有浏览器轮次，不重新推送媒体。 */
+    public synchronized BrowserCastDetail attachBrowserCastDetail(String owner, String sessionId,
+                                                                   List<String> episodes,
+                                                                   NextEpisodeHandler handler) {
+        if (owner == null || owner.isEmpty() || sessionId == null || handler == null
+                || episodes == null) return null;
+        LanDevice device = currentActiveBrowserDevice(false);
+        BrowserCastDetail detail = device == null ? null : device.browserCastDetail;
+        if (!browserCastSessionMatches(detail, sessionId)
+                || (!episodes.isEmpty() && (detail.selectedIndex < 0
+                || detail.selectedIndex >= episodes.size()))) return null;
+        setEpisodeCast(owner, device.id, episodes,
+                episodes.isEmpty() ? -1 : detail.selectedIndex, handler);
+        return device.browserCastDetail;
+    }
+
+    public boolean updateEpisodeCast(String owner, String title, String url, int selectedIndex,
+                                     List<String> episodes, Map<String, String> headers) {
+        return updateEpisodeCast(owner, title, url, selectedIndex, episodes, headers, null);
+    }
+
+    public synchronized boolean updateEpisodeCast(String owner, String title, String url, int selectedIndex,
+                                     List<String> episodes, Map<String, String> headers,
+                                     String headerOrigin) {
+        EpisodeCast cast = episodeCast;
+        if (cast != null && owner != null && owner.equals(cast.owner)) {
+            cast.selectedIndex = selectedIndex;
+            if (episodes != null) cast.episodes = new ArrayList<>(episodes);
+            boolean published = publishBrowserPlaybackInternal(cast.deviceId, title, url, headers,
+                    headerOrigin, true);
+            if (published) {
+                LanDevice device = currentBrowserDevice(owner, false);
+                if (device != null && device.browserCastDetail != null)
+                    device.browserCastDetail = device.browserCastDetail.withSelectedIndex(selectedIndex);
+            }
+            return published;
+        }
+        return false;
+    }
+
+    public void markEpisodeAdvancing(String owner) {
+        EpisodeCast cast = episodeCast;
+        if (cast == null || owner == null || !owner.equals(cast.owner)) return;
+        for (LanDevice device : devices.values()) {
+            if (cast.deviceId.equals(device.id)) {
+                device.nextRequestedRevision = device.playbackRevision;
+                return;
+            }
+        }
+    }
+
+    private boolean requestNextEpisode(LanDevice device, String rawRevision) {
+        EpisodeCast cast = episodeCast;
+        if (device == null || cast == null || !device.id.equals(cast.deviceId)
+                || cast.handler == null || cast.episodes.isEmpty()) return false;
+        long revision;
+        try { revision = Long.parseLong(rawRevision); } catch (Exception ignored) { return false; }
+        synchronized (device) {
+            if (revision != device.playbackRevision) return false;
+            if (revision == device.nextRequestedRevision) return true;
+            device.nextRequestedRevision = revision;
+        }
+        FutureTask<Boolean> task = new FutureTask<>(() -> {
+            return episodeCast == cast && cast.handler.playNext();
+        });
+        mainHandler.post(task);
+        try {
+            boolean accepted = task.get(3, TimeUnit.SECONDS);
+            if (!accepted) resetNextRequest(device, revision);
+            return accepted;
+        } catch (Exception error) {
+            mainHandler.removeCallbacks(task);
+            task.cancel(false);
+            resetNextRequest(device, revision);
+            return false;
+        }
+    }
+
+    private static void resetNextRequest(LanDevice device, long revision) {
+        synchronized (device) {
+            if (device.nextRequestedRevision == revision) device.nextRequestedRevision = -1;
+        }
+    }
+
+    private boolean requestSelectedEpisode(LanDevice device, String rawRevision, String rawIndex) {
+        EpisodeCast cast = episodeCast;
+        if (device == null || cast == null || !device.id.equals(cast.deviceId)
+                || cast.handler == null) return false;
+        final long revision;
+        final int index;
+        try {
+            revision = Long.parseLong(rawRevision);
+            index = Integer.parseInt(rawIndex);
+        } catch (Exception ignored) { return false; }
+        List<String> episodes = cast.episodes;
+        if (index < 0 || index >= episodes.size()) return false;
+        synchronized (device) {
+            if (revision != device.playbackRevision) return false;
+            device.nextRequestedRevision = revision;
+        }
+        FutureTask<Boolean> task = new FutureTask<>(() -> episodeCast == cast
+                && cast.handler.selectEpisode(index));
+        mainHandler.post(task);
+        try {
+            boolean accepted = task.get(3, TimeUnit.SECONDS);
+            if (!accepted) resetNextRequest(device, revision);
+            return accepted;
+        } catch (Exception error) {
+            mainHandler.removeCallbacks(task);
+            task.cancel(false);
+            resetNextRequest(device, revision);
+            return false;
+        }
+    }
+
+    private static void addEpisodeState(JsonObject state, EpisodeCast cast) {
+        JsonArray episodes = new JsonArray();
+        for (String name : cast.episodes) episodes.add(name);
+        state.add("episodes", episodes);
+        state.addProperty("selectedIndex", cast.selectedIndex);
+    }
+
+    private static void resetBrowserPlayback(LanDevice device) {
+        device.browserPositionMs = 0;
+        device.browserDurationMs = 0;
+        device.browserPaused = false;
+        device.browserStateUpdatedAtMs = 0;
+        device.browserCommands.clear();
+    }
+
+    private void notifyBrowserCastChanged() {
+        // 通知方法本身投递到主线程，不在服务实例锁内反向查询 ControlManager。
+        LanServerService.refreshCastNotification();
+    }
+
+    private static void revokeBrowserPlayback(LanDevice device) {
+        device.playback = null;
+        device.browserCastDetail = null;
+        device.nextRequestedRevision = -1;
+        resetBrowserPlayback(device);
+        device.castProxyPaths.clear();
+        clearCastMedia(device);
+    }
+
+    /** 最近一次发布的浏览器会话，不依赖详情页或选集 handler。 */
+    private LanDevice currentActiveBrowserDevice(boolean requireOnline) {
+        String activeId = activeBrowserId;
+        if (activeId == null) return null;
+        long now = System.currentTimeMillis();
+        for (LanDevice device : devices.values()) {
+            if (!activeId.equals(device.id) || !"browser".equals(device.kind)
+                    || devices.get(device.token) != device || device.playback == null
+                    || device.playbackRevision <= 0
+                    || (requireOnline && now - device.lastSeen > ACTIVE_DEVICE_WINDOW_MS)) continue;
+            return device;
+        }
+        return null;
+    }
+
+    /** owner 和在线浏览器必须仍指向同一轮发布；所有调用在服务实例锁内。 */
+    private LanDevice currentBrowserDevice(String owner, boolean requireOnline) {
+        EpisodeCast cast = episodeCast;
+        LanDevice device = currentActiveBrowserDevice(requireOnline);
+        return owner != null && cast != null && owner.equals(cast.owner)
+                && device != null && device.id.equals(cast.deviceId) ? device : null;
+    }
+
+    private static BrowserPlaybackState playbackSnapshot(LanDevice device) {
+        boolean online = System.currentTimeMillis() - device.lastSeen <= ACTIVE_DEVICE_WINDOW_MS;
+        return new BrowserPlaybackState(device.browserPositionMs, device.browserDurationMs,
+                device.browserPaused, device.browserStateUpdatedAtMs, device.playbackRevision,
+                online, device.currentTitle(), device.name);
+    }
+
+    /** 手机播放器使用的浏览器进度快照；离线仍保留状态，online=false。 */
+    public synchronized BrowserPlaybackState browserPlaybackState(String owner) {
+        EpisodeCast cast = episodeCast;
+        if (owner == null || cast == null || !owner.equals(cast.owner)
+                || !cast.deviceId.equals(activeBrowserId)) return null;
+        LanDevice device = currentBrowserDevice(owner, false);
+        return device == null ? null : playbackSnapshot(device);
+    }
+
+    /** 局域网服务入口可在详情页销毁后继续读取浏览器实际播放状态。 */
+    public synchronized BrowserPlaybackState activeBrowserPlaybackState() {
+        LanDevice device = currentActiveBrowserDevice(false);
+        return device == null ? null : playbackSnapshot(device);
+    }
+
+    /** 当前活动投屏的详情定位，不依赖临时选集 handler 或详情页 owner。 */
+    public synchronized BrowserCastDetail activeBrowserCastDetail() {
+        LanDevice device = currentActiveBrowserDevice(false);
+        return device == null ? null : device.browserCastDetail;
+    }
+
+    private static boolean enqueueBrowserCommand(LanDevice device, String action, long positionMs) {
+        if (!("play".equals(action) || "pause".equals(action) || "seek".equals(action))
+                || positionMs < 0 || positionMs > MAX_PLAYBACK_TIME_MS) return false;
+        if (device == null) return false;
+        return device.browserCommands.enqueue(device.playbackRevision, action, positionMs);
+    }
+
+    /** 手机控制命令只发送到该 owner 当前的浏览器播放轮次。 */
+    public synchronized boolean controlBrowserPlayback(String owner, String action, long positionMs) {
+        return enqueueBrowserCommand(currentBrowserDevice(owner, true), action, positionMs);
+    }
+
+    /** 全局入口控制当前浏览器播放，不依赖详情页生命周期。 */
+    public synchronized boolean controlActiveBrowserPlayback(String action, long positionMs) {
+        return enqueueBrowserCommand(currentActiveBrowserDevice(true), action, positionMs);
+    }
+
+    /** 退出投屏时撤销本轮媒体和控制；浏览器下一次轮询收到 revision=0。 */
+    public synchronized boolean stopBrowserPlayback(String owner) {
+        EpisodeCast cast = episodeCast;
+        if (owner == null || cast == null || !owner.equals(cast.owner)) return false;
+        LanDevice device = currentBrowserDevice(owner, false);
+        episodeCast = null;
+        if (device == null) {
+            if (cast.deviceId.equals(activeBrowserId)) {
+                activeBrowserId = null;
+                for (LanDevice stale : devices.values()) {
+                    if (cast.deviceId.equals(stale.id)) {
+                        revokeBrowserPlayback(stale);
+                        break;
+                    }
+                }
+                notifyBrowserCastChanged();
+            }
+            return true;
+        }
+        activeBrowserId = null;
+        revokeBrowserPlayback(device);
+        notifyBrowserCastChanged();
+        return true;
+    }
+
+    /** 全局入口停止最近一次浏览器投屏，旧媒体能力立即撤销。 */
+    public synchronized boolean stopActiveBrowserPlayback() {
+        String activeId = activeBrowserId;
+        if (activeId == null) return false;
+        LanDevice device = currentActiveBrowserDevice(false);
+        activeBrowserId = null;
+        EpisodeCast cast = episodeCast;
+        if (cast != null && activeId.equals(cast.deviceId)) episodeCast = null;
+        if (device != null) revokeBrowserPlayback(device);
+        else for (LanDevice stale : devices.values()) {
+            if (activeId.equals(stale.id)) {
+                revokeBrowserPlayback(stale);
+                break;
+            }
+        }
+        notifyBrowserCastChanged();
+        return true;
+    }
+
+    private synchronized JsonObject playbackForBrowser(LanDevice device) {
+        if (devices.get(device.token) != device || !device.id.equals(activeBrowserId)) {
+            JsonObject idle = new JsonObject();
+            idle.addProperty("revision", 0);
+            return idle;
+        }
+        JsonObject playback = device.playback;
+        if (playback == null) {
+            JsonObject idle = new JsonObject();
+            idle.addProperty("revision", 0);
+            return idle;
+        }
+        JsonObject state = playback.deepCopy();
+        state.remove("episodes");
+        state.remove("selectedIndex");
+        state.addProperty("positionMs", device.browserPositionMs);
+        state.addProperty("durationMs", device.browserDurationMs);
+        state.addProperty("paused", device.browserPaused);
+        EpisodeCast cast = episodeCast;
+        if (cast != null && device.id.equals(cast.deviceId) && cast.handler != null)
+            addEpisodeState(state, cast);
+        JsonArray instructions = new JsonArray();
+        BrowserPlaybackCommand last = null;
+        for (BrowserPlaybackCommand command : device.browserCommands.pending()) {
+            if (command.revision != device.playbackRevision) continue;
+            JsonObject instruction = new JsonObject();
+            instruction.addProperty("id", command.id);
+            instruction.addProperty("action", command.action);
+            instruction.addProperty("positionMs", command.positionMs);
+            instructions.add(instruction);
+            last = command;
+        }
+        state.add("commands", instructions);
+        if (last != null) {
+            JsonObject compatible = new JsonObject();
+            compatible.addProperty("id", last.id);
+            compatible.addProperty("action", last.action);
+            compatible.addProperty("positionMs", last.positionMs);
+            state.add("command", compatible);
+        }
+        return state;
+    }
+
+    private synchronized Response recordBrowserPlaybackState(LanDevice device,
+                                                              Map<String, String> params) {
+        if (device == null || !"browser".equals(device.kind) || devices.get(device.token) != device)
+            return createPlainTextResponse(Response.Status.FORBIDDEN, "forbidden");
+        final long revision;
+        final long positionMs;
+        final long durationMs;
+        try {
+            revision = Long.parseLong(params.get("revision"));
+            positionMs = Long.parseLong(params.get("positionMs"));
+            durationMs = Long.parseLong(params.get("durationMs"));
+        } catch (Exception ignored) {
+            return createPlainTextResponse(Response.Status.BAD_REQUEST, "invalid playback state");
+        }
+        String paused = params.get("paused");
+        if (revision <= 0 || positionMs < 0 || durationMs < 0
+                || positionMs > MAX_PLAYBACK_TIME_MS || durationMs > MAX_PLAYBACK_TIME_MS
+                || !("true".equals(paused) || "false".equals(paused)))
+            return createPlainTextResponse(Response.Status.BAD_REQUEST, "invalid playback state");
+        if (device.playback == null || !currentCastRevision(activeBrowserId, device.id,
+                device.playbackRevision, revision))
+            return jsonResponse(Response.Status.OK, "{\"ok\":false}");
+        String rawLastCommandId = params.get("lastCommandId");
+        if (rawLastCommandId != null) {
+            final long lastCommandId;
+            try { lastCommandId = Long.parseLong(rawLastCommandId); }
+            catch (NumberFormatException invalid) {
+                return createPlainTextResponse(Response.Status.BAD_REQUEST, "invalid command id");
+            }
+            if (!device.browserCommands.acknowledge(lastCommandId))
+                return createPlainTextResponse(Response.Status.BAD_REQUEST, "invalid command id");
+        }
+        device.browserPositionMs = positionMs;
+        device.browserDurationMs = durationMs;
+        device.browserPaused = "true".equals(paused);
+        device.browserStateUpdatedAtMs = System.currentTimeMillis();
+        return jsonResponse(Response.Status.OK, "{\"ok\":true}");
+    }
+
+    /** 旧页面延迟送达的离开请求不得结束后来发布的轮次。 */
+    private synchronized Response leaveBrowserPlayback(LanDevice device, String rawRevision) {
+        if (device == null || !"browser".equals(device.kind) || devices.get(device.token) != device)
+            return createPlainTextResponse(Response.Status.FORBIDDEN, "forbidden");
+        final long revision;
+        try { revision = Long.parseLong(rawRevision); }
+        catch (Exception ignored) {
+            return createPlainTextResponse(Response.Status.BAD_REQUEST, "invalid revision");
+        }
+        if (revision <= 0)
+            return createPlainTextResponse(Response.Status.BAD_REQUEST, "invalid revision");
+        if (device.playback == null || !currentCastRevision(activeBrowserId, device.id,
+                device.playbackRevision, revision))
+            return jsonResponse(Response.Status.OK, "{\"ok\":false}");
+        stopActiveBrowserPlayback();
+        return jsonResponse(Response.Status.OK, "{\"ok\":true}");
+    }
+
+    static boolean currentCastRevision(String activeId, String deviceId,
+                                       long currentRevision, long requestRevision) {
+        return activeId != null && activeId.equals(deviceId) && currentRevision > 0
+                && requestRevision == currentRevision;
+    }
+
+    private Response recordPlaybackEvent(LanDevice device, Map<String, String> params) {
+        if (device == null || !"browser".equals(device.kind))
+            return createPlainTextResponse(Response.Status.FORBIDDEN, "forbidden");
+        String event = params.get("event");
+        if (!("playing".equals(event) || "autoplay_blocked".equals(event)
+                || "media_error".equals(event) || "hls_error".equals(event)
+                || "hls_warning".equals(event) || "startup_stalled".equals(event)
+                || "playback_engine".equals(event)
+                || "audio_config".equals(event) || "media_rate".equals(event)
+                || "user_reload".equals(event)
+                || "rebuffer".equals(event)
+                || "unsupported".equals(event)))
+            return createPlainTextResponse(Response.Status.BAD_REQUEST, "invalid event");
+        String detail = params.get("detail");
+        if (detail == null) detail = "";
+        if (detail.length() > 96 || !detail.matches("[A-Za-z0-9_.:-]*"))
+            return createPlainTextResponse(Response.Status.BAD_REQUEST, "invalid detail");
+        long revision;
+        try { revision = Long.parseLong(params.get("revision")); }
+        catch (Exception ignored) { return createPlainTextResponse(Response.Status.BAD_REQUEST, "invalid revision"); }
+        if (revision != device.playbackRevision || device.playback == null)
+            return jsonResponse(Response.Status.OK, "{\"ok\":false}");
+        synchronized (device) {
+            if (device.loggedPlaybackEventRevision != revision) {
+                device.loggedPlaybackEventRevision = revision;
+                device.loggedPlaybackEvents.clear();
+            }
+            boolean diagnostic = "audio_config".equals(event) || "media_rate".equals(event);
+            String key = diagnostic ? event + ":" + detail : event;
+            if (diagnostic && !device.loggedPlaybackEvents.contains(key)) {
+                int count = 0;
+                for (String logged : device.loggedPlaybackEvents)
+                    if (logged.startsWith(event + ":")) count++;
+                if (count >= 4) return jsonResponse(Response.Status.OK, "{\"ok\":true}");
+            }
+            if (!device.loggedPlaybackEvents.add(key))
+                return jsonResponse(Response.Status.OK, "{\"ok\":true}");
+        }
+        String message = "局域网投屏浏览器 " + event + " device=" + deviceRef(device)
+                + " revision=" + revision + (detail.isEmpty() ? "" : " detail=" + detail);
+        if ("playing".equals(event)) LogStore.success(Category.PLAYER, message);
+        else if ("autoplay_blocked".equals(event) || "playback_engine".equals(event)
+                || "audio_config".equals(event) || "media_rate".equals(event)
+                || "user_reload".equals(event))
+            LogStore.log(Category.PLAYER, message);
+        else LogStore.fail(Category.PLAYER, message);
+        return jsonResponse(Response.Status.OK, "{\"ok\":true}");
+    }
+
+    public String getPairingCode() {
+        return pairingCode;
+    }
+
+    /** 用户手动更新配对码时撤销旧会话，旧码和已配对令牌立即失效。 */
+    public synchronized String rotatePairingCode() {
+        pairingCode = SystemConfig.regenerateLanPairingCode();
+        for (LanDevice device : devices.values()) {
+            device.browserCastDetail = null;
+            clearCastMedia(device);
+        }
+        devices.clear();
+        activeBrowserId = null;
+        failedPairings.clear();
+        clearEpisodeCast();
+        notifyBrowserCastChanged();
+        return pairingCode;
+    }
+
+    /** 手机端主动发送到已打开控制台的浏览器。 */
+    public synchronized boolean publishBrowserPlayback(String deviceId, String title, String url) {
+        return publishBrowserPlayback(deviceId, title, url, null);
+    }
+
+    public synchronized boolean publishBrowserPlayback(String deviceId, String title, String url,
+                                                       Map<String, String> headers) {
+        return publishBrowserPlayback(deviceId, title, url, headers, null);
+    }
+
+    public synchronized boolean publishBrowserPlayback(String deviceId, String title, String url,
+                                                       Map<String, String> headers, String headerOrigin) {
+        return publishBrowserPlaybackInternal(deviceId, title, url, headers, headerOrigin, false);
+    }
+
+    private boolean publishBrowserPlaybackInternal(String deviceId, String title, String url,
+                                                   Map<String, String> headers, String headerOrigin,
+                                                   boolean preserveEpisodeCast) {
+        if (url == null || url.trim().isEmpty()) {
+            LogStore.fail(Category.PLAYER, "局域网投屏发布失败 reason=empty_url");
+            return false;
+        }
+        String playable = LanCastUrlRules.browserUrl(url, serverPort);
+        if (playable == null || playable.length() > 8192) {
+            LogStore.fail(Category.PLAYER, "局域网投屏发布失败 reason=unsupported_url");
+            return false;
+        }
+        LanDevice target = null;
+        for (LanDevice device : connectedDevices()) {
+            if (device.id.equals(deviceId) && "browser".equals(device.kind)) {
+                target = device;
+                break;
+            }
+        }
+        if (target == null) {
+            LogStore.fail(Category.PLAYER, "局域网投屏发布失败 reason=target_offline");
+            return false;
+        }
+        String localPath = playable.startsWith("/") ? playable.split("\\?", 2)[0] : null;
+        // The phone's purified manifest is a global slot. Keep this push's contents and
+        // credential origin together; later playback on the phone must not replace it.
+        String pinnedPlaylist = null;
+        if ("/purify.m3u8".equals(localPath) || "/m3u8".equals(localPath)) {
+            pinnedPlaylist = m3u8Content;
+            if (pinnedPlaylist == null || pinnedPlaylist.isEmpty()
+                    || pinnedPlaylist.getBytes(StandardCharsets.UTF_8).length > 2 * 1024 * 1024) {
+                LogStore.fail(Category.PLAYER, "局域网投屏发布失败 reason=playlist_unavailable");
+                return false;
+            }
+        }
+        String sourceUrl = url.trim();
+        String credentialOrigin = LanCastUrlRules.browserUrl(headerOrigin, serverPort) == null
+                ? sourceUrl : headerOrigin.trim();
+        final okhttp3.OkHttpClient relayClient;
+        try {
+            relayClient = OkGoHelper.newScopedMediaRelayClient(new CastMediaDns(
+                    OkGoHelper.getMediaRelayClient().dns(),
+                    java.net.URI.create(sourceUrl).getHost(),
+                    java.net.URI.create(credentialOrigin).getHost()));
+        } catch (RuntimeException unavailable) {
+            LogStore.fail(Category.PLAYER, "局域网投屏发布失败 reason=network_policy_unavailable");
+            return false;
+        }
+        JsonObject state = new JsonObject();
+        state.addProperty("revision", ++target.playbackRevision);
+        target.playback = null;
+        resetBrowserPlayback(target);
+        state.addProperty("title", title == null ? "手机推送的视频" : title);
+        clearCastMedia(target);
+        target.castClient = relayClient;
+        if (playable.startsWith("/") && !LanCastUrlRules.isProxyPath(localPath)) {
+            state.addProperty("url", playable);
+        } else {
+            String relay = registerCastMedia(target, sourceUrl, headers,
+                    LanCastUrlRules.isPlaylistUrl(playable),
+                    pinnedPlaylist, credentialOrigin, target.playbackRevision);
+            if (relay == null) return false;
+            state.addProperty("url", relay);
+        }
+        state.addProperty("hls", LanCastUrlRules.isPlaylistUrl(playable));
+        state.addProperty("nativeVideo", playable.toLowerCase(Locale.ROOT)
+                .matches(".*\\.(mp4|m4v|webm|mov|mkv)([?#].*)?$"));
+        EpisodeCast cast = episodeCast;
+        if (cast != null && target.id.equals(cast.deviceId)) addEpisodeState(state, cast);
+        target.castProxyPaths.clear();
+        if (playable.startsWith("/") && LanCastUrlRules.isProxyPath(playable.split("\\?", 2)[0])) {
+            target.castProxyPaths.add(playable);
+        }
+        String previousActiveId = activeBrowserId;
+        target.playback = state;
+        activeBrowserId = target.id;
+        if (!preserveEpisodeCast) {
+            episodeCast = null;
+            target.browserCastDetail = null;
+        }
+        if (previousActiveId != null && !previousActiveId.equals(target.id)) {
+            for (LanDevice previous : devices.values()) {
+                if (previousActiveId.equals(previous.id)) {
+                    revokeBrowserPlayback(previous);
+                    break;
+                }
+            }
+        }
+        LogStore.success(Category.PLAYER, "局域网投屏已发送 device=" + deviceRef(target)
+                + " revision=" + target.playbackRevision
+                + " relay=" + (!playable.startsWith("/") || LanCastUrlRules.isProxyPath(localPath))
+                + " pinnedPlaylist=" + (pinnedPlaylist != null));
+        notifyBrowserCastChanged();
+        return true;
+    }
+
+    private static String registerCastMedia(LanDevice device, String url, Map<String, String> headers,
+                                            boolean playlistHint, String inlinePlaylist,
+                                            String headerOrigin, long expectedRevision) {
+        if (url == null || url.length() > 8192) return null;
+        synchronized (device) {
+            if (device.playbackRevision != expectedRevision || device.castClient == null) return null;
+            String previousId = device.castMediaByUrl.get(url);
+            CastMedia previous = previousId == null ? null : device.castMedia.get(previousId);
+            if (previous != null && previous.revision == device.playbackRevision) {
+                previous.lastRegisteredAt = System.currentTimeMillis();
+                if (playlistHint) previous.playlistHint = true;
+                return "/api/cast/media?id=" + previousId;
+            }
+            if (device.castMedia.size() >= 4096) {
+                long cutoff = System.currentTimeMillis() - TimeUnit.MINUTES.toMillis(5);
+                for (Map.Entry<String, CastMedia> entry : device.castMedia.entrySet()) {
+                    CastMedia media = entry.getValue();
+                    if (media.lastRegisteredAt < cutoff && device.castMedia.remove(entry.getKey(), media))
+                        device.castMediaByUrl.remove(media.url, entry.getKey());
+                }
+            }
+            if (device.castMedia.size() >= 4096) {
+                logMediaFailure(device, "resource_limit");
+                return null;
+            }
+            String id = generateToken();
+            device.castMedia.put(id, new CastMedia(url,
+                    headers == null ? java.util.Collections.emptyMap() : new HashMap<>(headers),
+                    expectedRevision, playlistHint, inlinePlaylist, headerOrigin,
+                    device.castClient));
+            device.castMediaByUrl.put(url, id);
+            return "/api/cast/media?id=" + id;
+        }
+    }
+
+    private static Map<String, String> headersForChild(String parentUrl, String childUrl,
+                                                       Map<String, String> headers) {
+        if (headers.isEmpty()) return headers;
+        try {
+            java.net.URI parent = new java.net.URI(parentUrl);
+            java.net.URI child = new java.net.URI(childUrl);
+            if (parent.getHost() != null && parent.getHost().equalsIgnoreCase(child.getHost())
+                    && parent.getScheme().equalsIgnoreCase(child.getScheme())
+                    && effectivePort(parent) == effectivePort(child)) return headers;
+        } catch (Exception ignored) { }
+        Map<String, String> safe = new HashMap<>(headers);
+        java.util.Iterator<String> keys = safe.keySet().iterator();
+        while (keys.hasNext()) {
+            String key = keys.next();
+            if (key == null || key.equalsIgnoreCase("cookie") || key.equalsIgnoreCase("authorization")
+                    || key.equalsIgnoreCase("proxy-authorization")) keys.remove();
+        }
+        return safe;
+    }
+
+    private static int effectivePort(java.net.URI uri) {
+        return uri.getPort() != -1 ? uri.getPort()
+                : "https".equalsIgnoreCase(uri.getScheme()) ? 443 : 80;
+    }
+
+    private LanDevice castProxyViewer(IHTTPSession session) {
+        LanDevice device = authorizedDevice(session);
+        if (device == null || !"browser".equals(device.kind)) return null;
+        String query = session.getQueryParameterString();
+        String path = session.getUri() + (query == null || query.isEmpty() ? "" : "?" + query);
+        if (device.castProxyPaths.contains(path)) return device;
+        logMediaFailure(device, "proxy_not_allowed");
+        return null;
+    }
+
+    private static boolean isPlaylistMime(String mime, String proxyMode) {
+        String type = mime == null ? "" : mime.toLowerCase(Locale.ROOT);
+        return type.contains("mpegurl") || type.contains("m3u8")
+                || "m3u8".equalsIgnoreCase(proxyMode);
+    }
+
+    private static boolean isProxyPlaylistResponse(Map<String, String> params, String mime) {
+        String target = params.get("url");
+        return (target != null && target.toLowerCase(Locale.ROOT).contains(".m3u8"))
+                || isPlaylistMime(mime, null);
+    }
+
+    private static void logProxyPlaylistFailure(Map<String, String> params, int code, String mime,
+                                             String bodyKind) {
+        String target = params.get("url");
+        String from = params.get("from");
+        String siteKey = params.get("siteKey");
+        String mode = params.get("do");
+        String branch = "js".equals(mode)
+                ? ("catvod".equals(from) ? "proxy2" : "proxy1") : "jar";
+        String detail = "本机代理清单异常: 地址="
+                + (target == null ? "未提供 url" : PlaybackErrorReporter.source(target))
+                + "，模式=" + PlaybackErrorReporter.safeDiagnosticText(mode)
+                + "，分支=" + branch
+                + "，站点=" + (siteKey == null ? "未提供" : PlaybackErrorReporter.safeDiagnosticText(siteKey))
+                + "，代理返回HTTP=" + code
+                + "，MIME=" + PlaybackErrorReporter.safeDiagnosticText(mime)
+                + "，正文类型=" + PlaybackErrorReporter.safeDiagnosticText(bodyKind);
+        if (!DiagnosticLogLimiter.SHARED.allow("proxy:" + detail, android.os.SystemClock.elapsedRealtime())) return;
+        LogStore.fail(Category.PLAYER, detail);
+        android.util.Log.e("MBoxProxy", detail);
+    }
+
+    private static byte[] readCastPlaylist(InputStream stream) throws IOException {
+        try (InputStream source = stream; ByteArrayOutputStream output = new ByteArrayOutputStream()) {
+            byte[] buffer = new byte[8192];
+            int read;
+            while ((read = source.read(buffer)) != -1) {
+                if (output.size() + read > 2 * 1024 * 1024) throw new IOException("playlist too large");
+                output.write(buffer, 0, read);
+            }
+            return output.toByteArray();
+        }
+    }
+
+    private static InputStream decodeCastPlaylist(InputStream stream, String encoding) throws IOException {
+        if (encoding == null || "identity".equalsIgnoreCase(encoding)) return stream;
+        if ("gzip".equalsIgnoreCase(encoding)) return new GZIPInputStream(stream);
+        if ("br".equalsIgnoreCase(encoding)) return new BrotliInputStream(stream);
+        throw new IOException("unsupported playlist encoding");
+    }
+
+    private static String generateToken() {
+        byte[] bytes = new byte[16];
+        new SecureRandom().nextBytes(bytes);
+        StringBuilder sb = new StringBuilder(bytes.length * 2);
+        for (byte b : bytes) {
+            sb.append(Character.forDigit((b >> 4) & 0xF, 16));
+            sb.append(Character.forDigit(b & 0xF, 16));
+        }
+        return sb.toString();
+    }
+
     public RemoteServer(int port, Context context) {
         super(port);
         mContext = context;
+        pairingCode = initialPairingCode();
+        restoreSessions();
         addGetRequestProcess();
         addPostRequestProcess();
+    }
+
+    /**
+     * @param hostname 绑定地址:null/空=全部网卡(局域网可达);"127.0.0.1"=仅本机。
+     *                 默认走仅本机绑定(本 App 的所有 clan://localhost、/proxy、/purify.m3u8 均在本机回环),
+     *                 局域网共享/远程管理需显式开启 HawkConfig.LAN_SERVER_ENABLE。
+     */
+    public RemoteServer(String hostname, int port, Context context) {
+        super(hostname == null || hostname.isEmpty() ? null : hostname, port);
+        mContext = context;
+        pairingCode = initialPairingCode();
+        restoreSessions();
+        addGetRequestProcess();
+        addPostRequestProcess();
+    }
+
+    private static String initialPairingCode() {
+        return SystemConfig.isLanServerEnabled() ? SystemConfig.getOrCreateLanPairingCode()
+                : String.format(Locale.ROOT, "%06d", new SecureRandom().nextInt(1000000));
+    }
+
+    private void restoreSessions() {
+        if (!SystemConfig.isLanServerEnabled()) return;
+        long now = System.currentTimeMillis();
+        List<LanSessionConfig.Record> stored = LanSessionConfig.load(pairingCode);
+        for (LanSessionConfig.Record saved : stored) {
+            if (devices.size() >= 32) break;
+            if (saved == null || saved.id == null || !saved.id.matches("[0-9a-f]{32}")
+                    || saved.token == null || !saved.token.matches("[0-9a-f]{32}")
+                    || saved.name == null || saved.name.length() > 32
+                    || saved.ip == null || saved.ip.length() > 64
+                    || !("browser".equals(saved.kind) || "mbox".equals(saved.kind))
+                    || saved.lastSeen <= 0 || saved.lastSeen > now + 60000
+                    || now - saved.lastSeen > SESSION_WINDOW_MS) continue;
+            devices.put(saved.token, new LanDevice(saved));
+        }
+        lastSessionsSavedAt = now;
+        if (!stored.isEmpty()) LogStore.log(Category.SYSTEM, "局域网配对会话恢复 count=" + devices.size());
+    }
+
+    private void persistSessions(boolean force) {
+        if (force) {
+            persistSessionsNow(true);
+            return;
+        }
+        // Segment requests must never wait for a preferences transaction or disk flush.
+        // Coalesce heartbeat writes; the worker reads the latest sessions when it runs.
+        if (sessionsPersistenceClosed || System.currentTimeMillis() - lastSessionsSavedAt < 60000
+                || !sessionsSaveQueued.compareAndSet(false, true)) return;
+        try {
+            HeavyTaskUtil.getSerialExecutorService().execute(() -> {
+                try { persistSessionsNow(false); }
+                catch (RuntimeException error) {
+                    LogStore.fail(Category.SYSTEM, "局域网配对会话保存失败: " + error.getClass().getSimpleName());
+                } finally { sessionsSaveQueued.set(false); }
+            });
+        } catch (RuntimeException rejected) {
+            sessionsSaveQueued.set(false);
+            LogStore.fail(Category.SYSTEM, "局域网配对会话保存未排入后台任务");
+        }
+    }
+
+    private synchronized void persistSessionsNow(boolean force) {
+        if (sessionsPersistenceClosed) return;
+        if (!SystemConfig.isLanServerEnabled()) return;
+        long now = System.currentTimeMillis();
+        if (!force && now - lastSessionsSavedAt < 60000) return;
+        List<LanSessionConfig.Record> saved = new ArrayList<>();
+        for (LanDevice device : devices.values()) {
+            if (now - device.lastSeen > SESSION_WINDOW_MS) continue;
+            saved.add(new LanSessionConfig.Record(device.id, device.token, device.name,
+                    device.ip, device.kind, device.connectedAt, device.lastSeen));
+        }
+        LanSessionConfig.save(pairingCode, saved);
+        lastSessionsSavedAt = now;
     }
 
     private void addGetRequestProcess() {
         getRequestList.add(new RawRequestProcess(this.mContext, "/", R.raw.index, NanoHTTPD.MIME_HTML));
         getRequestList.add(new RawRequestProcess(this.mContext, "/index.html", R.raw.index, NanoHTTPD.MIME_HTML));
+        // 可直达地址共用一张网页外壳；页面切换交给浏览器 History API。
+        getRequestList.add(new RawRequestProcess(this.mContext, "/video.html", R.raw.index, NanoHTTPD.MIME_HTML));
+        getRequestList.add(new RawRequestProcess(this.mContext, "/cast.html", R.raw.index, NanoHTTPD.MIME_HTML));
+        getRequestList.add(new RawRequestProcess(this.mContext, "/files.html", R.raw.index, NanoHTTPD.MIME_HTML));
         getRequestList.add(new RawRequestProcess(this.mContext, "/style.css", R.raw.style, "text/css"));
-        getRequestList.add(new RawRequestProcess(this.mContext, "/ui.css", R.raw.ui, "text/css"));
-        getRequestList.add(new RawRequestProcess(this.mContext, "/jquery.js", R.raw.jquery, "application/x-javascript"));
+        getRequestList.add(new RawRequestProcess(this.mContext, "/hls.js", R.raw.hls_js, "application/javascript"));
         getRequestList.add(new RawRequestProcess(this.mContext, "/script.js", R.raw.script, "application/x-javascript"));
         getRequestList.add(new RawRequestProcess(this.mContext, "/favicon.ico", R.drawable.app_icon, "image/x-icon"));
     }
@@ -85,172 +1302,1342 @@ public class RemoteServer extends NanoHTTPD {
     public void start(int timeout, boolean daemon) throws IOException {
         isStarted = true;
         super.start(timeout, daemon);
-        EventBus.getDefault().post(new ServerEvent(ServerEvent.SERVER_SUCCESS));
     }
 
     @Override
     public void stop() {
+        // 先关闭监听 socket；会话落盘失败也不能让对外端口继续开放。
         super.stop();
         isStarted = false;
+        try {
+            persistSessions(true);
+        } finally {
+            synchronized (this) { sessionsPersistenceClosed = true; }
+            for (LanDevice device : devices.values()) {
+                device.browserCastDetail = null;
+                clearCastMedia(device);
+            }
+            devices.clear();
+            activeBrowserId = null;
+            clearEpisodeCast();
+            notifyBrowserCastChanged();
+        }
     }
 
     @Override
     public Response serve(IHTTPSession session) {
-        EventBus.getDefault().post(new ServerEvent(ServerEvent.SERVER_CONNECTION));
-        if (!session.getUri().isEmpty()) {
-            String fileName = session.getUri().trim();
-            if (fileName.indexOf('?') >= 0) {
-                fileName = fileName.substring(0, fileName.indexOf('?'));
+        String uri = session.getUri();
+        if (uri == null || uri.isEmpty()) {
+            return getRequestList.get(0).doResponse(session, "", null, null);
+        }
+        String fileName = uri.trim();
+        if (fileName.indexOf('?') >= 0) {
+            fileName = fileName.substring(0, fileName.indexOf('?'));
+        }
+        if (fileName.equals("/token.js")) return createPlainTextResponse(Response.Status.NOT_FOUND, "not found");
+        if (session.getMethod() == Method.GET) {
+            if (fileName.equals("/api/session")) {
+                boolean paired = authorizedDevice(session) != null;
+                return jsonResponse(paired ? Response.Status.OK : Response.Status.FORBIDDEN,
+                        paired ? "{\"paired\":true}" : "{\"paired\":false}");
             }
-            if (session.getMethod() == Method.GET) {
-                for (RequestProcess process: getRequestList) {
-                    if (process.isRequest(session, fileName)) {
-                        return process.doResponse(session, fileName, session.getParms(), null);
-                    }
+            if (fileName.equals("/api/theme")) return serveTheme(session);
+            if (fileName.equals("/api/videos")) {
+                if (!isAuthorized(session, session.getParms())) return createPlainTextResponse(Response.Status.FORBIDDEN, "forbidden");
+                return jsonResponse(Response.Status.OK, LanVideoLibrary.catalog().toString());
+            }
+            if (fileName.equals("/api/videos/media")) return serveMediaVideo(session);
+            if (fileName.equals("/api/playback")) {
+                LanDevice device = authorizedDevice(session);
+                if (device == null) {
+                    logPlaybackAuthDenied();
+                    return createPlainTextResponse(Response.Status.FORBIDDEN, "forbidden");
                 }
-                if (fileName.equals("/proxy")) {
-                    Map < String, String > params = session.getParms();
-                    params.putAll(session.getHeaders());
-                    params.put("request-headers", new Gson().toJson(session.getHeaders()));
-                    if (params.containsKey("do")) {
-                        Object[] rs = ApiConfig.get().proxyLocal(params);
-                        //if (rs[0] instanceof Response) {
-                        //    return (Response) rs[0];
-                        //}
-                        int code = (int) rs[0];
-                        String mime = (String) rs[1];
-                        InputStream stream = rs[2] != null ? (InputStream) rs[2] : null;
-                        Response response = NanoHTTPD.newChunkedResponse(
-                                NanoHTTPD.Response.Status.lookup(code),
-                                mime,
-                                stream);
-                        if (rs.length > 3) {
-                            try {
-                                HashMap < String, String > headers = (HashMap < String, String > ) rs[3];
-                                for (String key: headers.keySet()) {
-                                    response.addHeader(key, headers.get(key));
-                                }
-                            } catch (Throwable th) {
-                                th.printStackTrace();
-                            }
-                        }
-                        return response;
-                    }
-                } else if (fileName.startsWith("/file/")) {
-                    try {
-                        String f = fileName.substring(6);
-                        String root = Environment.getExternalStorageDirectory().getAbsolutePath();
-                        String file = root + "/" + f;
-                        File localFile = new File(file);
-                        if (localFile.exists()) {
-                            if (localFile.isFile()) {
-                                return NanoHTTPD.newChunkedResponse(NanoHTTPD.Response.Status.OK, "application/octet-stream", new FileInputStream(localFile));
-                            } else {
-                                return NanoHTTPD.newFixedLengthResponse(NanoHTTPD.Response.Status.OK, NanoHTTPD.MIME_PLAINTEXT, fileList(root, f));
-                            }
-                        } else {
-                            return NanoHTTPD.newFixedLengthResponse(NanoHTTPD.Response.Status.INTERNAL_ERROR, NanoHTTPD.MIME_PLAINTEXT, "File " + file + " not found!");
-                        }
-                    } catch (Throwable th) {
-                        return NanoHTTPD.newFixedLengthResponse(NanoHTTPD.Response.Status.INTERNAL_ERROR, NanoHTTPD.MIME_PLAINTEXT, th.getMessage());
-                    }
-                } else if (fileName.equals("/dns-query")) {
-                    String name = session.getParms().get("name");
-                    byte[] rs = null;
-                    try {
-                        rs = OkGoHelper.dnsOverHttps.lookupHttpsForwardSync(name);
-                    } catch (Throwable th) {
-                        rs = new byte[0];
-                    }
-                    return NanoHTTPD.newFixedLengthResponse(NanoHTTPD.Response.Status.OK, "application/dns-message", new ByteArrayInputStream(rs), rs.length);
-                } else if (fileName.equals("/m3u8")) {
-                    return NanoHTTPD.newFixedLengthResponse(NanoHTTPD.Response.Status.OK,  NanoHTTPD.MIME_PLAINTEXT, m3u8Content);
-                }
-            } else if (session.getMethod() == Method.POST) {
-                Map < String, String > files = new HashMap < String, String > ();
+                return jsonResponse(Response.Status.OK, playbackForBrowser(device).toString());
+            }
+            if (fileName.equals("/api/cast/media")) return serveCastMedia(session);
+            if (fileName.equals("/api/lan/catalog")) {
+                if (!isAuthorized(session, session.getParms())) return createPlainTextResponse(Response.Status.FORBIDDEN, "forbidden");
+                return jsonResponse(Response.Status.OK, ConfigDataExchange.catalog().toString());
+            }
+            if (fileName.equals("/api/lan/archive")) {
+                if (!isAuthorized(session, session.getParms())) return createPlainTextResponse(Response.Status.FORBIDDEN, "forbidden");
+                String raw = session.getParms().get("categories");
+                if (raw == null || raw.length() > 100) return createPlainTextResponse(Response.Status.BAD_REQUEST, "invalid categories");
+                Set<String> selected = new java.util.LinkedHashSet<>(Arrays.asList(raw.split(",")));
+                File archive;
+                try { archive = new ConfigBundle(mContext).exportSelected(selected); }
+                catch (Exception error) { return createPlainTextResponse(Response.Status.BAD_REQUEST,
+                        "配置导出失败：" + (error.getMessage() == null ? "请检查所选数据" : error.getMessage())); }
                 try {
-                    if (session.getHeaders().containsKey("content-type")) {
-                        String hd = session.getHeaders().get("content-type");
-                        if (hd != null) {
-                            // cuke: 修正中文乱码问题
-                            if (hd.toLowerCase().contains("multipart/form-data") && !hd.toLowerCase().contains("charset=")) {
-                                Matcher matcher = Pattern.compile("[ |\t]*(boundary[ |\t]*=[ |\t]*['|\"]?[^\"^'^;^,]*['|\"]?)", Pattern.CASE_INSENSITIVE).matcher(hd);
-                                String boundary = matcher.find() ? matcher.group(1) : null;
-                                if (boundary != null) {
-                                    session.getHeaders().put("content-type", "multipart/form-data; charset=utf-8; " + boundary);
-                                }
-                            }
-                        }
-                    }
-                    session.parseBody(files);
-                } catch (IOException IOExc) {
-                    return createPlainTextResponse(NanoHTTPD.Response.Status.INTERNAL_ERROR, "SERVER INTERNAL ERROR: IOException: " + IOExc.getMessage());
-                } catch (NanoHTTPD.ResponseException rex) {
-                    return createPlainTextResponse(rex.getStatus(), rex.getMessage());
+                    InputStream input = new FileInputStream(archive);
+                    InputStream disposable = new FilterInputStream(input) {
+                        @Override public void close() throws IOException { super.close(); archive.delete(); }
+                    };
+                    Response download = newFixedLengthResponse(Response.Status.OK, "application/zip", disposable, archive.length());
+                    download.addHeader("Cache-Control", "no-store");
+                    download.addHeader("Content-Disposition", "attachment; filename=mbox-config.zip");
+                    return download;
+                } catch (IOException error) {
+                    archive.delete();
+                    return createPlainTextResponse(Response.Status.INTERNAL_ERROR, "archive unavailable");
                 }
-                for (RequestProcess process: postRequestList) {
-                    if (process.isRequest(session, fileName)) {
-                        return process.doResponse(session, fileName, session.getParms(), files);
-                    }
-                }
+            }
+            if (fileName.equals("/api/lan/data")) {
+                if (!isAuthorized(session, session.getParms())) return createPlainTextResponse(Response.Status.FORBIDDEN, "forbidden");
+                JsonObject data = ConfigDataExchange.exportCategory(session.getParms().get("category"));
+                return data == null ? createPlainTextResponse(Response.Status.BAD_REQUEST, "invalid category")
+                        : jsonResponse(Response.Status.OK, data.toString());
+            }
+            if (fileName.equals("/api/lan/theme")) {
+                if (!isAuthorized(session, session.getParms())) return createPlainTextResponse(Response.Status.FORBIDDEN, "forbidden");
+                File archive = ConfigDataExchange.exportTheme(mContext, session.getParms().get("id"));
+                if (archive == null) return createPlainTextResponse(Response.Status.NOT_FOUND, "theme not found");
                 try {
-                    Map < String, String > params = session.getParms();
-                    if (fileName.equals("/upload")) {
-                        String path = params.get("path");
-                        for (String k: files.keySet()) {
-                            if (k.startsWith("files-")) {
-                                String fn = params.get(k);
-                                String tmpFile = files.get(k);
-                                File tmp = new File(tmpFile);
-                                String root = Environment.getExternalStorageDirectory().getAbsolutePath();
-                                File file = new File(root + "/" + path + "/" + fn);
-                                if (file.exists()) file.delete();
-                                if (tmp.exists()) {
-                                    if (fn.toLowerCase().endsWith(".zip")) {
-                                        unzip(tmp, root + "/" + path);
-                                    } else {
-                                        FileUtils.copyFile(tmp, file);
-                                    }
-                                }
-                                if (tmp.exists()) tmp.delete();
+                    InputStream source = new FileInputStream(archive);
+                    InputStream disposable = new java.io.FilterInputStream(source) {
+                        @Override public void close() throws IOException { super.close(); archive.delete(); }
+                    };
+                    Response download = newFixedLengthResponse(Response.Status.OK, "application/octet-stream", disposable, archive.length());
+                    download.addHeader("Cache-Control", "no-store");
+                    return download;
+                } catch (IOException error) {
+                    archive.delete();
+                    return createPlainTextResponse(Response.Status.INTERNAL_ERROR, "theme export failed");
+                }
+            }
+            for (RequestProcess process : getRequestList) {
+                if (process.isRequest(session, fileName)) {
+                    return process.doResponse(session, fileName, session.getParms(), null);
+                }
+            }
+            if (fileName.equals("/proxy")) {
+                // 局域网侧仅允许已配对、且当前正在接收本机代理视频的浏览器读取。
+                boolean castBrowser = !isLoopbackRequest(session);
+                LanDevice castViewer = castBrowser ? castProxyViewer(session) : null;
+                if (castBrowser && castViewer == null) {
+                    return createPlainTextResponse(NanoHTTPD.Response.Status.FORBIDDEN, "forbidden");
+                }
+                Map<String, String> params = session.getParms();
+                params.putAll(session.getHeaders());
+                params.put("request-headers", GSON.toJson(session.getHeaders()));
+                if (params.containsKey("do")) {
+                    Object[] rs = com.github.catvod.crawler.SpiderApi.proxyLocal(params);
+                    // jar 代理方法缺失/未加载时 proxyLocal 返回 null(还有异常吞掉的情况),
+                    // 直接返回错误响应, 避免 rs[0] 读 null 数组崩溃
+                    if (rs == null || rs.length < 2) {
+                        if (castViewer != null) logMediaFailure(castViewer, "proxy_unavailable");
+                        if (isProxyPlaylistResponse(params, null)) {
+                            logProxyPlaylistFailure(params, 500, "text/plain", "proxy_unavailable");
+                        }
+                        return NanoHTTPD.newFixedLengthResponse(
+                                NanoHTTPD.Response.Status.INTERNAL_ERROR,
+                                "text/plain",
+                                "proxy unavailable");
+                    }
+                    //if (rs[0] instanceof Response) {
+                    //    return (Response) rs[0];
+                    //}
+                    int code = (int) rs[0];
+                    String mime = (String) rs[1];
+                    Response.Status proxyStatus = Response.Status.lookup(code);
+                    if (proxyStatus == null) proxyStatus = Response.Status.INTERNAL_ERROR;
+                    boolean proxyPlaylist = isProxyPlaylistResponse(params, mime);
+                    // 越界防护:原实现 rs==null||length<2 只保证 rs[0]/rs[1], 后面却直接读 rs[2];
+                    // 长度不足 3 或响应体为 null 时返回空响应体
+                    if (rs.length < 3 || !(rs[2] instanceof InputStream)) {
+                        if (proxyPlaylist) logProxyPlaylistFailure(params, code, mime, "missing_stream");
+                        if (proxyPlaylist && code >= 200 && code < 300) {
+                            return NanoHTTPD.newFixedLengthResponse(
+                                    PROXY_BAD_GATEWAY, "text/plain", "proxy playlist missing");
+                        }
+                        return NanoHTTPD.newFixedLengthResponse(
+                                proxyStatus, mime, "");
+                    }
+                    InputStream stream = (InputStream) rs[2];
+                    if (proxyPlaylist) {
+                        if (!stream.markSupported()) stream = new BufferedInputStream(stream, 128);
+                        try {
+                            String bodyKind = ProxyPlaylistDiagnostics.bodyKind(stream);
+                            if (code >= 400 || (code >= 200 && code < 300 && !"m3u8".equals(bodyKind))) {
+                                logProxyPlaylistFailure(params, code, mime, bodyKind);
                             }
+                            if (code >= 200 && code < 300 && "empty".equals(bodyKind)) {
+                                try { stream.close(); } catch (IOException ignored) { }
+                                return NanoHTTPD.newFixedLengthResponse(
+                                        PROXY_BAD_GATEWAY, "text/plain", "proxy playlist empty");
+                            }
+                        } catch (IOException error) {
+                            logProxyPlaylistFailure(params, code, mime,
+                                    "read_error:" + error.getClass().getSimpleName());
                         }
-                        return NanoHTTPD.newFixedLengthResponse(NanoHTTPD.Response.Status.OK, NanoHTTPD.MIME_PLAINTEXT, "OK");
-                    } else if (fileName.equals("/newFolder")) {
-                        String path = params.get("path");
-                        String name = params.get("name");
-                        String root = Environment.getExternalStorageDirectory().getAbsolutePath();
-                        File file = new File(root + "/" + path + "/" + name);
-                        if (!file.exists()) {
-                            file.mkdirs();
-                            File flag = new File(root + "/" + path + "/" + name + "/.tvbox_folder");
-                            if (!flag.exists()) flag.createNewFile();
+                    }
+                    boolean rewrittenPlaylist = castBrowser && isPlaylistMime(mime, params.get("do"));
+                    if (rewrittenPlaylist) {
+                        try {
+                            byte[] playlist = readCastPlaylist(stream);
+                            long castRevision = castViewer.playbackRevision;
+                            String rewritten = LanCastUrlRules.rewritePlaylist(
+                                    new String(playlist, StandardCharsets.UTF_8), serverPort, local -> {
+                                        if (castViewer.playbackRevision == castRevision
+                                                && castViewer.castProxyPaths.size() < 4096) {
+                                            castViewer.castProxyPaths.add(local);
+                                        }
+                                    });
+                            stream = new ByteArrayInputStream(rewritten.getBytes(StandardCharsets.UTF_8));
+                        } catch (IOException error) {
+                            return createPlainTextResponse(Response.Status.BAD_REQUEST, "playlist too large");
                         }
-                        return NanoHTTPD.newFixedLengthResponse(NanoHTTPD.Response.Status.OK, NanoHTTPD.MIME_PLAINTEXT, "OK");
-                    } else if (fileName.equals("/delFolder")) {
-                        String path = params.get("path");
-                        String root = Environment.getExternalStorageDirectory().getAbsolutePath();
-                        File file = new File(root + "/" + path);
-                        if (file.exists()) {
-                            FileUtils.recursiveDelete(file);
+                    }
+                    Response response = NanoHTTPD.newChunkedResponse(
+                            proxyStatus,
+                            mime,
+                            stream);
+                    if (castBrowser) response.addHeader("Cache-Control", "no-store");
+                    if (rs.length > 3) {
+                        try {
+                            HashMap<String, String> headers = (HashMap<String, String>) rs[3];
+                            for (String key : headers.keySet()) {
+                                if (rewrittenPlaylist && ("content-length".equalsIgnoreCase(key)
+                                        || "content-encoding".equalsIgnoreCase(key)
+                                        || "content-range".equalsIgnoreCase(key))) continue;
+                                response.addHeader(key, headers.get(key));
+                            }
+                        } catch (Throwable th) {
+                            th.printStackTrace();
                         }
-                        return NanoHTTPD.newFixedLengthResponse(NanoHTTPD.Response.Status.OK, NanoHTTPD.MIME_PLAINTEXT, "OK");
-                    } else if (fileName.equals("/delFile")) {
-                        String path = params.get("path");
-                        String root = Environment.getExternalStorageDirectory().getAbsolutePath();
-                        File file = new File(root + "/" + path);
-                        if (file.exists()) {
-                            file.delete();
+                    }
+                    return response;
+                }
+            } else if (fileName.equals("/dns-query")) {
+                // DoH 转发仅本机使用
+                if (!isLoopbackRequest(session)) {
+                    return createPlainTextResponse(NanoHTTPD.Response.Status.FORBIDDEN, "forbidden");
+                }
+                String name = session.getParms().get("name");
+                if (name == null || name.trim().isEmpty()) {
+                    return NanoHTTPD.newFixedLengthResponse(NanoHTTPD.Response.Status.BAD_REQUEST, NanoHTTPD.MIME_PLAINTEXT, "missing name");
+                }
+                byte[] rs = new byte[0];
+                try {
+                    // okhttp 4 的 DnsOverHttps 不再提供原始 DNS 报文转发,这里改为返回解析结果文本
+                    okhttp3.dnsoverhttps.DnsOverHttps doh = OkGoHelper.getDnsOverHttps();
+                    if (doh != null) {
+                        List<InetAddress> addresses = doh.lookup(name);
+                        if (addresses != null && !addresses.isEmpty()) {
+                            StringBuilder sb = new StringBuilder();
+                            for (InetAddress a : addresses) {
+                                if (a == null) continue;
+                                if (sb.length() > 0) sb.append("\n");
+                                sb.append(a.getHostAddress());
+                            }
+                            rs = sb.toString().getBytes("UTF-8");
                         }
-                        return NanoHTTPD.newFixedLengthResponse(NanoHTTPD.Response.Status.OK, NanoHTTPD.MIME_PLAINTEXT, "OK");
                     }
                 } catch (Throwable th) {
-                    return NanoHTTPD.newFixedLengthResponse(NanoHTTPD.Response.Status.OK, NanoHTTPD.MIME_PLAINTEXT, "OK");
+                    rs = new byte[0];
                 }
+                return NanoHTTPD.newFixedLengthResponse(NanoHTTPD.Response.Status.OK, NanoHTTPD.MIME_PLAINTEXT, new ByteArrayInputStream(rs), rs.length);
+            } else if (fileName.equals("/purify.m3u8") || fileName.equals("/m3u8")) {
+                // 本机播放器使用；正在接收该视频的已配对浏览器也可读取。
+                // 规范路径是 /purify.m3u8:播放器按路径扩展名判定容器类型,没有 .m3u8 后缀的路径
+                // 会被 Exo 判成 Progressive 首播失败;/m3u8 保留兼容旧调用方。
+                boolean castBrowser = !isLoopbackRequest(session);
+                LanDevice castViewer = castBrowser ? castProxyViewer(session) : null;
+                if (castBrowser && castViewer == null) {
+                    return createPlainTextResponse(NanoHTTPD.Response.Status.FORBIDDEN, "forbidden");
+                }
+                String content = m3u8Content == null ? "" : m3u8Content;
+                if (castBrowser) {
+                    long castRevision = castViewer.playbackRevision;
+                    content = LanCastUrlRules.rewritePlaylist(content, serverPort, local -> {
+                        if (castViewer.playbackRevision == castRevision
+                                && castViewer.castProxyPaths.size() < 4096) {
+                            castViewer.castProxyPaths.add(local);
+                        }
+                    });
+                }
+                Response purify = NanoHTTPD.newFixedLengthResponse(NanoHTTPD.Response.Status.OK,
+                        "application/vnd.apple.mpegurl", content);
+                // 名单是全局单槽(每次起播覆盖):禁止播放器缓存,避免 seek/重试拿到上一条清单
+                purify.addHeader("Cache-Control", "no-store");
+                return purify;
+            } else if (fileName.startsWith(LanShareEndpoints.DOWNLOAD_PREFIX)) {
+                return serveShareDownload(fileName.substring(LanShareEndpoints.DOWNLOAD_PREFIX.length()));
+            } else if (fileName.startsWith(LanShareEndpoints.IMPORT_PREFIX)) {
+                return serveShareImportGet(fileName.substring(LanShareEndpoints.IMPORT_PREFIX.length()));
+            } else if (fileName.startsWith("/file/")) {
+                return serveFileGet(session, fileName.substring(6));
             }
+        } else if (session.getMethod() == Method.POST) {
+            if (fileName.startsWith(LanShareEndpoints.IMPORT_PREFIX)) {
+                return serveShareImportPost(session, fileName.substring(LanShareEndpoints.IMPORT_PREFIX.length()));
+            }
+            return serveFilePost(session, fileName);
         }
         //default page: index.html
         return getRequestList.get(0).doResponse(session, "", null, null);
+    }
+
+    // ------------------------------------------------------------------
+    // 局域网分享桥(服务端侧:会话 + 下载 + 上传接收口,供 AppLanShareHost 复用)
+    // ------------------------------------------------------------------
+
+    private static final class ShareSession {
+        final File file;
+        final String fileName;
+        final long sizeBytes;
+        final long expiresAtMillis;
+        final boolean allowImport;
+        final int maxDownloads;
+        final java.util.concurrent.atomic.AtomicInteger downloads = new java.util.concurrent.atomic.AtomicInteger();
+
+        ShareSession(File file, String fileName, long sizeBytes, long expiresAtMillis,
+                     boolean allowImport, int maxDownloads) {
+            this.file = file;
+            this.fileName = fileName;
+            this.sizeBytes = sizeBytes;
+            this.expiresAtMillis = expiresAtMillis;
+            this.allowImport = allowImport;
+            this.maxDownloads = maxDownloads;
+        }
+
+        boolean expired() {
+            return expiresAtMillis > 0 && System.currentTimeMillis() >= expiresAtMillis;
+        }
+    }
+
+    /** 挂出分享会话(令牌 = 会话 id);返回含对端访问地址的快照。 */
+    public LanShareSession publishShare(SharePackage pkg, LanShareOptions opts) throws ShareException {
+        if (pkg == null || !pkg.isUsable()) {
+            throw ShareException.invalid("要导出的归档文件不可用");
+        }
+        if (!isStarted) {
+            throw ShareException.unavailable("局域网服务未启动");
+        }
+        purgeExpiredShares();
+        if (shareSessions.size() >= 32) {
+            throw ShareException.unavailable("分享会话数已达上限");
+        }
+        String token = generateToken();
+        long ttl = opts == null ? LanShareOptions.DEFAULT_TTL_MILLIS : opts.sessionTtlMillis();
+        long expiresAt = System.currentTimeMillis() + ttl;
+        boolean allowImport = opts != null && opts.allowImport();
+        int maxDownloads = opts == null ? LanShareOptions.DEFAULT_MAX_DOWNLOADS : opts.maxDownloads();
+        ShareSession s = new ShareSession(pkg.file(), pkg.fileName(), pkg.sizeBytes(),
+                expiresAt, allowImport, maxDownloads);
+        shareSessions.put(token, s);
+        String base = firstLanBaseUrl();
+        return new LanShareSession(token, token, s.fileName, s.sizeBytes,
+                LanShareEndpoints.downloadUrl(base, token),
+                allowImport ? LanShareEndpoints.importUrl(base, token) : "",
+                expiresAt, allowImport, maxDownloads);
+    }
+
+    /** 撤销会话(幂等);清理该会话的上传残留目录。 */
+    public void retractShare(String sessionId) {
+        if (sessionId == null || sessionId.isEmpty()) return;
+        if (shareSessions.remove(sessionId) == null) return;
+        deleteQuietly(uploadDir(sessionId));
+    }
+
+    /** 设置(或清除)上传接收口;清除时立刻失效 /share/u/<token> 并通知旧 receiver。 */
+    public void setShareImportReceiver(LanImportReceiver receiver) {
+        LanImportReceiver previous = shareImportReceiver;
+        shareImportReceiver = receiver;
+        if (receiver == null) {
+            String oldToken = shareImportToken;
+            shareImportToken = null;
+            if (oldToken != null) deleteQuietly(uploadDir(oldToken));
+            if (previous != null) previous.onSessionClosed(null);
+        } else if (shareImportToken == null) {
+            // 重设 receiver 不换令牌(地址不变),只换回调
+            shareImportToken = generateToken();
+        }
+    }
+
+    /** 当前上传接收口地址(没设接收口或取不到局域网地址返回空串)。 */
+    public String getShareImportUrl() {
+        if (shareImportReceiver == null || shareImportToken == null) return "";
+        String base = firstLanBaseUrl();
+        if (base.isEmpty()) return "";
+        return LanShareEndpoints.importUrl(base, shareImportToken);
+    }
+
+    private String firstLanBaseUrl() {
+        try {
+            java.util.List<String> urls = ControlManager.get().getLanAccessUrls();
+            if (urls != null && !urls.isEmpty()) {
+                String u = urls.get(0);
+                while (u.endsWith("/")) u = u.substring(0, u.length() - 1);
+                return u;
+            }
+        } catch (Throwable ignored) {
+        }
+        return "";
+    }
+
+    private File uploadDir(String token) {
+        File base = mContext == null ? null : mContext.getCacheDir();
+        return new File(base, "lan_share_upload_" + token);
+    }
+
+    private void purgeExpiredShares() {
+        for (Map.Entry<String, ShareSession> e : shareSessions.entrySet()) {
+            if (e.getValue().expired()) {
+                shareSessions.remove(e.getKey());
+                deleteQuietly(uploadDir(e.getKey()));
+            }
+        }
+    }
+
+    private ShareSession resolveShareToken(String token) {
+        if (token == null || token.isEmpty()) return null;
+        purgeExpiredShares();
+        ShareSession s = shareSessions.get(token);
+        return (s != null && !s.expired()) ? s : null;
+    }
+
+    /** 下载:GET /share/d/<token> */
+    private Response serveShareDownload(String token) {
+        ShareSession s = resolveShareToken(token);
+        if (s == null) return createPlainTextResponse(Response.Status.FORBIDDEN, "forbidden");
+        if (s.maxDownloads > 0 && s.downloads.incrementAndGet() > s.maxDownloads) {
+            return createPlainTextResponse(Response.Status.FORBIDDEN, "forbidden");
+        }
+        try {
+            InputStream input = new FileInputStream(s.file);
+            Response resp = newFixedLengthResponse(Response.Status.OK, "application/zip", input, s.file.length());
+            resp.addHeader("Cache-Control", "no-store");
+            resp.addHeader("Content-Disposition", "attachment; filename=\"" + s.fileName + "\"");
+            return resp;
+        } catch (IOException e) {
+            return createPlainTextResponse(Response.Status.INTERNAL_ERROR, "file unavailable");
+        }
+    }
+
+    /** 上传页:GET /share/u/<token> */
+    private Response serveShareImportGet(String token) {
+        if (shareImportReceiver == null || shareImportToken == null
+                || !constantTimeEquals(shareImportToken, token)) {
+            return createPlainTextResponse(Response.Status.FORBIDDEN, "forbidden");
+        }
+        String html = "<!DOCTYPE html><html><head><meta charset='utf-8'/></head><body>"
+                + "<form method='post' enctype='multipart/form-data'>"
+                + "<input type='file' name='" + LanShareEndpoints.UPLOAD_FIELD + "'/>"
+                + "<button type='submit'>上传</button></form></body></html>";
+        return newFixedLengthResponse(Response.Status.OK, "text/html; charset=utf-8", html);
+    }
+
+    /** 上传:POST /share/u/<token> */
+    private Response serveShareImportPost(IHTTPSession session, String token) {
+        if (shareImportReceiver == null || shareImportToken == null
+                || !constantTimeEquals(shareImportToken, token)) {
+            return createPlainTextResponse(Response.Status.FORBIDDEN, "forbidden");
+        }
+        long maxBytes = LanShareOptions.DEFAULT_MAX_UPLOAD_BYTES;
+        String length = session.getHeaders().get("content-length");
+        try {
+            if (length != null) {
+                long len = Long.parseLong(length);
+                if (len > maxBytes + 1024 * 1024) { // 留 multipart 边界与头部开销
+                    shareImportReceiver.onUploadRejected("上传内容过大");
+                    return createPlainTextResponse(Response.Status.BAD_REQUEST, "request too large");
+                }
+            }
+        } catch (NumberFormatException ignored) {
+        }
+        Map<String, String> files = new HashMap<>();
+        try {
+            session.parseBody(files);
+        } catch (IOException e) {
+            shareImportReceiver.onUploadRejected("上传读取失败");
+            return createPlainTextResponse(Response.Status.INTERNAL_ERROR, "upload failed");
+        } catch (NanoHTTPD.ResponseException e) {
+            shareImportReceiver.onUploadRejected(e.getMessage());
+            return createPlainTextResponse(e.getStatus(), e.getMessage());
+        }
+        String tmpPath = files.get(LanShareEndpoints.UPLOAD_FIELD);
+        if (tmpPath == null) {
+            shareImportReceiver.onUploadRejected("缺少上传文件");
+            return createPlainTextResponse(Response.Status.BAD_REQUEST, "missing file");
+        }
+        File received = new File(tmpPath);
+        if (!received.isFile() || received.length() <= 0) {
+            deleteQuietly(received);
+            shareImportReceiver.onUploadRejected("上传内容为空");
+            return createPlainTextResponse(Response.Status.BAD_REQUEST, "empty file");
+        }
+        if (received.length() > maxBytes) {
+            deleteQuietly(received);
+            shareImportReceiver.onUploadRejected("上传内容过大");
+            return createPlainTextResponse(Response.Status.BAD_REQUEST, "request too large");
+        }
+        // 接收口可能在处理期间被撤:再核对一次
+        LanImportReceiver receiver = shareImportReceiver;
+        if (receiver == null || shareImportToken == null) {
+            deleteQuietly(received);
+            return createPlainTextResponse(Response.Status.FORBIDDEN, "forbidden");
+        }
+        String msg = receiver.onUploadReceived(null, received);
+        return createPlainTextResponse(Response.Status.OK, msg);
+    }
+
+    private boolean constantTimeEquals(String a, String b) {
+        if (a == null || b == null) return false;
+        return MessageDigest.isEqual(a.getBytes(StandardCharsets.US_ASCII),
+                b.getBytes(StandardCharsets.US_ASCII));
+    }
+
+    private void deleteQuietly(File f) {
+        if (f == null) return;
+        try {
+            if (f.isDirectory()) {
+                File[] children = f.listFiles();
+                if (children != null) for (File c : children) deleteQuietly(c);
+            }
+            //noinspection ResultOfMethodCallIgnored
+            f.delete();
+        } catch (Throwable ignored) {
+        }
+    }
+
+    /**
+     * GET /file/&lt;rel&gt;: 配对设备可读文件和目录；进程令牌与爬虫凭据读取均只限回环的单个文件。
+     */
+    private Response serveFileGet(IHTTPSession session, String rel) {
+        try {
+            boolean loopback = isLoopbackRequest(session);
+            boolean paired = isAuthorized(session, session.getParms());
+            boolean localFileReader = !paired && isLocalFileReader(session);
+            // 回环上的 csp 爬虫(第三方 jar)不会带进程令牌，但网盘源启动时要按 ext 里的
+            // 相对路径取 /file/tvfan/Cloud-drive.txt 这类凭据——原版 TVBox 的回环是直通的，
+            // a119192d 收紧后这里变成 403，爬虫只能一直判定「未登录」。
+            // 只放行「约定目录下的凭据类单文件」：目录列表、写接口、其他文件仍要求配对会话。
+            boolean spiderCredential = !paired && !localFileReader && loopback
+                    && isSpiderCredentialRead(rel);
+            if (!paired && !localFileReader && !spiderCredential) {
+                // 探针(纯观察,不改变鉴权):回环上出现未鉴权的 /file 请求,说明有第三方
+                // (爬虫 jar 等)在自己找本机文件。把路径记下来才能确认它到底取哪个目录;
+                // 此前这里是静默 403,线上完全看不到。
+                if (loopback) logFileProbe("回环未鉴权拒绝 " + rel);
+                return createPlainTextResponse(Response.Status.FORBIDDEN, "forbidden");
+            }
+            if (loopback && spiderCredential) logFileProbe("回环放行凭据读取 " + rel);
+            File root = storageRoot();
+            File localFile;
+            if (rel == null || rel.trim().isEmpty() || rel.equals(".")) {
+                localFile = root;
+            } else {
+                localFile = resolveUnderRoot(rel);
+            }
+            if (localFile == null) {
+                return createPlainTextResponse(NanoHTTPD.Response.Status.BAD_REQUEST, "invalid path");
+            }
+            if (localFile.exists()) {
+                if (localFile.isFile()) {
+                    return streamLocalFile(session, localFile);
+                } else {
+                    if (!paired) {
+                        return createPlainTextResponse(NanoHTTPD.Response.Status.FORBIDDEN, "forbidden");
+                    }
+                    return NanoHTTPD.newFixedLengthResponse(NanoHTTPD.Response.Status.OK, NanoHTTPD.MIME_PLAINTEXT, fileList(root.getAbsolutePath(), rel == null ? "" : rel));
+                }
+            } else {
+                return NanoHTTPD.newFixedLengthResponse(NanoHTTPD.Response.Status.INTERNAL_ERROR, NanoHTTPD.MIME_PLAINTEXT, "File not found!");
+            }
+        } catch (Throwable th) {
+            String msg = th.getMessage();
+            return NanoHTTPD.newFixedLengthResponse(NanoHTTPD.Response.Status.INTERNAL_ERROR, NanoHTTPD.MIME_PLAINTEXT, msg == null ? "error" : msg);
+        }
+    }
+
+    /** POST 处理:解析 body 后统一做管理鉴权,再分发到各处理函数 */
+    private Response serveFilePost(IHTTPSession session, String fileName) {
+        // Cookie 属于浏览器自动携带的凭据；写接口必须来自本服务同源页面。
+        // 显式且有效的 X-TVBox-Token 客户端、无 Cookie 的本机内部调用不受影响。
+        if (!fileName.equals("/api/pair") && !trustedCookieWriteOrigin(session)) {
+            // 探针(纯观察):若爬虫 jar 想通过本地服务回写 cookie，会在这里被拦下，
+            // 日志里能看到具体路径，才知道该不该给它开写通道。
+            if (isLoopbackRequest(session)) logFileProbe("回环未鉴权写入拒绝 " + fileName);
+            return createPlainTextResponse(Response.Status.FORBIDDEN, "forbidden origin");
+        }
+        boolean managed = fileName.equals("/action") || fileName.equals("/upload")
+                || fileName.equals("/newFolder") || fileName.equals("/delFolder") || fileName.equals("/delFile");
+        if (managed && !isAuthorized(session, session.getParms())) {
+            return createPlainTextResponse(Response.Status.FORBIDDEN, "forbidden");
+        }
+        boolean playbackAction = fileName.equals("/api/playback/next")
+                || fileName.equals("/api/playback/select")
+                || fileName.equals("/api/playback/event")
+                || fileName.equals("/api/playback/state")
+                || fileName.equals("/api/playback/leave");
+        if (playbackAction
+                && authorizedDevice(session) == null) {
+            return createPlainTextResponse(Response.Status.FORBIDDEN, "forbidden");
+        }
+        if (fileName.equals("/api/pair") || playbackAction) {
+            try {
+                String length = session.getHeaders().get("content-length");
+                if (playbackAction && length == null) {
+                    return createPlainTextResponse(Response.Status.BAD_REQUEST, "content length required");
+                }
+                long byteCount = Long.parseLong(length == null ? "0" : length);
+                if (byteCount < 0 || byteCount > 1024) {
+                    return createPlainTextResponse(Response.Status.BAD_REQUEST, "request too large");
+                }
+            } catch (NumberFormatException ignored) {
+                return createPlainTextResponse(Response.Status.BAD_REQUEST, "invalid content length");
+            }
+        }
+        Map<String, String> files = new HashMap<>();
+        try {
+            if (session.getHeaders().containsKey("content-type")) {
+                String hd = session.getHeaders().get("content-type");
+                if (hd != null) {
+                    // cuke: 修正中文乱码问题
+                    if (hd.toLowerCase().contains("multipart/form-data") && !hd.toLowerCase().contains("charset=")) {
+                        Matcher matcher = Pattern.compile("[ |\t]*(boundary[ |\t]*=[ |\t]*['|\"]?[^\"^'^;^,]*['|\"]?)", Pattern.CASE_INSENSITIVE).matcher(hd);
+                        String boundary = matcher.find() ? matcher.group(1) : null;
+                        if (boundary != null) {
+                            session.getHeaders().put("content-type", "multipart/form-data; charset=utf-8; " + boundary);
+                        }
+                    }
+                }
+            }
+            session.parseBody(files);
+        } catch (IOException IOExc) {
+            return createPlainTextResponse(NanoHTTPD.Response.Status.INTERNAL_ERROR, "SERVER INTERNAL ERROR: IOException: " + IOExc.getMessage());
+        } catch (NanoHTTPD.ResponseException rex) {
+            return createPlainTextResponse(rex.getStatus(), rex.getMessage());
+        }
+        Map<String, String> params = session.getParms();
+        if (params == null) params = new HashMap<>();
+        if (fileName.equals("/api/pair")) return handlePair(session, params);
+        if (fileName.equals("/api/logout")) {
+            LanDevice device = authorizedDevice(session);
+            if (device == null) return createPlainTextResponse(Response.Status.FORBIDDEN, "forbidden");
+            kickDevice(device.id);
+            Response response = jsonResponse(Response.Status.OK, "{\"paired\":false}");
+            response.addHeader("Set-Cookie", "mbox_lan=; Path=/; Max-Age=0; HttpOnly; SameSite=Strict");
+            return response;
+        }
+        if (fileName.equals("/api/playback/next")) {
+            LanDevice device = authorizedDevice(session);
+            if (device == null) return createPlainTextResponse(Response.Status.FORBIDDEN, "forbidden");
+            boolean accepted = requestNextEpisode(device, params.get("revision"));
+            return jsonResponse(Response.Status.OK, "{\"accepted\":" + accepted + "}");
+        }
+        if (fileName.equals("/api/playback/select")) {
+            LanDevice device = authorizedDevice(session);
+            if (device == null) return createPlainTextResponse(Response.Status.FORBIDDEN, "forbidden");
+            boolean accepted = requestSelectedEpisode(device, params.get("revision"), params.get("index"));
+            return jsonResponse(Response.Status.OK, "{\"accepted\":" + accepted + "}");
+        }
+        if (fileName.equals("/api/playback/event")) {
+            LanDevice device = authorizedDevice(session);
+            return recordPlaybackEvent(device, params);
+        }
+        if (fileName.equals("/api/playback/state")) {
+            LanDevice device = authorizedDevice(session);
+            return recordBrowserPlaybackState(device, params);
+        }
+        if (fileName.equals("/api/playback/leave")) {
+            LanDevice device = authorizedDevice(session);
+            return leaveBrowserPlayback(device, params.get("revision"));
+        }
+        // 管理/变更类接口统一要求已配对会话；回环地址本身不是身份凭据。
+        for (RequestProcess process : postRequestList) {
+            if (process.isRequest(session, fileName)) {
+                return process.doResponse(session, fileName, params, files);
+            }
+        }
+        try {
+            if (fileName.equals("/upload")) {
+                return handleUpload(params, files);
+            } else if (fileName.equals("/newFolder")) {
+                return handleNewFolder(params);
+            } else if (fileName.equals("/delFolder")) {
+                return handleDelete(params, true);
+            } else if (fileName.equals("/delFile")) {
+                return handleDelete(params, false);
+            }
+        } catch (StagedZipExtractor.InvalidArchiveException rejected) {
+            return createPlainTextResponse(NanoHTTPD.Response.Status.BAD_REQUEST, rejected.getMessage());
+        } catch (Throwable th) {
+            return createPlainTextResponse(NanoHTTPD.Response.Status.INTERNAL_ERROR, "operation failed");
+        }
+        //default page: index.html(与历史行为一致)
+        return getRequestList.get(0).doResponse(session, "", null, null);
+    }
+
+    /** /upload: 目标限定在外部存储根目录内，ZIP 先完整暂存和校验，再提交。 */
+    private Response handleUpload(Map<String, String> params, Map<String, String> files) throws Exception {
+        return SubscriptionImportFiles.runLocked(() -> handleUploadLocked(params, files));
+    }
+
+    private Response handleUploadLocked(Map<String, String> params, Map<String, String> files) throws IOException {
+        File destDir = resolveUnderRoot(params.get("path"));
+        if (destDir == null) {
+            return createPlainTextResponse(NanoHTTPD.Response.Status.BAD_REQUEST, "invalid path");
+        }
+        if (!destDir.exists() && !destDir.mkdirs()) {
+            return createPlainTextResponse(NanoHTTPD.Response.Status.INTERNAL_ERROR, "cannot create target dir");
+        }
+        for (String k : files.keySet()) {
+            if (!k.startsWith("files-")) continue;
+            String fn = params.get(k);
+            String tmpFile = files.get(k);
+            if (fn == null || tmpFile == null) continue;
+            String safeName = sanitizeFileName(fn);
+            if (safeName == null) {
+                return createPlainTextResponse(NanoHTTPD.Response.Status.BAD_REQUEST, "invalid file name: " + fn);
+            }
+            File tmp = new File(tmpFile);
+            File target = resolveUnderRoot(joinRel(params.get("path"), safeName));
+            if (target == null) {
+                return createPlainTextResponse(NanoHTTPD.Response.Status.BAD_REQUEST, "invalid target path");
+            }
+            if (tmp.exists()) {
+                if (safeName.toLowerCase().endsWith(".zip")) {
+                    StagedZipExtractor.unzip(tmp, destDir);
+                } else {
+                    StagedZipExtractor.copyFileAtomically(tmp, target);
+                }
+            }
+            if (tmp.exists()) tmp.delete();
+        }
+        return NanoHTTPD.newFixedLengthResponse(NanoHTTPD.Response.Status.OK, NanoHTTPD.MIME_PLAINTEXT, "OK");
+    }
+
+    /** /newFolder: 目录名必须为单段,目标位置限定在根目录内 */
+    private Response handleNewFolder(Map<String, String> params) throws Exception {
+        return SubscriptionImportFiles.runLocked(() -> handleNewFolderLocked(params));
+    }
+
+    private Response handleNewFolderLocked(Map<String, String> params) throws IOException {
+        String safeName = sanitizeFileName(params.get("name"));
+        if (safeName == null) {
+            return createPlainTextResponse(NanoHTTPD.Response.Status.BAD_REQUEST, "invalid name");
+        }
+        File parent = resolveUnderRoot(params.get("path"));
+        if (parent == null) {
+            return createPlainTextResponse(NanoHTTPD.Response.Status.BAD_REQUEST, "invalid path");
+        }
+        File file = new File(parent, safeName);
+        if (!file.exists()) {
+            if (!file.mkdirs()) return createPlainTextResponse(NanoHTTPD.Response.Status.INTERNAL_ERROR, "cannot create folder");
+            File flag = new File(file, ".tvbox_folder");
+            if (!flag.exists()) flag.createNewFile();
+        }
+        return NanoHTTPD.newFixedLengthResponse(NanoHTTPD.Response.Status.OK, NanoHTTPD.MIME_PLAINTEXT, "OK");
+    }
+
+    /** /delFolder|/delFile: 拒绝删除根目录/空路径,且目标必须位于外部存储根目录内 */
+    private Response handleDelete(Map<String, String> params, boolean folder) throws Exception {
+        return SubscriptionImportFiles.runLocked(() -> handleDeleteLocked(params, folder));
+    }
+
+    private Response handleDeleteLocked(Map<String, String> params, boolean folder) throws IOException {
+        String path = params.get("path");
+        if (path == null) {
+            return createPlainTextResponse(NanoHTTPD.Response.Status.BAD_REQUEST, "missing path");
+        }
+        String p = path.trim();
+        if (p.isEmpty() || p.equals("/") || p.equals(".") || p.equals("..")) {
+            return createPlainTextResponse(NanoHTTPD.Response.Status.BAD_REQUEST, "refuse to delete root");
+        }
+        File target = resolveUnderRoot(p);
+        if (target == null) {
+            return createPlainTextResponse(NanoHTTPD.Response.Status.BAD_REQUEST, "invalid path");
+        }
+        File rootCanon = storageRoot().getCanonicalFile();
+        if (target.equals(rootCanon)) {
+            return createPlainTextResponse(NanoHTTPD.Response.Status.BAD_REQUEST, "refuse to delete root");
+        }
+        if (target.exists()) {
+            if (folder) {
+                FileUtils.recursiveDelete(target);
+            } else {
+                target.delete();
+            }
+            if (target.exists()) return createPlainTextResponse(NanoHTTPD.Response.Status.INTERNAL_ERROR, "cannot delete target");
+        }
+        return NanoHTTPD.newFixedLengthResponse(NanoHTTPD.Response.Status.OK, NanoHTTPD.MIME_PLAINTEXT, "OK");
+    }
+
+    /** 本机回环判断:NanoHTTPD 的 getRemoteIpAddress 返回对端地址文本 */
+    private boolean isLoopbackRequest(IHTTPSession session) {
+        String ip = session.getRemoteIpAddress();
+        return ip != null && (ip.equals("::1")
+                || ip.equals("0:0:0:0:0:0:0:1")
+                || ip.startsWith("127."));
+    }
+
+    /** 管理接口鉴权:回环和局域网都必须携带有效配对会话。 */
+    private boolean isAuthorized(IHTTPSession session, Map<String, String> params) {
+        return authorizedDevice(session) != null;
+    }
+
+    /** 应用内本地订阅只读单文件；其他本机应用即使能连上回环端口也拿不到此随机令牌。 */
+    private boolean isLocalFileReader(IHTTPSession session) {
+        if (!isLoopbackRequest(session)) return false;
+        Map<String, String> headers = session.getHeaders();
+        String provided = headers == null ? null : headers.get("x-mbox-local-token");
+        return provided != null && MessageDigest.isEqual(
+                localReadToken.getBytes(StandardCharsets.US_ASCII),
+                provided.getBytes(StandardCharsets.US_ASCII));
+    }
+
+    /** 仅由本进程装配根注入 spider 的本地订阅读取器，不写入 URL、日志或持久配置。 */
+    public String getLocalReadToken() {
+        return localReadToken;
+    }
+
+    /**
+     * 爬虫按 ext 里的相对路径(如 {@code tvfan/Cloud-drive.txt})直接取网盘凭据。
+     * 只认约定凭据目录下的凭据类文件，且必须真实存在；其他路径一律仍走鉴权拒绝。
+     */
+    private boolean isSpiderCredentialRead(String rel) {
+        if (rel == null) return false;
+        String path = rel.trim();
+        if (path.isEmpty() || path.equals(".")) return false;
+        try {
+            File file = resolveUnderRoot(path);
+            if (file == null || !file.isFile()) return false;
+            return com.github.tvbox.osc.util.cache.CacheCatalog.isCloudCredential(file, storageRoot());
+        } catch (Throwable ignored) {
+            return false;
+        }
+    }
+
+    /** 探针去重：同一行 2 秒内只记一次，避免页面批量取资源时刷库。 */
+    private static volatile String lastFileProbeLine;
+    private static volatile long lastFileProbeAt;
+
+    /**
+     * /file 探针：同时写 logcat 与日志页(系统分类)，没有 adb 也能在应用内看到。
+     * 只记路径与大小，不记文件内容。
+     */
+    private static void logFileProbe(String message) {
+        String line = "[file] " + message;
+        long now = System.currentTimeMillis();
+        if (line.equals(lastFileProbeLine) && now - lastFileProbeAt < 2000L) return;
+        lastFileProbeLine = line;
+        lastFileProbeAt = now;
+        android.util.Log.i("TVBox-Server", line);
+        try {
+            LogStore.log(Category.SYSTEM, line);
+        } catch (Throwable ignored) {
+            // 日志页不可用不影响文件服务
+        }
+    }
+
+    private Response castPlaylistResponse(LanDevice viewer, String mediaId, CastMedia media,
+                                          String playlist, String baseUrl) {
+        long revision = media.revision;
+        if (devices.get(viewer.token) != viewer || viewer.playbackRevision != revision
+                || viewer.castMedia.get(mediaId) != media)
+            return createPlainTextResponse(Response.Status.NOT_FOUND, "media expired");
+        try {
+            String rewritten = LanCastUrlRules.rewriteForBrowser(playlist, baseUrl, serverPort,
+                    (child, role) -> {
+                        if (devices.get(viewer.token) != viewer || viewer.playbackRevision != revision
+                                || viewer.castMedia.get(mediaId) != media)
+                            throw new IllegalStateException("cast expired");
+                        String local = LanCastUrlRules.browserUrl(child, serverPort);
+                        if (local != null && local.startsWith("/")
+                                && !LanCastUrlRules.isProxyPath(local.split("\\?", 2)[0])) return local;
+                        boolean localProxy = local != null && local.startsWith("/");
+                        String resourceUrl = localProxy ? "http://127.0.0.1:" + serverPort + local : child;
+                        String relay = registerCastMedia(viewer, resourceUrl,
+                                LanCastUrlRules.headersForChild(media.headerOrigin, child,
+                                        media.headers, serverPort),
+                                role == LanCastRelayRules.ResourceKind.PLAYLIST,
+                                null, localProxy ? media.headerOrigin : child, revision);
+                        if (relay == null) throw new IllegalStateException("cast resource limit");
+                        return relay;
+                    });
+            if (devices.get(viewer.token) != viewer || viewer.playbackRevision != revision
+                    || viewer.castMedia.get(mediaId) != media)
+                return createPlainTextResponse(Response.Status.NOT_FOUND, "media expired");
+            byte[] bytes = rewritten.getBytes(StandardCharsets.UTF_8);
+            Response result = newFixedLengthResponse(Response.Status.OK,
+                    "application/vnd.apple.mpegurl", new ByteArrayInputStream(bytes), bytes.length);
+            result.addHeader("Cache-Control", "no-store");
+            return result;
+        } catch (IllegalStateException error) {
+            logMediaFailure(viewer, "playlist_registration_failed");
+            return createPlainTextResponse(PROXY_BAD_GATEWAY, "playlist unavailable");
+        }
+    }
+
+    private Response serveCastMedia(IHTTPSession session) {
+        LanDevice viewer = authorizedDevice(session);
+        if (viewer == null || !"browser".equals(viewer.kind))
+            return createPlainTextResponse(Response.Status.FORBIDDEN, "forbidden");
+        String mediaId = session.getParms() == null ? null : session.getParms().get("id");
+        if (mediaId == null || !CAST_MEDIA_ID.matcher(mediaId).matches())
+            return createPlainTextResponse(Response.Status.BAD_REQUEST, "invalid media id");
+        CastMedia media = viewer.castMedia.get(mediaId);
+        if (media == null || media.revision != viewer.playbackRevision)
+            return createPlainTextResponse(Response.Status.NOT_FOUND, "media expired");
+        final long mediaRevision = media.revision;
+        if (media.inlinePlaylist != null)
+            return castPlaylistResponse(viewer, mediaId, media, media.inlinePlaylist, media.headerOrigin);
+        String range = session.getHeaders().get("range");
+        okhttp3.Response upstream = null;
+        String requestUrl = media.url;
+        long requestStartNs = System.nanoTime();
+        try {
+            for (int redirects = 0; redirects <= 5; redirects++) {
+                Request.Builder request = new Request.Builder().url(requestUrl).get();
+                Map<String, String> requestHeaders = headersForChild(media.url, requestUrl, media.headers);
+                for (Map.Entry<String, String> header : requestHeaders.entrySet()) {
+                    String name = header.getKey();
+                    String value = header.getValue();
+                    if (name == null || value == null || value.length() > 4096
+                            || name.equalsIgnoreCase("host") || name.equalsIgnoreCase("connection")
+                            || name.equalsIgnoreCase("content-length") || name.equalsIgnoreCase("accept-encoding")
+                            || name.equalsIgnoreCase("range")) continue;
+                    try { request.header(name, value); } catch (IllegalArgumentException ignored) { }
+                }
+                if (!media.playlistHint && range != null && range.length() <= 80
+                        && CAST_MEDIA_RANGE.matcher(range).matches())
+                    request.header("Range", range);
+                // Range 与 Content-Length 都按原始媒体字节计;禁止压缩中途改变字节位置。
+                request.header("Accept-Encoding", "identity");
+                upstream = media.client.newCall(request.build()).execute();
+                String location = upstream.header("Location");
+                if (upstream.code() < 300 || upstream.code() > 399 || location == null) break;
+                okhttp3.HttpUrl next = upstream.request().url().resolve(location);
+                upstream.close();
+                upstream = null;
+                if (redirects == 5 || next == null
+                        || !LanCastRelayRules.allowedRedirect(media.url, next.toString())) {
+                    logMediaFailure(viewer, "redirect_blocked");
+                    return createPlainTextResponse(Response.Status.FORBIDDEN, "media redirect blocked");
+                }
+                requestUrl = next.toString();
+            }
+        } catch (Exception error) {
+            if (upstream != null) upstream.close();
+            logMediaFailure(viewer, "request_" + error.getClass().getSimpleName());
+            return createPlainTextResponse(Response.Status.INTERNAL_ERROR, "media unavailable");
+        }
+        if (upstream == null) {
+            logMediaFailure(viewer, "empty_response");
+            return createPlainTextResponse(Response.Status.INTERNAL_ERROR, "media unavailable");
+        }
+        logSlowCastRead(viewer, "upstream_headers",
+                TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - requestStartNs), 0);
+        okhttp3.ResponseBody body = upstream.body();
+        if (body == null || !upstream.isSuccessful()) {
+            int code = upstream.code();
+            upstream.close();
+            logMediaFailure(viewer, "upstream_http_" + code);
+            Response.Status status = Response.Status.lookup(code);
+            return createPlainTextResponse(status == null ? Response.Status.INTERNAL_ERROR : status,
+                    "media unavailable");
+        }
+        String mime = upstream.header("Content-Type", "application/octet-stream");
+        boolean playlist = media.playlistHint || isPlaylistMime(mime, "");
+        InputStream mediaStream = body.byteStream();
+        // Proxy and extensionless sources may label a valid HLS manifest as text/plain.
+        // Inspect only the prefix and reset it so progressive video remains streamed.
+        String encoding = upstream.header("Content-Encoding");
+        if (!playlist && (encoding == null || "identity".equalsIgnoreCase(encoding))) {
+            mediaStream = new BufferedInputStream(mediaStream, 128);
+            try {
+                String kind = ProxyPlaylistDiagnostics.bodyKind(mediaStream);
+                playlist = "m3u8".equals(kind) || "utf8_bom".equals(kind);
+            } catch (IOException error) {
+                upstream.close();
+                logMediaFailure(viewer, "media_prefix_io");
+                return createPlainTextResponse(PROXY_BAD_GATEWAY, "media unavailable");
+            }
+        }
+        if (playlist) {
+            try (okhttp3.Response response = upstream) {
+                byte[] source = readCastPlaylist(decodeCastPlaylist(mediaStream,
+                        response.header("Content-Encoding")));
+                if (viewer.playbackRevision != mediaRevision || viewer.castMedia.get(mediaId) != media)
+                    return createPlainTextResponse(Response.Status.NOT_FOUND, "media expired");
+                String text = new String(source, StandardCharsets.UTF_8);
+                if (text.startsWith("\uFEFF")) text = text.substring(1);
+                return castPlaylistResponse(viewer, mediaId, media, text,
+                        response.request().url().toString());
+            } catch (IOException error) {
+                logMediaFailure(viewer, "playlist_io");
+                return createPlainTextResponse(Response.Status.BAD_REQUEST, "playlist unavailable");
+            }
+        }
+        final okhttp3.Response sourceResponse = upstream;
+        InputStream stream = new FilterInputStream(mediaStream) {
+            private long relayedBytes;
+
+            private void requireCurrentCast() throws IOException {
+                if (devices.get(viewer.token) != viewer || viewer.playbackRevision != media.revision
+                        || viewer.castMedia.get(mediaId) != media)
+                    throw new IOException("cast revoked");
+            }
+            @Override public int read() throws IOException {
+                requireCurrentCast();
+                try {
+                    int value = super.read();
+                    if (value >= 0) relayedBytes++;
+                    return value;
+                } catch (IOException error) {
+                    logMediaFailure(viewer, "stream_" + error.getClass().getSimpleName());
+                    throw error;
+                }
+            }
+            @Override public int read(byte[] buffer, int off, int len) throws IOException {
+                requireCurrentCast();
+                long started = System.nanoTime();
+                try {
+                    int count = super.read(buffer, off, len);
+                    if (count > 0) relayedBytes += count;
+                    logSlowCastRead(viewer, "upstream_body",
+                            TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - started), relayedBytes);
+                    return count;
+                } catch (IOException error) {
+                    logMediaFailure(viewer, "stream_" + error.getClass().getSimpleName());
+                    throw error;
+                }
+            }
+            @Override public void close() throws IOException {
+                try { super.close(); } finally { sourceResponse.close(); }
+            }
+        };
+        Response.Status status = upstream.code() == 206 ? Response.Status.PARTIAL_CONTENT : Response.Status.OK;
+        long size = body.contentLength();
+        Response result = size >= 0 ? newFixedLengthResponse(status, mime, stream, size)
+                : newChunkedResponse(status, mime, stream);
+        String contentRange = upstream.header("Content-Range");
+        if (contentRange != null) result.addHeader("Content-Range", contentRange);
+        // 个别源站忽略 identity 仍返回压缩体;流未解码,须连同字节范围一起原样交给浏览器。
+        String contentEncoding = upstream.header("Content-Encoding");
+        if (contentEncoding != null) result.addHeader("Content-Encoding", contentEncoding);
+        String acceptRanges = upstream.header("Accept-Ranges");
+        if (acceptRanges != null) result.addHeader("Accept-Ranges", acceptRanges);
+        result.addHeader("Cache-Control", "no-store");
+        return result;
+    }
+
+    private boolean trustedCookieWriteOrigin(IHTTPSession session) {
+        Map<String, String> headers = session.getHeaders();
+        if (headers == null) return true;
+        String cookie = headers.get("cookie");
+        if (cookie == null || !cookie.contains("mbox_lan=")) return true;
+        String headerToken = headers.get("x-tvbox-token");
+        LanDevice explicit = headerToken == null ? null : devices.get(headerToken);
+        if (explicit != null && System.currentTimeMillis() - explicit.lastSeen <= SESSION_WINDOW_MS)
+            return true;
+        String origin = headers.get("origin");
+        String source = origin != null ? origin : headers.get("referer");
+        return sameOriginForCookieWrite(source, headers.get("host"), serverPort);
+    }
+
+    /** IP 字面量阻断 DNS rebinding；来源必须与浏览器正在访问的本服务端口相同。 */
+    static boolean sameOriginForCookieWrite(String source, String rawHost, int port) {
+        if (source == null || rawHost == null || source.length() > 2048 || rawHost.length() > 255)
+            return false;
+        try {
+            java.net.URI from = new java.net.URI(source);
+            java.net.URI target = new java.net.URI("http://" + rawHost);
+            String sourceHost = from.getHost();
+            String targetHost = target.getHost();
+            return "http".equalsIgnoreCase(from.getScheme())
+                    && from.getRawUserInfo() == null && from.getRawFragment() == null
+                    && sourceHost != null && targetHost != null
+                    && numericLanHost(targetHost)
+                    && sourceHost.equalsIgnoreCase(targetHost)
+                    && from.getPort() == port && target.getPort() == port;
+        } catch (Exception invalid) {
+            return false;
+        }
+    }
+
+    private static boolean numericLanHost(String rawHost) {
+        String host = rawHost;
+        if (host.startsWith("[") && host.endsWith("]"))
+            host = host.substring(1, host.length() - 1);
+        if ("localhost".equalsIgnoreCase(host)) return true;
+        String[] octets = host.split("\\.", -1);
+        if (octets.length == 4) {
+            for (String octet : octets) {
+                if (octet.isEmpty() || octet.length() > 3 || !octet.matches("[0-9]+")) return false;
+                int value = Integer.parseInt(octet);
+                if (value > 255) return false;
+            }
+            return true;
+        }
+        return host.indexOf(':') >= 0 && host.matches("[0-9a-fA-F:]+");
+    }
+
+    private LanDevice authorizedDevice(IHTTPSession session) {
+        String token = null;
+        Map<String, String> headers = session.getHeaders();
+        if (headers != null) {
+            token = headers.get("x-tvbox-token");
+            if (token == null) {
+                String cookie = headers.get("cookie");
+                if (cookie != null) {
+                    for (String item : cookie.split(";")) {
+                        String part = item.trim();
+                        if (part.startsWith("mbox_lan=")) {
+                            token = part.substring("mbox_lan=".length());
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+        LanDevice device = token == null ? null : devices.get(token);
+        if (device != null) {
+            long now = System.currentTimeMillis();
+            if (now - device.lastSeen > SESSION_WINDOW_MS) {
+                if (devices.remove(device.token, device)) {
+                    synchronized (this) {
+                        if (device.id.equals(activeBrowserId)) {
+                            activeBrowserId = null;
+                            EpisodeCast cast = episodeCast;
+                            if (cast != null && device.id.equals(cast.deviceId)) episodeCast = null;
+                            revokeBrowserPlayback(device);
+                            notifyBrowserCastChanged();
+                        } else {
+                            device.browserCastDetail = null;
+                            clearCastMedia(device);
+                        }
+                    }
+                }
+                persistSessions(true);
+                LogStore.log(Category.SYSTEM, "局域网配对会话过期 device=" + deviceRef(device));
+                return null;
+            }
+            device.lastSeen = now;
+            persistSessions(false);
+        }
+        return device;
+    }
+
+    /** 按 MediaStore 视频 ID 读取，与 App「我的 → 本地视频」是同一批内容。 */
+    private Response serveMediaVideo(IHTTPSession session) {
+        if (!isAuthorized(session, session.getParms())) {
+            return createPlainTextResponse(Response.Status.FORBIDDEN, "forbidden");
+        }
+        long id;
+        try { id = Long.parseLong(session.getParms().get("id")); }
+        catch (Exception ignored) { return createPlainTextResponse(Response.Status.BAD_REQUEST, "invalid video id"); }
+        if (id <= 0) return createPlainTextResponse(Response.Status.BAD_REQUEST, "invalid video id");
+        Uri uri = ContentUris.withAppendedId(MediaStore.Video.Media.EXTERNAL_CONTENT_URI, id);
+        try {
+            String name;
+            long catalogSize;
+            try (Cursor cursor = mContext.getContentResolver().query(uri,
+                    new String[]{MediaStore.Video.Media.DISPLAY_NAME, MediaStore.Video.Media.SIZE},
+                    null, null, null)) {
+                if (cursor == null || !cursor.moveToFirst()) {
+                    return createPlainTextResponse(Response.Status.NOT_FOUND, "video not found");
+                }
+                name = cursor.getString(0);
+                catalogSize = cursor.getLong(1);
+            }
+            String mime = mContext.getContentResolver().getType(uri);
+            if (mime == null || mime.isEmpty() || mime.equals("application/octet-stream")) mime = mimeForName(name);
+            ParcelFileDescriptor descriptor = mContext.getContentResolver().openFileDescriptor(uri, "r");
+            if (descriptor == null) return createPlainTextResponse(Response.Status.NOT_FOUND, "video not found");
+            long size = descriptor.getStatSize();
+            if (size < 0) size = catalogSize;
+            if (size < 0) { descriptor.close(); return createPlainTextResponse(Response.Status.INTERNAL_ERROR, "video length unavailable"); }
+            InputStream stream = new FilterInputStream(new FileInputStream(descriptor.getFileDescriptor())) {
+                @Override public void close() throws IOException {
+                    try { super.close(); } finally { descriptor.close(); }
+                }
+            };
+            return streamFileResponse(session, stream, size, mime);
+        } catch (Exception error) {
+            return createPlainTextResponse(Response.Status.NOT_FOUND, "video unavailable");
+        }
+    }
+
+    /** 浏览器 seek 依赖 Range；文件读取只在 NanoHTTPD 工作线程执行。 */
+    private Response streamLocalFile(IHTTPSession session, File file) throws IOException {
+        return streamFileResponse(session, new FileInputStream(file), file.length(), mimeForName(file.getName()));
+    }
+
+    private static String mimeForName(String fileName) {
+        String name = fileName == null ? "" : fileName.toLowerCase(Locale.ROOT);
+        return name.endsWith(".mp4") || name.endsWith(".m4v") ? "video/mp4"
+                : name.endsWith(".webm") ? "video/webm"
+                : name.endsWith(".mov") ? "video/quicktime"
+                : name.endsWith(".mkv") ? "video/x-matroska"
+                : name.endsWith(".avi") ? "video/x-msvideo"
+                : name.endsWith(".flv") ? "video/x-flv"
+                : name.endsWith(".m3u8") ? "application/vnd.apple.mpegurl"
+                : name.endsWith(".ts") ? "video/mp2t"
+                : "application/octet-stream";
+    }
+
+    private Response streamFileResponse(IHTTPSession session, InputStream stream, long size, String mime) throws IOException {
+        long from = 0;
+        long to = size - 1;
+        boolean partial = false;
+        String range = session.getHeaders().get("range");
+        if (range != null && range.matches("bytes=\\d+-\\d*")) {
+            String[] parts = range.substring(6).split("-", 2);
+            try {
+                from = Long.parseLong(parts[0]);
+                if (parts.length > 1 && !parts[1].isEmpty()) to = Math.min(to, Long.parseLong(parts[1]));
+                partial = true;
+            } catch (NumberFormatException ignored) { partial = false; }
+        }
+        if (partial && (from >= size || from > to)) {
+            stream.close();
+            Response invalid = createPlainTextResponse(Response.Status.RANGE_NOT_SATISFIABLE, "range not satisfiable");
+            invalid.addHeader("Content-Range", "bytes */" + size);
+            return invalid;
+        }
+        try {
+            long skipped = 0;
+            while (skipped < from) {
+                long step = stream.skip(from - skipped);
+                if (step <= 0) throw new IOException("cannot seek file");
+                skipped += step;
+            }
+        } catch (IOException error) { stream.close(); throw error; }
+        LanDevice viewer = authorizedDevice(session);
+        InputStream responseStream = viewer == null ? stream : new FilterInputStream(stream) {
+            private void requireCurrentSession() throws IOException {
+                if (devices.get(viewer.token) != viewer) throw new IOException("device disconnected");
+            }
+            @Override public int read() throws IOException { requireCurrentSession(); return super.read(); }
+            @Override public int read(byte[] buffer, int off, int len) throws IOException {
+                requireCurrentSession(); return super.read(buffer, off, len);
+            }
+        };
+        Response result = newFixedLengthResponse(partial ? Response.Status.PARTIAL_CONTENT : Response.Status.OK,
+                mime, responseStream, size == 0 ? 0 : to - from + 1);
+        result.addHeader("Accept-Ranges", "bytes");
+        if (partial) result.addHeader("Content-Range", "bytes " + from + "-" + to + "/" + size);
+        result.addHeader("Cache-Control", "no-store");
+        return result;
+    }
+
+
+    private Response handlePair(IHTTPSession session, Map<String, String> params) {
+        String ip = session.getRemoteIpAddress() == null ? "unknown" : session.getRemoteIpAddress();
+        FailedPairing failure = failedPairings.computeIfAbsent(ip, key -> new FailedPairing());
+        long now = System.currentTimeMillis();
+        synchronized (failure) {
+            if (now - failure.windowStart > 60000) { failure.windowStart = now; failure.count = 0; }
+            if (failure.count >= 8) return jsonResponse(Response.Status.FORBIDDEN, "{\"error\":\"请稍后重试\"}");
+            String code = params.get("code");
+            if (code == null || !MessageDigest.isEqual(pairingCode.getBytes(StandardCharsets.US_ASCII),
+                    code.getBytes(StandardCharsets.US_ASCII))) {
+                failure.count++;
+                if (failure.count == 1 || failure.count == 8)
+                    LogStore.fail(Category.SYSTEM, "局域网配对失败 attempts=" + failure.count);
+                return jsonResponse(Response.Status.FORBIDDEN, "{\"error\":\"配对码不正确\"}");
+            }
+            failure.count = 0;
+        }
+        String token = generateToken();
+        String kind = "mbox".equals(session.getHeaders().get("x-mbox-client")) ? "mbox" : "browser";
+        String label = params.get("name");
+        if (label == null || label.trim().isEmpty()) {
+            String agent = session.getHeaders().get("user-agent");
+            label = "mbox".equals(kind) ? "MBox"
+                    : agent != null && agent.contains("Windows") ? "Windows 浏览器"
+                    : agent != null && agent.contains("Macintosh") ? "Mac 浏览器"
+                    : "浏览器";
+        }
+        label = label.replaceAll("[\\p{Cntrl}]", "").trim();
+        if (label.length() > 32) label = label.substring(0, 32);
+        if (pairedDevices().size() >= 32) {
+            return jsonResponse(Response.Status.SERVICE_UNAVAILABLE, "{\"error\":\"已连接设备过多，请先踢出闲置设备\"}");
+        }
+        LanDevice device = new LanDevice(token, label, ip, kind);
+        devices.put(token, device);
+        persistSessions(true);
+        LogStore.success(Category.SYSTEM, "局域网配对成功 kind=" + kind
+                + " device=" + deviceRef(device));
+        Response response = jsonResponse(Response.Status.OK, "{\"paired\":true,\"token\":\"" + token + "\"}");
+        response.addHeader("Set-Cookie", "mbox_lan=" + token + "; Path=/; HttpOnly; SameSite=Strict");
+        return response;
+    }
+
+    private Response serveTheme(IHTTPSession session) {
+        if (!isAuthorized(session, session.getParms())) return createPlainTextResponse(Response.Status.FORBIDDEN, "forbidden");
+        JsonObject result = new JsonObject();
+        result.addProperty("dark", com.github.tvbox.osc.theme.ThemeRuntime.type().isDark());
+        com.github.tvbox.osc.bean.theme.ThemePalette palette = com.github.tvbox.osc.theme.ThemeRuntime.runtimePalette();
+        JsonObject colors = new JsonObject();
+        if (palette != null) {
+            for (Map.Entry<String, Integer> e : palette.asMap().entrySet()) {
+                colors.addProperty(e.getKey(), com.github.tvbox.osc.bean.theme.ThemeColorPalette.toHex(e.getValue()));
+            }
+        }
+        result.add("colors", colors);
+        return jsonResponse(Response.Status.OK, result.toString());
+    }
+
+    private static Response jsonResponse(Response.IStatus status, String json) {
+        Response response = newFixedLengthResponse(status, "application/json; charset=utf-8", json);
+        response.addHeader("Cache-Control", "no-store");
+        response.addHeader("X-Content-Type-Options", "nosniff");
+        return response;
+    }
+
+    /** 外部存储根目录:所有文件类接口的允许范围 */
+    private static File storageRoot() {
+        return Environment.getExternalStorageDirectory();
+    }
+
+    private static String joinRel(String path, String name) {
+        if (path == null || path.trim().isEmpty()) return name;
+        return path.trim() + "/" + name;
+    }
+
+    /** 校验普通文件名:单段、非 . / ..、不含路径分隔符与 NUL,返回清理后的名字;非法返回 null */
+    private static String sanitizeFileName(String name) {
+        if (name == null) return null;
+        String n = name.trim();
+        if (n.isEmpty() || n.equals(".") || n.equals("..")) return null;
+        if (n.indexOf('/') >= 0 || n.indexOf('\\') >= 0 || n.indexOf('\0') >= 0) return null;
+        return n;
+    }
+
+    /**
+     * 把相对子路径安全地限定在外部存储根目录内。
+     * 拒绝:null、空字符;显式拒绝 ".." 目录穿越与绝对路径;
+     * canonical 双重校验可防止符号链接等方式逃出根目录。
+     * 注意:入参为空字符串时返回根目录自身(调用方需自行决定是否允许)。
+     */
+    private File resolveUnderRoot(String relPath) {
+        if (relPath == null) return null;
+        String p = relPath.trim();
+        if (p.indexOf('\0') >= 0) return null;
+        p = p.replace('\\', '/');
+        while (p.startsWith("/")) p = p.substring(1);
+        File cur = new File(storageRoot().getAbsolutePath());
+        String[] parts = p.split("/");
+        for (String part : parts) {
+            if (part.isEmpty() || part.equals(".")) continue;
+            if (part.equals("..")) return null;
+            cur = new File(cur, part);
+        }
+        try {
+            String rootPath = storageRoot().getCanonicalPath();
+            String curPath = cur.getCanonicalPath();
+            if (!curPath.equals(rootPath) && !curPath.startsWith(rootPath + File.separator)) {
+                return null;
+            }
+            return cur;
+        } catch (IOException e) {
+            return null;
+        }
     }
 
     public void setDataReceiver(DataReceiver receiver) {
@@ -311,6 +2698,52 @@ public class RemoteServer extends NanoHTTPD {
         return "0.0.0.0";
     }
 
+    /**
+     * 本机所有"局域网里别的设备能访问到"的 IPv4 地址(Wi‑Fi/以太网优先,其次是热点等),
+     * 按出现顺序去重;取不到返回空表。
+     *
+     * <p>为什么不复用 {@link #getLocalIPAddress}:那一个只回答"Wi‑Fi 的地址",取不到就退 eth0/wlan0、
+     * 最后兜个 {@code 0.0.0.0}(用户没法用它);而实际情形常常是多个可用:同时连 Wi‑Fi 与网线、
+     * 或本机开着热点(地址在 ap/swlan 网卡上)。设置页要告诉用户"从别的设备该访问哪个地址",
+     * 把可用的都列出来比只给一个更实用 —— 筛掉蜂窝/VPN/Wi‑Fi Direct 等够不到的网卡与非内网地址,
+     * 口径见 {@link com.github.tvbox.osc.util.LanAddressRules}(纯逻辑,带单测)。
+     */
+    public static List < String > getLanIpv4Addresses() {
+        List < String > preferred = new ArrayList < > ();
+        List < String > others = new ArrayList < > ();
+        try {
+            Enumeration < NetworkInterface > enumerationNi = NetworkInterface.getNetworkInterfaces();
+            while (enumerationNi != null && enumerationNi.hasMoreElements()) {
+                NetworkInterface networkInterface = enumerationNi.nextElement();
+                if (networkInterface == null) continue;
+                try {
+                    if (!networkInterface.isUp() || networkInterface.isLoopback()) continue;
+                } catch (Throwable th) {
+                    continue;
+                }
+                String ifaceName = networkInterface.getName();
+                for (InetAddress addr : java.util.Collections.list(networkInterface.getInetAddresses())) {
+                    if (!(addr instanceof Inet4Address)) continue;
+                    String ip = addr.getHostAddress();
+                    if (!com.github.tvbox.osc.util.LanAddressRules.isUsableLanIpv4(ifaceName, ip)) continue;
+                    if (preferred.contains(ip) || others.contains(ip)) continue;
+                    if (com.github.tvbox.osc.util.LanAddressRules.isPreferredInterface(ifaceName)) {
+                        preferred.add(ip);
+                    } else {
+                        others.add(ip);
+                    }
+                }
+            }
+        } catch (Throwable th) {
+            th.printStackTrace();
+        }
+        List < String > out = new ArrayList < > (preferred);
+        for (String ip : others) {
+            if (!out.contains(ip)) out.add(ip);
+        }
+        return out;
+    }
+
     String fileTime(long time, String fmt) {
         Calendar calendar = Calendar.getInstance();
         calendar.setTimeInMillis(time);
@@ -357,41 +2790,6 @@ public class RemoteServer extends NanoHTTPD {
         }
         info.add("files", result);
         return info.toString();
-    }
-
-    void unzip(File zipFilePath, String destDirectory) throws Throwable {
-        File destDir = new File(destDirectory);
-        if (!destDir.exists()) {
-            destDir.mkdirs();
-        }
-        ZipFile zip = new ZipFile(zipFilePath);
-        Enumeration < ZipEntry > iter = (Enumeration < ZipEntry > ) zip.entries();
-        while (iter.hasMoreElements()) {
-            ZipEntry entry = iter.nextElement();
-            InputStream is = zip.getInputStream(entry);
-            String filePath = destDirectory + File.separator + entry.getName();
-            if (!entry.isDirectory()) {
-                extractFile(is, filePath);
-            } else {
-                File dir = new File(filePath);
-                if (!dir.exists()) dir.mkdirs();
-                File flag = new File(dir + "/.tvbox_folder");
-                if (!flag.exists()) flag.createNewFile();
-            }
-        }
-    }
-
-    void extractFile(InputStream inputStream, String destFilePath) throws Throwable {
-        File dst = new File(destFilePath);
-        if (dst.exists()) dst.delete();
-        BufferedOutputStream bos = new BufferedOutputStream(new FileOutputStream(destFilePath));
-        byte[] bytesIn = new byte[2048];
-        int len = inputStream.read(bytesIn);
-        while (len > 0) {
-            bos.write(bytesIn, 0, len);
-            len = inputStream.read(bytesIn);
-        }
-        bos.close();
     }
 
 }

@@ -4,9 +4,9 @@
     android:layout_height="wrap_content"
     xmlns:app="http://schemas.android.com/apk/res-auto"
     android:paddingHorizontal="30dp"
+    android:background="@drawable/bg_dialog"
     android:orientation="vertical"
-    android:paddingVertical="20dp"
-    android:background="@drawable/bg_large_round_popup">
+    android:paddingVertical="20dp">
 
     <RelativeLayout
         android:layout_width="match_parent"
@@ -18,19 +18,38 @@
             android:textColor="@color/text_foreground"
             android:layout_width="wrap_content"
             android:textSize="16sp"
-            android:layout_height="wrap_content"/>
+            android:layout_height="wrap_content"
+            android:layout_alignParentStart="true"
+            android:layout_alignParentTop="true" />
 
-        <TextView
+        <com.github.tvbox.osc.ui.kit.SizedIconTextView
             android:id="@+id/tv_local"
-            android:text="本地导入"
+            android:text="本地"
             android:textColor="@color/text_foreground"
             android:layout_width="wrap_content"
-            android:textSize="16sp"
+            android:textSize="12sp"
+            android:layout_height="wrap_content"
+            android:layout_alignBottom="@id/tv_title"
+            android:layout_toStartOf="@id/tv_json"
+            android:layout_marginEnd="12dp"
+            android:drawableLeft="@drawable/ic_import_file_16"
+            app:drawableIconSize="16dp"
+            android:drawableTint="@color/text_foreground"
+            android:drawablePadding="4dp" />
+
+        <com.github.tvbox.osc.ui.kit.SizedIconTextView
+            android:id="@+id/tv_json"
+            android:text="JSON"
+            android:textColor="@color/text_foreground"
+            android:layout_width="wrap_content"
+            android:textSize="12sp"
             android:layout_height="wrap_content"
             android:layout_alignParentRight="true"
-            android:drawableLeft="@drawable/ic_file_24"
+            android:layout_alignBottom="@id/tv_title"
+            android:drawableLeft="@drawable/ic_import_json_16"
+            app:drawableIconSize="16dp"
             android:drawableTint="@color/text_foreground"
-            android:drawablePadding="4dp"/>
+            android:drawablePadding="4dp" />
     </RelativeLayout>
 
     <com.google.android.material.textfield.TextInputLayout
@@ -38,7 +57,9 @@
         android:layout_width="match_parent"
         style="@style/Widget.MaterialComponents.TextInputLayout.OutlinedBox.Dense"
         android:layout_height="wrap_content"
-        android:textColorHint="@color/text_sub_foreground">
+        app:boxStrokeColor="@color/text_main_half"
+        app:placeholderTextColor="@color/text_main_half"
+        app:hintTextColor="@color/text_main_half">
 
         <EditText
             android:id="@+id/et_name"
@@ -47,6 +68,7 @@
             android:background="@null"
             android:layout_marginTop="10dp"
             android:hint="自定义订阅名"
+            android:textColorHint="@color/text_main_half"
             android:inputType="textUri"
             android:textColor="@color/text_foreground"
             android:textSize="14sp"
@@ -60,7 +82,9 @@
         style="@style/Widget.MaterialComponents.TextInputLayout.OutlinedBox.Dense"
         android:layout_height="wrap_content"
         android:layout_marginTop="10dp"
-        android:textColorHint="@color/text_sub_foreground">
+        app:boxStrokeColor="@color/text_main_half"
+        app:placeholderTextColor="@color/text_main_half"
+        app:hintTextColor="@color/text_main_half">
 
         <EditText
             android:id="@+id/et_url"
@@ -69,6 +93,7 @@
             android:background="@null"
             android:layout_marginTop="10dp"
             android:hint="地址 例: https://..."
+            android:textColorHint="@color/text_main_half"
             android:inputType="textUri"
             android:textColor="@color/text_foreground"
             android:textSize="14sp"/>
@@ -80,8 +105,9 @@
         android:layout_width="wrap_content"
         android:layout_height="wrap_content"
         android:text="使用此订阅"
-        android:checked="true"
+        android:checked="false"
         android:layout_gravity="end"
+        android:button="@drawable/button_checkbox_square"
         android:textColor="@color/text_foreground"
         />
 
@@ -98,8 +124,7 @@
             android:layout_height="33dp"
             android:layout_marginRight="20dp"
             android:text="取 消"
-            android:textColor="@color/text_sub_foreground"
-            style="@style/Widget.MaterialComponents.Button.OutlinedButton"/>
+            style="@style/BtnSecondary"/>
 
         <com.google.android.material.button.MaterialButton
             android:id="@+id/btn_confirm"
@@ -108,8 +133,7 @@
             android:insetTop="0dp"
             android:insetBottom="0dp"
             android:layout_height="33dp"
-            style="@style/Widget.MaterialComponents.Button.OutlinedButton"
-            app:strokeColor="@color/colorPrimary"
+            style="@style/BtnPrimary"
             android:text="添 加"/>
 
     </LinearLayout>

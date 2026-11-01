@@ -3,16 +3,15 @@ package com.github.tvbox.osc.ui.adapter;
 import android.text.TextUtils;
 import android.widget.ImageView;
 
-import com.bumptech.glide.Glide;
-import com.bumptech.glide.load.engine.DiskCacheStrategy;
 import com.chad.library.adapter.base.BaseQuickAdapter;
 import com.chad.library.adapter.base.BaseViewHolder;
 import com.github.tvbox.osc.R;
-import com.github.tvbox.osc.api.ApiConfig;
 import com.github.tvbox.osc.bean.DoubanSuggestBean;
 import com.github.tvbox.osc.bean.Movie;
 import com.github.tvbox.osc.picasso.RoundTransformation;
 import com.github.tvbox.osc.util.MD5;
+import com.github.tvbox.osc.util.PicassoLoad;
+import com.squareup.picasso.Callback;
 import com.squareup.picasso.Picasso;
 
 import java.util.ArrayList;
@@ -30,14 +29,27 @@ public class DoubanSuggestAdapter extends BaseQuickAdapter<DoubanSuggestBean, Ba
         helper.setText(R.id.tvName,item.getTitle())
                 .setText(R.id.tvRating,"豆瓣: "+item.getDoubanRating()+"\n烂番茄: "+item.getRottenRating()+"\nIMDB: "+item.getImdbRating());
 
+        // 占位放 ImageView 背景层(不塞 src):带自定义圆角变换的适配器用不了 PicassoLoad.into,
+        // 但要沿用它的背景层占位/失败态(灰底+居中图标按宿主尺寸自适应,失败态带"图片加载失败"文字)
+        ImageView ivThumb = helper.getView(R.id.ivThumb);
+        PicassoLoad.showLoadingPlaceholder(ivThumb);
+        // 复用列表项:先取消上一张还在途的请求,避免旧请求失败回调作用到复用后的 view
+        Picasso.get().cancelRequest(ivThumb);
         Picasso.get()
                 .load(item.getImg())
                 .transform(new RoundTransformation(MD5.string2MD5(item.getImg() + "position=" + helper.getLayoutPosition()))
                         .centerCorp(true)
                         .override(AutoSizeUtils.dp2px(mContext, 110), AutoSizeUtils.dp2px(mContext, 160))
                         .roundRadius(AutoSizeUtils.dp2px(mContext, 6), RoundTransformation.RoundType.ALL))
-                .placeholder(R.drawable.img_loading_placeholder)
-                .error(R.drawable.img_loading_placeholder)
-                .into((ImageView) helper.getView(R.id.ivThumb));
+                .into(ivThumb, new Callback() {
+                    @Override
+                    public void onSuccess() {
+                    }
+
+                    @Override
+                    public void onError(Exception e) {
+                        PicassoLoad.showFailedPlaceholder(ivThumb);
+                    }
+                });
     }
 }

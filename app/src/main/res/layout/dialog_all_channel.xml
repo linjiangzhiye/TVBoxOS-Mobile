@@ -6,9 +6,9 @@
     xmlns:app="http://schemas.android.com/apk/res-auto"
     xmlns:tools="http://schemas.android.com/tools"
     android:layout_gravity="center"
-    android:background="@color/bg_popup"
+    android:background="@color/bg_float"
     android:paddingTop="20dp"
-    android:paddingBottom="10dp"
+    android:paddingBottom="20dp"
     android:gravity="center_horizontal">
 
     <androidx.recyclerview.widget.RecyclerView
@@ -17,12 +17,12 @@
         android:layout_weight="1"
         android:layout_height="wrap_content"
         android:fadeScrollbars="false"
-        android:listSelector="@drawable/item_bg_selector_left"
         android:paddingHorizontal="10dp"
         android:scrollbars="none"
         android:layout_gravity="center"
         android:layout_marginLeft="40dp"
-        tools:listitem="@layout/item_live_channel_group_new"/>
+        tools:listitem="@layout/item_live_channel_group_new"
+        android:clipToPadding="false" />
 
     <androidx.recyclerview.widget.RecyclerView
         android:id="@+id/mChannelGridView"
@@ -31,9 +31,11 @@
         android:layout_height="match_parent"
         android:fadeScrollbars="false"
         android:focusable="true"
-        android:listSelector="@drawable/item_bg_selector_right"
         android:scrollbars="none"
         android:layout_marginLeft="30dp"
         android:layout_marginRight="40dp"
-        tools:listitem="@layout/item_live_channel_new"/>
+        tools:listitem="@layout/item_live_channel_new"
+        android:paddingHorizontal="10dp"
+        android:clipToPadding="false"
+        />
 </LinearLayout>

@@ -1,0 +1,248 @@
+name: Build APK
+
+# 触发方式:
+#   1. push 到 main / master 分支
+#   2. 推送 v 开头的 tag(如 v2.2.0)
+#   3. 手动触发:GitHub 仓库页面 -> Actions -> Build APK -> Run workflow
+on:
+  push:
+    branches: [ "main", "master" ]
+    tags: [ "v*" ]
+  pull_request:
+    branches: [ "main", "master" ]
+  workflow_dispatch:
+
+# 同一分支/PR 同时只保留一个构建,新任务自动取消旧任务
+concurrency:
+  group: build-apk-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build Release APK
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          # 打 tag 时需用完整历史生成 Release Notes(git log 区间)
+          fetch-depth: 0
+
+      # 项目使用 AGP 8.2.2,必须 JDK 17 编译
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      # 校验 gradle wrapper 并缓存依赖,加速后续构建
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      # 正式签名经 GitHub Secrets 注入(mbox-release.jks 的 base64 内容 + 口令,
+      # 对应 build.gradle 的环境变量读取:KEYSTORE_FILE/KEYSTORE_PASSWORD/KEY_ALIAS/KEY_PASSWORD)。
+      # 非 tag 构建缺密钥时退回 debug 签名供 CI 自测；版本 tag 缺任一密钥则中止发布。
+      # 仓库内不存放任何正式签名文件(见 .gitignore:*.jks / keystore.properties)。
+      - name: Configure release signing (Secrets)
+        id: signing
+        env:
+          KEYSTORE_B64: ${{ secrets.KEYSTORE_BASE64 }}
+          RELEASE_STORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          RELEASE_KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          RELEASE_KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+        run: |
+          if [ -n "$KEYSTORE_B64" ] && [ -n "$RELEASE_STORE_PASSWORD" ] &&
+             [ -n "$RELEASE_KEY_ALIAS" ] && [ -n "$RELEASE_KEY_PASSWORD" ]; then
+            echo "$KEYSTORE_B64" | base64 -d > mbox-release.jks
+            echo "KEYSTORE_FILE=../mbox-release.jks" >> "$GITHUB_ENV"
+            echo "KEYSTORE_PASSWORD=$RELEASE_STORE_PASSWORD" >> "$GITHUB_ENV"
+            echo "KEY_ALIAS=$RELEASE_KEY_ALIAS" >> "$GITHUB_ENV"
+            echo "KEY_PASSWORD=$RELEASE_KEY_PASSWORD" >> "$GITHUB_ENV"
+            echo "signing=configured" >> "$GITHUB_OUTPUT"
+          else
+            echo "signing=fallback-debug" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Require release signing for tag
+        if: startsWith(github.ref, 'refs/tags/v') && steps.signing.outputs.signing != 'configured'
+        run: |
+          echo "::error title=正式签名缺失::版本 tag 禁止发布 debug 签名 APK；请配置完整的 KEYSTORE_BASE64、KEYSTORE_PASSWORD、KEY_ALIAS、KEY_PASSWORD。"
+          exit 1
+
+      - name: Verify (unit tests + module/red-line gate)
+        run: |
+          chmod +x gradlew
+          ./gradlew :app:testDebugUnitTest checkModuleDependencies --no-daemon --console=plain
+
+      - name: Build Release APK
+        run: |
+          chmod +x gradlew
+          ./gradlew assembleRelease --no-daemon --console=plain --stacktrace
+        # 说明:正式包使用本项目专属包名 com.github.tvbox.osc.mbox 与专属签名
+        # (mbox-release.jks,2025 年新建),不再使用 TVBox 开源圈通用的
+        # com.github.tvbox.osc 包名与公开流传的 TVBoxOSC.jks,
+        # 因此可与设备上其他开源 TVBox 应用共存安装、互不覆盖。
+
+      - name: Upload APK Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: MBox-release-apk
+          path: app/build/outputs/apk/release/*.apk
+          if-no-files-found: error
+
+      # 打 tag(v* 触发)时生成 Release 正文并创建 GitHub Release,挂上正式签名 APK。
+      # 正文规范(AGENTS §九:禁止照搬 commit):用户可读说明由维护者写在
+      # doc/release-notes-<tag>.md(UTF-8),CI 只把它贴上去;文件缺失时正文只留 dev 围栏
+      # (App 更新弹窗会自动剔除围栏内容),绝不把 commit 标题直接给用户看。
+      # 不预写版本标题:说明文件可能自带标题,也可能只有 dev 围栏(无用户可见改动)。
+      - name: Prepare Release Notes
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          PREV=$(git tag --list 'v*' --sort=-version:refname | sed -n '2p')
+          NOTES="doc/release-notes-${TAG}.md"
+          {
+            if [ -f "$NOTES" ]; then
+              cat "$NOTES"
+            fi
+            echo ""
+            echo "<!-- dev -->"
+            echo "以下内容仅开发者可见(App 更新弹窗自动剔除),不是给用户的更新说明。"
+            echo "用户可读说明请写在 ${NOTES}:按用户视角归纳,不写 commit 前缀/文件名/依赖与构建细节。"
+            echo ""
+            echo "提交记录(${PREV:-(无上一 tag)}..${TAG}):"
+            if [ -n "$PREV" ]; then
+              git log --no-merges --pretty=format:'- %s' "${PREV}..HEAD"
+            else
+              git log --no-merges --pretty=format:'- %s' HEAD
+            fi
+            echo ""
+            echo "<!-- /dev -->"
+            echo ""
+          } > RELEASE_NOTES.md
+          if [ ! -f "$NOTES" ]; then
+            echo "::warning title=Release 正文缺失::缺少 ${NOTES};请按 AGENTS §九 写用户可读说明(新增功能/功能变更/移除停用/问题修复/体验与性能/兼容性注意),并用 node scripts/check-release-notes.js ${NOTES} 自检"
+          fi
+          echo "=== release notes (${PREV:-(no previous tag)} -> ${TAG}) ==="
+          cat RELEASE_NOTES.md
+
+      - name: Create GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          name: MBox ${{ github.ref_name }}
+          body_path: RELEASE_NOTES.md
+          files: app/build/outputs/apk/release/*.apk
+
+      # 把正式包同步到国内镜像(Gitee 发行版附件)——App 更新下载的首选候选地址
+      # (见 UpdaterConfig.getGiteeDownloadBase 与 GithubReleaseUpdater.mirrorDownloadUrl)。
+      # 与正式签名一样依赖 Secrets(GITEE_MBOX_TOKEN,可选 GITEE_OWNER/GITEE_REPO):
+      # 未配置、或镜像侧任何一步失败,都只记告警不阻断本次发版——GitHub Release 才是权威产物,
+      # App 端下载候选会在镜像拿不到正确体积的包时自动回落到加速代理与直连。
+      - name: Sync release APK to Gitee mirror
+        if: startsWith(github.ref, 'refs/tags/v')
+        env:
+          # Secrets 名固定 GITEE_MBOX_TOKEN;之所以把环境变量仍叫 GITEE_TOKEN,是让下面整段 shell
+          # 保持原样(它全程用 $GITEE_TOKEN),避免为一个改名去动已经跑通的代码。
+          GITEE_TOKEN: ${{ secrets.GITEE_MBOX_TOKEN }}
+          GITEE_OWNER: ${{ secrets.GITEE_OWNER }}
+          GITEE_REPO: ${{ secrets.GITEE_REPO }}
+        run: |
+          OWNER="${GITEE_OWNER:-CnAyo}"
+          REPO="${GITEE_REPO:-MBox}"
+          if [ -z "$GITEE_TOKEN" ]; then
+            # 用 ::error(UI 里是一枚红叉,进 Actions 摘要)而不是 ::notice —— 这个分支会**静默**跳过
+            # 整个镜像同步:步骤依旧显示 success,镜像页却一直缺该版本(v3.6.1 就因此长期只有手工上传的包)。
+            # 仍然不 exit 1:GitHub 才是权威产物,镜像掉队不该阻断本次发版。
+            echo "::error title=Gitee 镜像未同步::仓库未配置 Secrets GITEE_MBOX_TOKEN,本次发版不会同步 APK 到 Gitee;App 国内下载会回落到加速代理。配置方法见 AGENTS.md「代码托管与镜像同步」"
+            echo "::warning title=如需手工补传::Gitee 网页新建发行版并上传 app/build/outputs/apk/release/*.apk,或配置令牌后重跑本工作流"
+            exit 0
+          fi
+          API="https://gitee.com/api/v5/repos/$OWNER/$REPO"
+          TAG="$GITHUB_REF_NAME"
+          APK=$(ls app/build/outputs/apk/release/*.apk 2>/dev/null | head -1)
+          if [ -z "$APK" ]; then
+            echo "::warning title=Gitee 镜像未同步::没有 release APK 产物"
+            exit 0
+          fi
+          NAME=$(basename "$APK")
+
+          # Gitee 的 /releases/tags/<tag> 会返回字段全空的对象；从列表按 tag 精确查找。
+          RID=$(curl -sS --max-time 60 -G "$API/releases" \
+                  --data-urlencode "access_token=$GITEE_TOKEN" \
+                  --data-urlencode "per_page=100" \
+                | jq -r --arg tag "$TAG" '[.[]? | select(.tag_name == $tag) | .id][0] // empty' || true)
+          if [ -z "$RID" ]; then
+            # 镜像正文只给用户可读说明:RELEASE_NOTES.md 带 <!-- dev --> 围栏,
+            # GitHub 渲染会隐藏 HTML 注释,Gitee 不保证,照抄会把围栏字样露在镜像页上。
+            NOTES="doc/release-notes-$TAG.md"
+            if [ ! -f "$NOTES" ]; then
+              printf '本发行版与 GitHub Release 同步,更新说明见 https://github.com/CNShanJu/MBox/releases/tag/%s\n' "$TAG" > GITEE_NOTES.md
+              NOTES=GITEE_NOTES.md
+            fi
+            RID=$(curl -sS --max-time 60 -X POST "$API/releases" \
+                    -d "access_token=$GITEE_TOKEN" -d "tag_name=$TAG" -d "name=MBox $TAG" \
+                    -d "target_commitish=$GITHUB_SHA" --data-urlencode "body@$NOTES" \
+                  | jq -r '.id // empty' || true)
+          fi
+          if [ -z "$RID" ]; then
+            echo "::warning title=Gitee 镜像未同步::查找/创建发行版失败(确认镜像仓库已同步 tag $TAG、令牌有 projects 权限)"
+            exit 0
+          fi
+
+          # 同名附件已在(上一次跑过这步)就不重传 40MB。
+          # 这个 GET 也要护住:实测它在 Azure runner 上会 Connection timed out(等了 60s),
+          # 读不到列表就当作"没有同名附件"继续上传,不能让它拖慢/干扰主流程。
+          if curl -sS --max-time 30 --connect-timeout 15 -G "$API/releases/$RID/attach_files" \
+                --data-urlencode "access_token=$GITEE_TOKEN" --data-urlencode "per_page=100" \
+              | jq -e --arg n "$NAME" '[.[]? | select(.name == $n)] | length > 0' >/dev/null 2>&1; then
+            echo "Gitee 已有同名附件,跳过上传: $NAME"
+            exit 0
+          fi
+
+          # 上传附件。三次实测结论(2026-10-02,v3.6.3 / v3.6.4):
+          #   GitHub 的 Azure runner **直连 Gitee 传大文件不可靠** —— 40MB multipart 上传会拿到
+          #   `curl: (35) Connection reset by peer` / `curl: (52) Empty reply from server`(服务端连响应都不给),
+          #   而同一路径上的小请求(建发行版)是秒成的。所以这一步按"尽力而为"处理。
+          # 血泪教训(必须遵守 AGENTS §九「镜像掉队不该阻断发版」):
+          #   - 这里**任何**失败都只能告警,绝不能让 curl 的退出码冒泡成步骤失败 ——
+          #     上一版写成 `-w` + 循环后,curl 52 直接把整条发版流程拖成 failure,比不传附件更糟。
+          #   - 因此循环结束后**显式 `exit 0`**,这也是"绝不阻断发版"的兜底。
+          UPLOAD_OK=0
+          RES=""
+          CODE=""
+          CURL_RC=""
+          for ATTEMPT in 1 2; do
+            RESFILE=$(mktemp 2>/dev/null || echo "/tmp/gitee-attach.out")
+            CURL_RC=0
+            CODE=$(curl -sS --max-time 900 --connect-timeout 30 \
+                     -H "Expect:" -H "Connection: close" \
+                     -o "$RESFILE" -w '%{http_code}' \
+                     -F "access_token=$GITEE_TOKEN" \
+                     -F "file=@$APK;filename=$NAME;type=application/vnd.android.package-archive" \
+                     "$API/releases/$RID/attach_files" 2>upload_err.txt) || CURL_RC=$?
+            RES=$(cat "$RESFILE" 2>/dev/null || true)
+            rm -f "$RESFILE"
+            if [ "$CODE" = "201" ] || [ "$CODE" = "200" ]; then
+              UPLOAD_OK=1
+              break
+            fi
+            echo "::warning title=Gitee 附件上传第 ${ATTEMPT} 次未成功::HTTP=${CODE:-无} curl退出码=${CURL_RC} 响应=$(printf '%s' "$RES" | head -c 300)$(printf '%s' "$(cat upload_err.txt 2>/dev/null)" | head -c 300)"
+            sleep 10
+          done
+          URL=$(printf '%s' "$RES" | jq -r '.browser_download_url // empty' 2>/dev/null || true)
+          if [ "$UPLOAD_OK" = "1" ] && [ -n "$URL" ]; then
+            echo "Gitee 附件已上传: $URL"
+          elif [ "$UPLOAD_OK" = "1" ]; then
+            echo "Gitee 附件已上传(接口未回下载地址,按 HTTP ${CODE} 判定成功)"
+          else
+            echo "::warning title=Gitee 镜像未同步::附件上传失败(HTTP=${CODE:-无} curl退出码=${CURL_RC:-无} 响应=$(printf '%s' "$RES" | head -c 200))"
+            echo "::warning title=请在发行后本机补传::powershell -File scripts/sync-gitee-release.ps1 -Tag $TAG -ApkPath <apk>(国内链路上传稳定;见 AGENTS「代码托管与镜像同步」)"
+          fi
+
+          # 兜底:本步永不失败。镜像掉队只告警,发版以 GitHub Release 为权威(AGENTS §九)。
+          exit 0

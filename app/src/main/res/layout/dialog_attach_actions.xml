@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- 长按/更多共用的提示气泡:气泡面走主题 bg_float,圆角走小卡片 radius_card;
+     行文字颜色由代码按动作类型填(普通=text_main、危险=text_danger)。 -->
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@+id/ll_actions"
+    android:layout_width="wrap_content"
+    android:layout_height="wrap_content"
+    android:background="@drawable/bg_bubble"
+    android:minWidth="108dp"
+    android:orientation="vertical"
+    android:paddingVertical="4dp" />

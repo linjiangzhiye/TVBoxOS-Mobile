@@ -3,7 +3,6 @@ package com.github.tvbox.osc.ui.adapter;
 import android.view.View;
 import android.widget.TextView;
 
-import com.blankj.utilcode.util.ColorUtils;
 import com.chad.library.adapter.base.BaseQuickAdapter;
 import com.chad.library.adapter.base.BaseViewHolder;
 import com.github.tvbox.osc.R;
@@ -31,13 +30,10 @@ public class LiveChannelGroupNewAdapter extends BaseQuickAdapter<LiveChannelGrou
         TextView tvGroupName = holder.getView(R.id.tvChannelGroupName);
         tvGroupName.setText(item.getGroupName());
         int groupIndex = item.getGroupIndex();
-        if (groupIndex == selectedGroupIndex && groupIndex != focusedGroupIndex) {
-            tvGroupName.setTextColor(mContext.getResources().getColor(R.color.white));
-            root.setBackground(mContext.getResources().getDrawable(R.drawable.bg_r_common_solid_primary));
-        } else {
-            tvGroupName.setTextColor(ColorUtils.getColor(R.color.text_foreground));
-            root.setBackground(mContext.getResources().getDrawable(R.drawable.bg_transparent));
-        }
+        // RecyclerView 不消费 listSelector；把随主题重建的状态底直接装在条目根上。
+        // 文字通过 duplicateParentState + live_channel_text 与选中/按下/焦点底同步。
+        com.github.tvbox.osc.theme.ThemeDrawables.applyBackground(root, R.drawable.item_bg_selector_left);
+        root.setSelected(groupIndex == selectedGroupIndex || groupIndex == focusedGroupIndex);
     }
 
     public void setSelectedGroupIndex(int selectedGroupIndex) {
@@ -55,7 +51,10 @@ public class LiveChannelGroupNewAdapter extends BaseQuickAdapter<LiveChannelGrou
     }
 
     public void setFocusedGroupIndex(int focusedGroupIndex) {
+        int previousFocusedGroupIndex = this.focusedGroupIndex;
         this.focusedGroupIndex = focusedGroupIndex;
+        if (previousFocusedGroupIndex != -1)
+            notifyItemChanged(previousFocusedGroupIndex);
         if (this.focusedGroupIndex != -1)
             notifyItemChanged(this.focusedGroupIndex);
         else if (this.selectedGroupIndex != -1)

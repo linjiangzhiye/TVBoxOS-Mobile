@@ -3,7 +3,6 @@ package com.github.tvbox.osc.ui.adapter;
 import android.view.View;
 import android.widget.TextView;
 
-import com.blankj.utilcode.util.ColorUtils;
 import com.chad.library.adapter.base.BaseQuickAdapter;
 import com.chad.library.adapter.base.BaseViewHolder;
 import com.github.tvbox.osc.R;
@@ -14,7 +13,11 @@ import java.util.ArrayList;
 /**
  * @author pj567
  * @date :2021/1/12
- * @description:
+ * @description: 直播频道列表(条目只显示频道名)
+ * <p>
+ * 注意:条目<b>不显示顺序号</b>。以前名字前面有一列 {@code channelNum},它是解析直播源时
+ * 跨分组累加出来的索引(不是源里真实的频道号),占的那点宽度会把长频道名(尤其电台)
+ * 挤成省略号,已去掉;列表里不要再加回来。
  */
 public class LiveChannelItemNewAdapter extends BaseQuickAdapter<LiveChannelItem, BaseViewHolder> {
     private int selectedChannelIndex = -1;
@@ -27,21 +30,12 @@ public class LiveChannelItemNewAdapter extends BaseQuickAdapter<LiveChannelItem,
     @Override
     protected void convert(BaseViewHolder holder, LiveChannelItem item) {
         View root = holder.getView(R.id.root);
-
-        TextView tvChannelNum = holder.getView(R.id.tvChannelNum);
         TextView tvChannel = holder.getView(R.id.tvChannelName);
-        tvChannelNum.setText(String.format("%s", item.getChannelNum()));
         tvChannel.setText(item.getChannelName());
         int channelIndex = item.getChannelIndex();
-        if (channelIndex == selectedChannelIndex && channelIndex != focusedChannelIndex) {
-            tvChannelNum.setTextColor(mContext.getResources().getColor(R.color.white));
-            tvChannel.setTextColor(mContext.getResources().getColor(R.color.white));
-            root.setBackground(mContext.getResources().getDrawable(R.drawable.bg_r_common_solid_primary));
-        } else{
-            tvChannelNum.setTextColor(ColorUtils.getColor(R.color.text_foreground));
-            tvChannel.setTextColor(ColorUtils.getColor(R.color.text_foreground));
-            root.setBackground(mContext.getResources().getDrawable(R.drawable.bg_transparent));
-        }
+        // 选中、按下、焦点共用主题状态底；文字通过 duplicateParentState 同步切换。
+        com.github.tvbox.osc.theme.ThemeDrawables.applyBackground(root, R.drawable.item_bg_selector_right);
+        root.setSelected(channelIndex == selectedChannelIndex || channelIndex == focusedChannelIndex);
     }
 
     public void setSelectedChannelIndex(int selectedChannelIndex) {

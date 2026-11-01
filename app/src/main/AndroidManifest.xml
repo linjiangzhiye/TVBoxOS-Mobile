@@ -1,11 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
-    package="com.github.tvbox.osc">
+    xmlns:tools="http://schemas.android.com/tools">
     <!-- 在 Android 11 中，应用程序需要声明它们要使用的其他应用程序的包名 -->
-    <queries>
-        <package android:name="idm.internet.download.manager.plus" />
-    </queries>
-
     <uses-feature
         android:name="android.software.leanback"
         android:required="false" />
@@ -16,26 +12,50 @@
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
+    <uses-permission android:name="android.permission.CAMERA" />
+    <uses-feature android:name="android.hardware.camera" android:required="false" />
+    <uses-permission android:name="android.permission.CHANGE_WIFI_STATE" />
+    <!-- SSDP 发现电视时短暂接收 Wi-Fi 组播响应。 -->
     <uses-permission android:name="android.permission.CHANGE_WIFI_MULTICAST_STATE" />
-    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" />
-    <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" />
-    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
-    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
+    <!-- 存储访问以 MANAGE_EXTERNAL_STORAGE(全文件访问)为主;保留旧版读写在 Android 9- 使用 -->
+    <uses-permission
+        android:name="android.permission.READ_EXTERNAL_STORAGE"
+        android:maxSdkVersion="32" />
+    <uses-permission
+        android:name="android.permission.WRITE_EXTERNAL_STORAGE"
+        android:maxSdkVersion="29" />
     <uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE" />
-    <uses-permission android:name="android.permission.WAKE_LOCK"/>
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE" />
+    <!-- Android 14+ 启动 mediaPlayback 类型前台服务必须声明,否则 startForeground 抛 SecurityException -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK" />
+    <!-- Android 13+ 后台播放通知可见需要运行时通知权限 -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <!-- 应用内"检查更新"安装新版本 APK 所需(安装未知来源应用) -->
+    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
 
     <application
         android:name=".base.App"
-        android:allowBackup="true"
+        android:allowBackup="false"
+        android:banner="@drawable/mbox_tv_banner"
+        tools:replace="android:allowBackup"
         android:configChanges="orientation|keyboardHidden|screenSize"
         android:hardwareAccelerated="true"
-        android:icon="@drawable/app_icon"
+        android:icon="${appIcon}"
         android:label="@string/app_name"
         android:networkSecurityConfig="@xml/network_security_config"
         android:requestLegacyExternalStorage="true"
         android:theme="@style/AppTheme"
         android:usesCleartextTraffic="true">
+        <!-- 崩溃兜底页(第三方 CustomActivityOnCrash,跑在独立 :error_activity 进程):
+             显式指定 AppTheme,不依赖 application theme 的隐式继承 —— 底色与控件默认配色要和应用一致;
+             用户主题的运行时配色另由 theme/CrashPageThemeSync 投影(见 thirdparty 的 CrashPageTheme) -->
+        <activity
+            android:name="cat.ereza.customactivityoncrash.activity.DefaultErrorActivity"
+            android:process=":error_activity"
+            android:theme="@style/AppTheme" />
         <activity
             android:name=".ui.activity.SplashActivity"
             android:exported="true"
@@ -45,62 +65,215 @@
                 <action android:name="android.intent.action.VIEW" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LEANBACK_LAUNCHER" />
+            </intent-filter>
         </activity>
+        <activity
+            android:name=".ui.activity.NotificationEntryActivity"
+            android:exported="false"
+            android:theme="@android:style/Theme.NoDisplay" />
+        <activity
+            android:name=".ui.activity.DisclaimerActivity"
+            android:exported="false" />
         <activity
             android:name=".ui.activity.SubscriptionActivity"
             android:configChanges="orientation|screenSize"
             android:exported="false" />
         <activity
             android:name=".ui.activity.VideoListActivity"
-            android:configChanges="orientation|screenSize"/>
+            android:configChanges="orientation|screenSize"
+            android:exported="false"/>
         <activity
             android:name=".ui.activity.MovieFoldersActivity"
             android:configChanges="orientation|screenSize"
             android:exported="false"/>
+        <!-- 本地播放:除应用内跳转外,还作为「本地视频 - 打开方式」的接收方(见 exporter 的两个 intent-filter)。
+             外部打开时 Intent 只带 data(内容 URI),页面自己建单条播放列表(见 LocalPlayActivity#init)。 -->
         <activity
             android:name=".ui.activity.LocalPlayActivity"
+            android:label="@string/local_open_label_play"
+            android:supportsPictureInPicture="true"
             android:configChanges="orientation|screenSize|keyboardHidden"
-            android:exported="false"
-            android:screenOrientation="landscape" />
+            android:exported="true"
+            android:screenOrientation="landscape">
+            <!-- ① 文件管理器/系统给出的 MIME(video/*):content:// 与 file:// 两种 scheme 都收 -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:scheme="content" />
+                <data android:scheme="file" />
+                <data android:mimeType="video/*" />
+            </intent-filter>
+            <!-- ② 按扩展名兜底:不少电视盒子文件管理器把 mkv/ts 报成 octet-stream,
+                 MIME 匹配不到,靠路径后缀才认得出是视频 -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:scheme="file" />
+                <data android:scheme="content" />
+                <data android:host="*" />
+                <data android:pathPattern=".*\\.mp4" />
+                <data android:pathPattern=".*\\.mkv" />
+                <data android:pathPattern=".*\\.avi" />
+                <data android:pathPattern=".*\\.ts" />
+                <data android:pathPattern=".*\\.m2ts" />
+                <data android:pathPattern=".*\\.flv" />
+                <data android:pathPattern=".*\\.wmv" />
+                <data android:pathPattern=".*\\.mov" />
+                <data android:pathPattern=".*\\.rmvb" />
+                <data android:pathPattern=".*\\.rm" />
+                <data android:pathPattern=".*\\.m4v" />
+                <data android:pathPattern=".*\\.mpg" />
+                <data android:pathPattern=".*\\.mpeg" />
+                <data android:pathPattern=".*\\.webm" />
+                <data android:pathPattern=".*\\.3gp" />
+                <data android:pathPattern=".*\\.vob" />
+                <data android:pathPattern=".*\\.f4v" />
+                <data android:pathPattern=".*\\.asf" />
+            </intent-filter>
+        </activity>
+        <!-- 「本地 txt/json/zip - 打开方式」的接收方:先落盘再做动作选择(见 LocalFileOpenActivity)。
+             txt/json → 订阅源导入(主题 json 也能进主题导入);zip → 订阅源导入 / 还原备份 / 主题导入。 -->
+        <activity
+            android:name=".ui.activity.LocalFileOpenActivity"
+            android:label="@string/local_open_label_import"
+            android:configChanges="orientation|screenSize|keyboardHidden"
+            android:exported="true">
+            <!-- 文本:订阅源文件 / 主题 JSON -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:scheme="content" />
+                <data android:scheme="file" />
+                <data android:mimeType="text/plain" />
+            </intent-filter>
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:scheme="content" />
+                <data android:scheme="file" />
+                <data android:mimeType="application/json" />
+                <data android:mimeType="text/json" />
+            </intent-filter>
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:scheme="file" />
+                <data android:scheme="content" />
+                <data android:host="*" />
+                <data android:pathPattern=".*\\.txt" />
+                <data android:pathPattern=".*\\.json" />
+            </intent-filter>
+            <!-- 压缩包:订阅清单 ZIP / 本地包 / 备份包 / 主题包 -->
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:scheme="content" />
+                <data android:scheme="file" />
+                <data android:mimeType="application/zip" />
+                <data android:mimeType="application/x-zip-compressed" />
+            </intent-filter>
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:scheme="file" />
+                <data android:scheme="content" />
+                <data android:host="*" />
+                <data android:pathPattern=".*\\.zip" />
+            </intent-filter>
+        </activity>
         <activity
             android:name=".ui.activity.MainActivity"
+            android:theme="@style/AppTheme.SearchTransition"
             android:configChanges="orientation|screenSize|keyboardHidden|uiMode"
-            android:exported="true"/>
+            android:exported="false"/>
         <activity
             android:name=".ui.activity.LiveActivity"
             android:launchMode="singleTop"
-            android:configChanges="orientation|screenSize|keyboardHidden|uiMode|screenLayout"/>
+            android:configChanges="orientation|screenSize|keyboardHidden|uiMode|screenLayout"
+            android:exported="false"/>
         <activity
             android:name=".ui.activity.DetailActivity"
             android:supportsPictureInPicture="true"
             android:launchMode="singleTask"
-            android:configChanges="screenSize|smallestScreenSize|screenLayout|orientation|uiMode"/>
+            android:configChanges="screenSize|smallestScreenSize|screenLayout|orientation|uiMode"
+            android:exported="false"/>
         <activity
             android:name=".ui.activity.FastSearchActivity"
+            android:theme="@style/AppTheme.SearchTransition"
             android:configChanges="orientation|screenSize|keyboardHidden"
+            android:exported="false"
+            />
+        <!-- 网络不可用页：由 NetworkIssueRouter 在"断网 + 真实请求失败"时拉起（见 NoNetworkActivity）；
+             singleTop 防重复实例，不对外暴露 -->
+        <activity
+            android:name=".ui.activity.NoNetworkActivity"
+            android:launchMode="singleTop"
+            android:configChanges="orientation|screenSize|keyboardHidden"
+            android:exported="false"
             />
         <activity
             android:name=".ui.activity.SettingActivity"
-            android:configChanges="orientation|screenSize|keyboardHidden"/>
+            android:configChanges="orientation|screenSize|keyboardHidden"
+            android:exported="false"/>
+        <activity
+            android:name=".ui.activity.CacheManagementActivity"
+            android:configChanges="orientation|screenSize|keyboardHidden"
+            android:exported="false"/>
+        <activity
+            android:name=".ui.activity.PlaybackCacheActivity"
+            android:configChanges="orientation|screenSize|keyboardHidden"
+            android:exported="false"/>
+        <activity
+            android:name=".ui.activity.LanServiceActivity"
+            android:configChanges="orientation|screenSize|keyboardHidden"
+            android:exported="false"/>
+        <activity
+            android:name=".ui.activity.LanDevicesActivity"
+            android:configChanges="orientation|screenSize|keyboardHidden"
+            android:exported="false"/>
+        <activity
+            android:name=".ui.activity.LanQrScanActivity"
+            android:configChanges="orientation|screenSize|keyboardHidden"
+            android:exported="false"/>
+        <activity
+            android:name=".ui.activity.LanImportActivity"
+            android:configChanges="orientation|screenSize|keyboardHidden"
+            android:exported="false"/>
         <activity
             android:name=".ui.activity.HistoryActivity"
-            android:configChanges="orientation|screenSize|keyboardHidden" />
+            android:configChanges="orientation|screenSize|keyboardHidden"
+            android:exported="false" />
         <activity
             android:name=".ui.activity.CollectActivity"
-            android:configChanges="orientation|screenSize|keyboardHidden"/>
-
-        <service android:name="com.android.cast.dlna.dmc.DLNACastService"/>
-
-        <receiver android:name=".receiver.SearchReceiver">
-            <intent-filter>
-                <action android:name="android.content.movie.search.Action" />
-            </intent-filter>
-        </receiver>
-        <receiver android:name=".receiver.CustomWebReceiver">
-            <intent-filter>
-                <action android:name="android.content.movie.custom.web.Action" />
-            </intent-filter>
-        </receiver>
+            android:configChanges="orientation|screenSize|keyboardHidden"
+            android:exported="false"/>
+        <activity
+            android:name=".ui.activity.DownloadActivity"
+            android:configChanges="orientation|screenSize|keyboardHidden"
+            android:exported="false"/>
+        <activity
+            android:name=".ui.activity.LogActivity"
+            android:configChanges="orientation|screenSize|keyboardHidden"
+            android:exported="false"/>
+        <!-- 背景图设置(设置-主题颜色-设置背景图):选图/拖动缩放/遮罩透明度 -->
+        <activity
+            android:name=".ui.activity.BackgroundSettingActivity"
+            android:configChanges="orientation|screenSize|keyboardHidden"
+            android:exported="false"/>
+        <!-- 本地缓存(背景图二级页):展示私有目录里保存的背景图,点图设为背景、长按多选删除副本 -->
+        <activity
+            android:name=".ui.activity.BackgroundCacheActivity"
+            android:configChanges="orientation|screenSize|keyboardHidden"
+            android:exported="false"/>
+        <!-- 自定义主题颜色编辑(设置-主题颜色-自定义主题颜色 / 长按主题「编辑」):
+             主题类型 + 25 个颜色项 + 背景 + 导入导出 -->
+        <activity
+            android:name=".ui.activity.ThemeEditorActivity"
+            android:configChanges="orientation|screenSize|keyboardHidden"
+            android:exported="false"/>
 
         <provider
             android:name="androidx.core.content.FileProvider"
@@ -114,6 +287,21 @@
 
         <service
             android:name=".service.PlayService"
+            android:exported="false"
+            android:foregroundServiceType="mediaPlayback" />
+
+        <service
+            android:name=".update.UpdateDownloadService"
+            android:exported="false"
+            android:foregroundServiceType="dataSync" />
+
+        <service
+            android:name=".service.LanServerService"
+            android:exported="false"
+            android:foregroundServiceType="connectedDevice" />
+
+        <service
+            android:name=".cast.CastMediaService"
             android:exported="false"
             android:foregroundServiceType="mediaPlayback" />
 

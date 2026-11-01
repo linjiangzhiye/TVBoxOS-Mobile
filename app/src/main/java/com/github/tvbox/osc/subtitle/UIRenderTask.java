@@ -28,28 +28,27 @@ package com.github.tvbox.osc.subtitle;
 import com.github.tvbox.osc.subtitle.model.Subtitle;
 import com.github.tvbox.osc.subtitle.runtime.AppTaskExecutor;
 
+import java.util.function.LongSupplier;
+
 /**
  * @author AveryZhong.
  */
 
-public class UIRenderTask implements Runnable {
+public class UIRenderTask {
 
-    private Subtitle mSubtitle;
-    private SubtitleEngine.OnSubtitleChangeListener mOnSubtitleChangeListener;
+    private final SubtitleEngine.OnSubtitleChangeListener mOnSubtitleChangeListener;
+    private final LongSupplier mCurrentEpoch;
 
-    public UIRenderTask(final SubtitleEngine.OnSubtitleChangeListener l) {
+    public UIRenderTask(final SubtitleEngine.OnSubtitleChangeListener l, LongSupplier currentEpoch) {
         mOnSubtitleChangeListener = l;
+        mCurrentEpoch = currentEpoch;
     }
 
-    @Override
-    public void run() {
-        if (mOnSubtitleChangeListener != null) {
-            mOnSubtitleChangeListener.onSubtitleChanged(mSubtitle);
-        }
-    }
-
-    public void execute(final Subtitle subtitle) {
-        mSubtitle = subtitle;
-        AppTaskExecutor.mainThread().execute(this);
+    public void execute(final Subtitle subtitle, final long epoch) {
+        AppTaskExecutor.mainThread().execute(() -> {
+            if (epoch == mCurrentEpoch.getAsLong() && mOnSubtitleChangeListener != null) {
+                mOnSubtitleChangeListener.onSubtitleChanged(subtitle);
+            }
+        });
     }
 }

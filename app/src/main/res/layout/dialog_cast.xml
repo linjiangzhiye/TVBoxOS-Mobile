@@ -5,7 +5,7 @@
     xmlns:app="http://schemas.android.com/apk/res-auto"
     xmlns:tools="http://schemas.android.com/tools"
     android:layout_gravity="center"
-    android:background="@drawable/bg_large_round_popup"
+    android:background="@drawable/bg_dialog"
     android:orientation="vertical"
     android:paddingHorizontal="20dp"
     android:paddingTop="20dp"
@@ -13,20 +13,59 @@
 
     <TextView
         android:id="@+id/title"
-        android:layout_width="wrap_content"
+        android:layout_width="match_parent"
         android:layout_height="wrap_content"
         android:text="投屏"
         android:textColor="@color/text_foreground"
         android:textStyle="bold"
-        android:textSize="18sp"/>
+        android:textSize="18sp" />
 
-    <androidx.recyclerview.widget.RecyclerView
-        android:id="@+id/rv"
+    <LinearLayout
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
-        tools:listitem="@layout/item_title"
+        android:layout_marginTop="2dp"
+        android:gravity="end|center_vertical"
+        android:orientation="horizontal">
+
+        <TextView
+            android:id="@+id/cast_refresh"
+            style="@style/TextButton"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="刷新"
+            android:textColor="@color/text_highlight" />
+
+        <TextView
+            android:id="@+id/cast_manual_connect"
+            style="@style/TextButton"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="直连"
+            android:textColor="@color/text_highlight" />
+    </LinearLayout>
+
+    <TextView
+        android:id="@+id/cast_hint"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:layout_marginTop="12dp"
+        android:textColor="@color/text_sub_foreground"
+        android:textSize="14sp" />
+
+    <ScrollView
+        android:id="@+id/scrollCastTargets"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
         android:layout_marginTop="10dp"
-        />
+        android:paddingTop="8dp"
+        android:paddingBottom="8dp"
+        android:clipToPadding="false">
+        <RadioGroup
+            android:id="@+id/cast_targets"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="vertical" />
+    </ScrollView>
     <LinearLayout
         android:layout_width="match_parent"
         android:layout_height="wrap_content"
@@ -41,8 +80,7 @@
             android:layout_height="33dp"
             android:layout_marginRight="20dp"
             android:text="关 闭"
-            android:textColor="@color/text_foreground"
-            style="@style/Widget.MaterialComponents.Button.OutlinedButton"/>
+            style="@style/BtnSecondary"/>
 
         <com.google.android.material.button.MaterialButton
             android:id="@+id/btn_confirm"
@@ -51,9 +89,8 @@
             android:insetTop="0dp"
             android:insetBottom="0dp"
             android:layout_height="33dp"
-            style="@style/Widget.MaterialComponents.Button.OutlinedButton"
-            app:strokeColor="@color/colorPrimary"
-            android:text="刷 新"/>
+            style="@style/BtnPrimary"
+            android:text="投 屏"/>
 
     </LinearLayout>
 

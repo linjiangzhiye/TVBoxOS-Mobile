@@ -1,6 +1,8 @@
 <resources>
-    <!--  app名称   -->
-    <string name="app_name">MBox</string>
+    <!--  app名称:由 app_config.properties 的 appName 构建时注入(resValue)  -->
+
+    <string name="player_rotate_screen">切换横竖屏</string>
+    <string name="player_enter_fullscreen">进入全屏播放</string>
 
     <string name="about">基于TVBox开发，代码开源，不收集或上传任何数据。
         \n软件只提供展示功能，不参与任何订阅源的制作、收集和发布。
@@ -11,6 +13,9 @@
     <string name="subs_use_tip">
         本软件仅用于学习和参考，不建议使用任何订阅。
         \n订阅(主要)：名称仅用于记忆/区分，地址分为网络和本地。
+        \n添加订阅时可填：站源配置(JSON)、订阅清单(含多条)、多线路、多仓(填后弹窗选仓)、资源站采集接口地址(自动嗅探生成配置)。
+        \n地址不是订阅配置时会自动按站点嗅探一次；实在识别不了(书源、频道列表等)会给出提示。
+        \n也可以点添加订阅弹窗右上角的「本地导入」选文件，或用「JSON导入」粘贴内容。
         \n多线路：可解析出多条订阅。
         \n多仓库：可解析出多个多线路，按需导入。
         \n为降低操作门槛，目前不论多线路/多仓，都会展现成单条订阅格式。
@@ -36,7 +41,87 @@
         <item>https://doh.360.cn/dns-query</item>
     </string-array>
 
+    <!-- 列表到底提示:分类页 BRVAH loadmore 与主页共享同一文案(app 覆盖库同名默认值,一处改全生效) -->
+    <string name="brvah_load_end">—— 到底了 ——</string>
+
     <string-array name="api">
         <item />
     </string-array>
+
+    <!-- 局域网服务二级页的使用说明；地址在页面顶部按当前网络动态列出。 -->
+    <string name="setting_lan_server_tip">
+        用它做什么：在同一局域网里的设备（手机 / 电脑 / 平板）用浏览器打开上面的地址，就能：
+        \n· 电脑的视频库可浏览手机本地视频、自动播放同目录下一集，也能接收手机在线播放推送
+        \n· 文件管理与视频播放分别在独立网页；手机上的「局域网配置导入」可从另一台 MBox 选择数据
+        \n电脑或另一台设备需要输入手机上显示的配对码；服务重启后配对码会更新。
+        \n开启后会显示常驻通知，手机退到后台或锁屏仍可访问；为保持连接会增加耗电，使用完建议关闭。
+        \n关闭时服务只监听 127.0.0.1，仅本机可访问 —— 订阅、本地播放、代理都不受影响。
+        \n允许通知后服务会立即开启；关闭会立即停止局域网访问。换网络后本机 IP 会变，回这里看一眼新地址即可。
+             </string>
+
+    <!-- 局域网服务二级页:地址、状态、配对码。 -->
+    <string name="lan_server_title">局域网服务</string>
+    <string name="lan_server_state_active">已开启 · 局域网设备现在就能访问</string>
+    <string name="lan_server_state_pending">正在开启 · 请稍候</string>
+    <string name="lan_server_state_pending_close">关闭异常 · 局域网监听仍在运行</string>
+    <string name="lan_server_state_off">未开启 · 仅本机可访问</string>
+    <string name="lan_server_lead">同一 Wi-Fi 下，在其他设备的浏览器打开地址：</string>
+    <!-- 其余三种状态下地址"现在能不能用"不一样,文案必须跟着变(否则等于把没生效的地址说成能用) -->
+    <string name="lan_server_lead_pending">服务启动后，可在其他设备的浏览器打开地址：</string>
+    <string name="lan_server_lead_off">开启服务后，可在其他设备打开地址：</string>
+    <string name="lan_server_lead_pending_close">请重启应用；在停止前，下面的地址仍可访问：</string>
+    <string name="lan_server_addr_empty">没取到局域网 IP —— 请确认本机已连接 Wi-Fi（或已开热点）后回到这里重看。</string>
+
+    <!-- 公共空态(view_empty)默认文案:LoadSir 的空态视图全 App 复用,代码侧要能把它设回默认值 -->
+    <string name="empty_default_tip">暂无数据</string>
+    <string name="home_source_unconfigured">未设置订阅</string>
+    <string name="home_no_subscription">暂无订阅源</string>
+    <string name="home_add_subscription">添加订阅源</string>
+
+    <!-- 拿不到内容时的原因说明:能说清原因就说原因,说不清才退回 empty_default_tip(口径同 DetailActivity) -->
+    <string name="empty_reason_source_timeout">数据源无响应（请求超时）\n可切换数据源,或长按首页标题刷新重试</string>
+    <string name="empty_reason_source_empty">该数据源没有返回内容（可能暂时不可用）\n可切换数据源,或长按首页标题刷新重试</string>
+    <string name="empty_reason_offline">网络连接不可用\n请检查 Wi-Fi 或移动数据后重试</string>
+
+    <string name="setting_ignore_ssl_tip">
+        开启后对所有网站忽略证书错误，无需逐个填写域名；默认关闭，由你自行控制。
+        \n网页（WebView）立即生效；网络请求重启应用后生效。开启后连接可能被截获。
+             </string>
+
+    <!-- 主题颜色的用法说明(横排设置行塞不下,由标题长按调出,与其它设置项同一套口径) -->
+    <string name="setting_theme_tip">
+        点一下选主题：浅色 / 深色 直接用内置那套；跟随系统才按系统明暗取「该类型的默认主题」——亮、暗各一份，可在列表里对自定义主题点「设为默认」换掉。
+        \n长按列表里的自定义主题：编辑 / 设为默认 / 删除；列表最下方「＋ 自定义主题颜色」是新建。
+        \n选择完成后关闭弹窗会重启应用生效；内置的浅色 / 深色不可修改、不可删除。
+             </string>
+
+    <!-- 网络不可用页(独立页面,见 NoNetworkActivity/NetworkIssueRouter:断网且发起过请求才拉起,有网自动返回) -->
+    <string name="no_network_title">网络连接不可用</string>
+    <string name="no_network_hint">请检查手机的 Wi-Fi 或移动数据；网络恢复后会自动返回上一页。</string>
+    <!-- 无网络页的"触发原因"副标题(由 NoNetworkActivity 填 EXTRA_REASON;原因同时进 LogStore) -->
+    <string name="no_network_reason">原因：%1$s</string>
+    <string name="no_network_back">返回</string>
+    <string name="no_network_got_it">我知道了</string>
+    <string name="home_source_title">请选择首页数据源</string>
+    <string name="home_source_switch_subscription">切换订阅</string>
+    <string name="home_source_close">关闭数据源选择</string>
+    <string name="home_source_filter_hint">输入数据源名称筛选</string>
+    <string name="home_source_no_match">未找到匹配的数据源</string>
+    <string name="home_source_none">暂无可用数据源，可切换订阅</string>
+    <string name="subtitle_size_value">字号：%1$d</string>
+    <string name="subtitle_delay_value">时间偏移：%1$s 秒</string>
+    <!-- 本地文件「打开方式」过渡页(见 LocalFileOpenActivity):只显示当前处理状态 -->
+    <string name="local_open_reading">正在读取文件…</string>
+    <string name="local_open_staging">正在准备文件…</string>
+    <string name="local_open_choose">请选择要对这个文件执行的操作</string>
+    <string name="local_open_restoring">正在还原备份…</string>
+    <!-- 压缩包动作选择:与用户口径一一对应(zip = 订阅源导入 / 还原备份 / 主题导入);
+         文案尽量压到 4 字以内,避免列表行过长被截断 -->
+    <string name="local_open_action_subscribe">导入源</string>
+    <string name="local_open_action_restore">还原备份</string>
+    <string name="local_open_action_theme">导入主题</string>
+    <string name="local_open_tip_zip">请选择操作</string>
+    <!-- 「打开方式」弹窗里 MBox 候选的主文字(图标下方那行):用具体动作代替应用名,用户一眼看懂能干嘛 -->
+    <string name="local_open_label_play">播放视频</string>
+    <string name="local_open_label_import">导入文件</string>
 </resources>

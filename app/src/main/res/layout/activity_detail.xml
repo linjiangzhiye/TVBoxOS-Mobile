@@ -14,17 +14,20 @@
         <LinearLayout
             android:id="@+id/previewPlayerPlace"
             android:layout_width="match_parent"
-            android:layout_height="250dp"
+            android:layout_height="260dp"
             android:orientation="horizontal"
-            android:paddingLeft="@dimen/dp_40"
-            android:paddingRight="@dimen/dp_50"
+            android:paddingLeft="@dimen/dp_20"
+            android:paddingRight="@dimen/dp_20"
             android:paddingBottom="@dimen/dp_10">
-
         </LinearLayout>
 
         <ScrollView
             android:layout_width="match_parent"
-            android:layout_height="wrap_content">
+            android:layout_height="wrap_content"
+            android:paddingTop="8dp"
+            android:paddingBottom="8dp"
+            android:clipToPadding="false"
+            >
 
             <LinearLayout
                 android:layout_width="match_parent"
@@ -66,10 +69,11 @@
                         <TextView
                             android:layout_width="wrap_content"
                             android:layout_height="wrap_content"
-                            android:text="详情 >>"
+                            android:text="详情 >"
                             android:layout_marginRight="10dp"
                             android:textSize="12dp"
-                            android:layout_gravity="bottom|right"/>
+                            android:textColor="@color/text_hint"
+                            android:layout_gravity="center|right"/>
                     </LinearLayout>
 
                     <LinearLayout
@@ -78,9 +82,12 @@
                         android:layout_marginTop="12dp"
                         >
 
-                            <TextView
+                            <!-- 来源 chip:文字 + 图标。图标尺寸由 app:drawableIconSize 指定 ——
+                                 compound drawable 的显示尺寸恒等于素材固有尺寸(vector 的 android:width/height),
+                                 原生没有可调属性;用 ui/kit/SizedIconTextView 补上这个能力(依据见其类注释) -->
+                            <com.github.tvbox.osc.ui.kit.SizedIconTextView
                                 android:id="@+id/tvSite"
-                                android:background="@drawable/bg_large_round_gray"
+                                android:background="@drawable/bg_large_round_float"
                                 android:layout_width="wrap_content"
                                 android:layout_height="wrap_content"
                                 android:ellipsize="end"
@@ -89,6 +96,8 @@
                                 tools:text="非凡影视"
                                 android:textColor="@color/text_foreground"
                                 android:drawableRight="@drawable/ic_change_20"
+                                app:drawableTint="@color/text_foreground"
+                                app:drawableIconSize="20dp"
                                 android:drawablePadding="4dp"
                                 android:paddingHorizontal="12dp"
                                 android:paddingVertical="6dp"/>
@@ -106,7 +115,7 @@
                             android:src="@drawable/ic_private_browsing"
                             android:visibility="gone"
                             tools:visibility="visible"
-                            />
+                            app:tint="@color/text_foreground" />
                     </LinearLayout>
 
                     <LinearLayout
@@ -115,11 +124,13 @@
                         android:layout_marginTop="22dp"
                         android:gravity="end|center_vertical"
                         android:orientation="horizontal">
-                        <TextView
+                        <com.github.tvbox.osc.ui.kit.SizedIconTextView
                             android:id="@+id/tvCast"
                             android:layout_width="wrap_content"
                             android:layout_height="@dimen/dp_40"
                             android:drawableRight="@drawable/ic_cast_18"
+                            app:drawableTint="@color/text_foreground"
+                            app:drawableIconSize="18dp"
                             android:drawablePadding="6dp"
                             android:focusable="true"
                             android:gravity="center"
@@ -132,11 +143,13 @@
                             android:layout_height="14dp"
                             android:background="@color/gray_darker"
                             android:layout_marginHorizontal="6dp"/>
-                        <TextView
+                        <com.github.tvbox.osc.ui.kit.SizedIconTextView
                             android:id="@+id/tvCollect"
                             android:layout_width="wrap_content"
                             android:layout_height="@dimen/dp_40"
                             android:drawableRight="@drawable/ic_colloct_18"
+                            app:drawableTint="@color/text_foreground"
+                            app:drawableIconSize="18dp"
                             android:drawablePadding="6dp"
                             android:focusable="true"
                             android:gravity="center"
@@ -149,11 +162,14 @@
                             android:layout_height="14dp"
                             android:background="@color/gray_darker"
                             android:layout_marginHorizontal="6dp"/>
-                        <TextView
+                        <com.github.tvbox.osc.ui.kit.SizedIconTextView style="@style/TextButton"
                             android:id="@+id/tvDownload"
                             android:layout_width="wrap_content"
                             android:layout_height="@dimen/dp_40"
+                            android:background="@null"
                             android:drawableRight="@drawable/ic_download_18"
+                            app:drawableTint="@color/text_foreground"
+                            app:drawableIconSize="18dp"
                             android:drawablePadding="6dp"
                             android:focusable="true"
                             android:gravity="center"
@@ -169,33 +185,6 @@
                         android:layout_marginVertical="4dp"/>
                 </LinearLayout>
 
-
-                <LinearLayout
-                    android:id="@+id/mEmptyPlaylist"
-                    android:layout_width="match_parent"
-                    android:layout_height="match_parent"
-                    android:layout_gravity="center"
-                    android:gravity="center_horizontal"
-                    android:orientation="horizontal"
-                    tools:visibility="gone">
-
-                    <ImageView
-                        android:layout_width="@dimen/dp_128"
-                        android:layout_height="@dimen/dp_128"
-                        android:layout_gravity="center"
-                        android:src="@drawable/icon_empty" />
-
-                    <TextView
-                        android:layout_width="wrap_content"
-                        android:layout_height="wrap_content"
-                        android:layout_gravity="center"
-                        android:layout_marginStart="@dimen/dp_10"
-                        android:layout_marginLeft="@dimen/dp_10"
-                        android:gravity="center"
-                        android:text="暂无播放数据"
-
-                        />
-                </LinearLayout>
 
                 <LinearLayout
                     android:id="@+id/parse_root"
@@ -223,9 +212,14 @@
                         android:layout_height="wrap_content"
                         app:layoutManager="androidx.recyclerview.widget.LinearLayoutManager"
                         android:orientation="horizontal"
-                        tools:listitem="@layout/item_select_flag" />
+                        tools:listitem="@layout/item_select_flag" 
+                        android:paddingTop="8dp"
+                        android:paddingBottom="8dp"
+                        android:clipToPadding="false"
+                        />
                 </LinearLayout>
                 <RelativeLayout
+                    android:id="@+id/rlLineHeader"
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
                     android:layout_marginHorizontal="14dp"
@@ -239,12 +233,15 @@
                         android:textStyle="bold"
                         android:layout_centerVertical="true"
                         />
-                    <TextView
+                    <!-- 快捷换线:文字 + 图标(图标尺寸见 app:drawableIconSize,统一走 SizedIconTextView) -->
+                    <com.github.tvbox.osc.ui.kit.SizedIconTextView
                         android:id="@+id/tvChangeLine"
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
                         android:text="快捷换线"
                         android:drawableRight="@drawable/ic_change_20"
+                        app:drawableTint="@color/text_foreground"
+                        app:drawableIconSize="18dp"
                         android:textColor="@color/text_foreground"
                         android:drawablePadding="4dp"
                         android:paddingVertical="6dp"
@@ -261,9 +258,14 @@
                     android:layout_marginVertical="4dp"
                     tools:listitem="@layout/item_select_flag"
                     app:layoutManager="androidx.recyclerview.widget.LinearLayoutManager"
-                    android:orientation="horizontal"/>
+                    android:orientation="horizontal"
+                    android:paddingTop="8dp"
+                    android:paddingBottom="8dp"
+                    android:clipToPadding="false"
+                    />
 
                 <LinearLayout
+                    android:id="@+id/llSeriesHeader"
                     android:layout_width="match_parent"
                     android:layout_height="wrap_content"
                     android:layout_marginHorizontal="14dp"
@@ -284,12 +286,14 @@
                         android:layout_width="0dp"
                         android:layout_weight="1"
                         android:layout_height="wrap_content"/>
-                    <TextView
+                    <com.github.tvbox.osc.ui.kit.SizedIconTextView
                         android:id="@+id/tvSort"
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
                         android:text="倒序"
                         android:drawableRight="@drawable/ic_sort_18"
+                        app:drawableTint="@color/text_foreground"
+                        app:drawableIconSize="18dp"
                         android:textColor="@color/text_foreground"
                         android:drawablePadding="4dp"
                         android:paddingVertical="6dp"
@@ -301,12 +305,14 @@
                         android:layout_height="14dp"
                         android:layout_marginHorizontal="10dp"
                         android:background="@color/gray_darker" />
-                    <TextView
+                    <com.github.tvbox.osc.ui.kit.SizedIconTextView
                         android:id="@+id/tv_all_series"
                         android:layout_width="wrap_content"
                         android:layout_height="wrap_content"
                         android:text="全部"
                         android:drawableRight="@drawable/ic_expand_all_18"
+                        app:drawableTint="@color/text_foreground"
+                        app:drawableIconSize="18dp"
                         android:textColor="@color/text_foreground"
                         android:drawablePadding="4dp"
                         android:paddingVertical="6dp"
@@ -326,7 +332,10 @@
                     app:tv_verticalSpacingWithMargins="@dimen/dp_10"
                     tools:layoutManager="androidx.recyclerview.widget.LinearLayoutManager"
                     tools:orientation="horizontal"
-                    tools:listitem="@layout/item_series"/>
+                    tools:listitem="@layout/item_series"
+                    android:paddingTop="8dp"
+                    android:paddingBottom="8dp"
+                    />
             </LinearLayout>
         </ScrollView>
 
@@ -336,5 +345,37 @@
         android:id="@+id/previewPlayer"
         android:layout_width="match_parent"
         android:layout_height="250dp" />
+
+    <!-- 空态:无剧集可播时**整页只显示它**(llLayout 整块隐藏,见 DetailActivity);
+         放在页面根层(不再塞在 ScrollView 里)才能在整屏居中;图标在上、文字在下换行排列,
+         样式与全 App 统一空态(view_empty)一致 -->
+    <LinearLayout
+        android:id="@+id/mEmptyPlaylist"
+        android:layout_width="match_parent"
+        android:layout_height="match_parent"
+        android:gravity="center"
+        android:orientation="vertical"
+        android:visibility="gone"
+        tools:visibility="gone">
+
+        <!-- 负外边距抵消 ic_empty 的透明留白(128dp 框里顶 46dp、底 33dp;原图底部的灰色投影椭圆
+             已从矢量移除,底边由 1238 抬到 1190,底留白因此由 29dp 变 33dp,这里同步补 4dp),
+             让布局盒子≈图案可见范围、与下方文字间距和 view_empty 空态保持一致 -->
+        <ImageView
+            android:layout_width="@dimen/dp_128"
+            android:layout_height="@dimen/dp_128"
+            android:layout_marginTop="-46dp"
+            android:layout_marginBottom="-24dp"
+            android:src="@drawable/ic_empty" />
+
+        <TextView
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="8dp"
+            android:gravity="center"
+            android:text="暂无播放数据"
+            android:textColor="@color/text_sub_foreground"
+            android:textSize="14sp" />
+    </LinearLayout>
 
 </FrameLayout>

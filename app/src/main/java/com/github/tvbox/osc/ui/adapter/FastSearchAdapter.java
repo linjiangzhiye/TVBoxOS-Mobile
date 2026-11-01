@@ -1,52 +1,342 @@
 package com.github.tvbox.osc.ui.adapter;
 
+import android.os.Handler;
+import android.os.Looper;
 import android.text.TextUtils;
+import android.view.View;
 import android.widget.ImageView;
+import android.widget.TextView;
 
 import com.chad.library.adapter.base.BaseQuickAdapter;
 import com.chad.library.adapter.base.BaseViewHolder;
+import com.chad.library.adapter.base.util.MultiTypeDelegate;
 import com.github.tvbox.osc.R;
-import com.github.tvbox.osc.api.ApiConfig;
 import com.github.tvbox.osc.bean.Movie;
+import com.github.tvbox.osc.bean.SourceBean;
 import com.github.tvbox.osc.picasso.RoundTransformation;
-import com.github.tvbox.osc.util.HawkConfig;
+import com.github.tvbox.osc.spiderapi.SourceConfigProviders;
 import com.github.tvbox.osc.util.MD5;
-import com.orhanobut.hawk.Hawk;
 import com.squareup.picasso.Picasso;
 
 import java.util.ArrayList;
+import java.util.List;
 
 import me.jessyan.autosize.utils.AutoSizeUtils;
 
+/**
+ * 搜索结果适配器：支持「单列列表」、「宫格网格」、「通栏卡片」三种展示
+ * （MultiTypeDelegate 按 mode 分发 item 布局）。{@link #setMode(int)} 切换展示形态，
+ * 切换后需 notifyDataSetChanged；数据与点击监听不受影响。
+ */
 public class FastSearchAdapter extends BaseQuickAdapter<Movie.Video, BaseViewHolder> {
+
+    /** 单列列表 */
+    public static final int MODE_LIST = 0;
+    /** 宫格/网格(3:4 卡,多列) */
+    public static final int MODE_GRID = 1;
+    /** 通栏卡片(整行满宽横向卡) */
+    public static final int MODE_BANNER = 2;
+
+    private static final int TYPE_LIST = 0;
+    private static final int TYPE_GRID = 1;
+    private static final int TYPE_BANNER = 2;
+
+    private int mode = MODE_LIST;
+
+    /** 本次会话已成功加载过的图片变体:刷新/滚动回显时不再重闪 shimmer */
+    private final java.util.Set<String> loadedImages = new java.util.HashSet<>();
+    /**
+     * 加载失败过的海报 URL → 失败时间(ms):窗口内滑回/复用直接显示失败占位、不再重复请求;
+     * 窗口过期(瞬时失败如开局无网/CDN 抖动)后允许重试一次,不必关掉页面才能重新加载。
+     */
+    private final java.util.Map<String, Long> failedUrls = new java.util.HashMap<>();
+    /** "失败不重试"窗口(ms) */
+    private static final long FAILED_TTL_MS = 60_000L;
+
+    /** 该 URL 是否仍处于"失败不重试"窗口内(过期即移除,允许重新加载) */
+    private boolean recentlyFailed(String url) {
+        Long at = failedUrls.get(url);
+        if (at == null) return false;
+        if (System.currentTimeMillis() - at >= FAILED_TTL_MS) {
+            failedUrls.remove(url);
+            return false;
+        }
+        return true;
+    }
+
+    /** 视图上记录的"当前已展示图片变体"tag(同图同布局跳过重载,防滑回闪) */
+    private static final int TAG_LAST_IMAGE_KEY = 0x3D000001;
+    /** "延迟启动扫光"Runnable tag(加载结果到来时取消) */
+    private static final int TAG_SHIMMER_RUN = 0x3D000002;
+    /** Target 强引用 tag:复用 view 时先清理旧 Target,防止回调错乱/被 GC */
+    private static final int TAG_TARGET = 0x3D000004;
+    /** 扫光延迟(ms):加载在此内完成(缓存/较快网络)则不启动骨架屏,只有真正慢(>1s)才扫光 */
+    private static final long SHIMMER_DELAY_MS = 1000L;
+    private static final Handler MAIN = new Handler(Looper.getMainLooper());
+
     public FastSearchAdapter() {
         super(R.layout.item_search, new ArrayList<>());
+        setMultiTypeDelegate(new MultiTypeDelegate<Movie.Video>() {
+            @Override
+            protected int getItemType(Movie.Video item) {
+                return mode == MODE_GRID ? TYPE_GRID : (mode == MODE_BANNER ? TYPE_BANNER : TYPE_LIST);
+            }
+        });
+        getMultiTypeDelegate().registerItemType(TYPE_LIST, R.layout.item_search);
+        getMultiTypeDelegate().registerItemType(TYPE_GRID, R.layout.item_search_grid);
+        getMultiTypeDelegate().registerItemType(TYPE_BANNER, R.layout.item_search_banner);
+    }
+
+    public int getMode() {
+        return mode;
+    }
+
+    public boolean isGrid() {
+        return mode == MODE_GRID;
+    }
+
+    /** 切换展示形态(MODE_LIST/MODE_GRID/MODE_BANNER)；需在使用方 setLayoutManager 后调用，随后 notify 刷新布局 */
+    public void setMode(int mode) {
+        if (this.mode == mode) return;
+        this.mode = mode;
+        notifyDataSetChanged();
+    }
+
+    /** 兼容旧调用：单列/宫格切换 */
+    public void setGrid(boolean grid) {
+        setMode(grid ? MODE_GRID : MODE_LIST);
     }
 
     @Override
     protected void convert(BaseViewHolder helper, Movie.Video item) {
+        // 片名
+        setText(helper, R.id.tvName, item.name);
 
-        // with preview
-        helper.setText(R.id.tvName, item.name);
-        helper.setText(R.id.tvSite, ApiConfig.get().getSource(item.sourceKey).getName());
-        helper.setVisible(R.id.tvNote, item.note != null && !item.note.isEmpty());
-        if (item.note != null && !item.note.isEmpty()) {
-            helper.setText(R.id.tvNote, item.note);
+        // 海报卡公共:左上角评分角标 + 底部渐变黑底叠集数(有才显示)
+        bindPosterCard(helper, item);
+
+        switch (mode) {
+            case MODE_GRID:
+                bindGrid(helper, item);
+                break;
+            case MODE_BANNER:
+                bindBanner(helper, item);
+                break;
+            default:
+                bindList(helper, item);
         }
+
+        // 来源(置底;来源名空则整行隐藏,内容上移)
+        String sourceName = safeSourceName(item.sourceKey);
+        setVisible(helper, R.id.llSite, !sourceName.isEmpty());
+        setText(helper, R.id.tvSite, sourceName);
+
         ImageView ivThumb = helper.getView(R.id.ivThumb);
-        if (!TextUtils.isEmpty(item.pic)) {
-            Picasso.get()
-                    .load(item.pic)
-                    .transform(new RoundTransformation(MD5.string2MD5(item.pic + "position=" + helper.getLayoutPosition()))
-                            .centerCorp(true)
-                            .override(AutoSizeUtils.dp2px(mContext, 110), AutoSizeUtils.dp2px(mContext, 160))
-                            .roundRadius(AutoSizeUtils.dp2px(mContext, 20), RoundTransformation.RoundType.ALL))
-                    .placeholder(R.drawable.img_loading_placeholder)
-                    .error(R.drawable.img_loading_placeholder)
-                    .into(ivThumb);
-        } else {
-            ivThumb.setImageResource(R.drawable.img_loading_placeholder);
-        }
+        loadPoster(ivThumb, item);
+    }
 
+    /** 共用海报卡:评分(左上角橙色徽标) + 集数(底部渐变黑底),有才显示 */
+    private void bindPosterCard(BaseViewHolder helper, Movie.Video item) {
+        String score = item.score == null ? "" : item.score.trim();
+        setVisible(helper, R.id.tvScore, !score.isEmpty());
+        setText(helper, R.id.tvScore, score);
+
+        // 集数:内容为空则整块渐变黑底隐藏(避免空条)
+        String note = item.note == null ? "" : item.note.trim();
+        setVisible(helper, R.id.llNoteBar, !note.isEmpty());
+        setText(helper, R.id.tvNote, note);
+    }
+
+    /** 宫格:类型地区语言 一行,导演+时间(直接显示导演名),演员(带前缀) */
+    private void bindGrid(BaseViewHolder helper, Movie.Video item) {
+        // 类型 空格 地区 空格 语言
+        String meta = joinTypeAreaLang(item);
+        setVisible(helper, R.id.tvMeta, !meta.isEmpty());
+        setText(helper, R.id.tvMeta, meta);
+
+        // 导演 时间:直接显示导演名(无"导演："前缀),有年份则加空格年
+        String directorTime = joinDirectorYear(item);
+        setVisible(helper, R.id.tvDirector, !directorTime.isEmpty());
+        setText(helper, R.id.tvDirector, directorTime);
+
+        boolean hasActor = item.actor != null && !item.actor.isEmpty();
+        setVisible(helper, R.id.tvActor, hasActor);
+        if (hasActor) {
+            setText(helper, R.id.tvActor, "演员：" + item.actor.trim());
+        }
+    }
+
+    /** 通栏卡片:剧集名称(支持换行);评分/集数已由海报卡处理 */
+    private void bindBanner(BaseViewHolder helper, Movie.Video item) {
+        setText(helper, R.id.tvName, item.name);
+    }
+
+    /** 单列列表:时间(单独一行),类型 地区(一行),集数;演员不展示,集数信息由文字行承载 */
+    private void bindList(BaseViewHolder helper, Movie.Video item) {
+        // 时间
+        String year = item.year > 0 ? String.valueOf(item.year) : "";
+        setVisible(helper, R.id.tvYear, !year.isEmpty());
+        setText(helper, R.id.tvYear, year);
+
+        // 类型 空格 地区
+        String typeArea = joinTypeArea(item);
+        setVisible(helper, R.id.tvMeta, !typeArea.isEmpty());
+        setText(helper, R.id.tvMeta, typeArea);
+
+        // 集数(原演员行;空则隐藏,内容上移)
+        String note = item.note == null ? "" : item.note.trim();
+        setVisible(helper, R.id.tvActor, !note.isEmpty());
+        setText(helper, R.id.tvActor, note);
+
+        // 集数已在文字行显示,隐藏海报角底部渐变黑底(避免重复)
+        setVisible(helper, R.id.llNoteBar, false);
+    }
+
+    /** 类型 空格 地区(空段跳过;整行为空则隐藏) */
+    private String joinTypeArea(Movie.Video item) {
+        StringBuilder sb = new StringBuilder();
+        if (!TextUtils.isEmpty(item.type)) sb.append(item.type.trim()).append(' ');
+        if (!TextUtils.isEmpty(item.area)) sb.append(item.area.trim());
+        return sb.toString().trim();
+    }
+
+    /** 类型 空格 地区 空格 语言(空段跳过;整行为空则隐藏) */
+    private String joinTypeAreaLang(Movie.Video item) {
+        StringBuilder sb = new StringBuilder();
+        if (!TextUtils.isEmpty(item.type)) sb.append(item.type.trim()).append(' ');
+        if (!TextUtils.isEmpty(item.area)) sb.append(item.area.trim()).append(' ');
+        if (!TextUtils.isEmpty(item.lang)) sb.append(item.lang.trim());
+        return sb.toString().trim();
+    }
+
+    /** 导演 时间:直接显示导演名(无前缀),有年份则加空格年(如"韦正 2012");两者皆无则空 */
+    private String joinDirectorYear(Movie.Video item) {
+        StringBuilder sb = new StringBuilder();
+        if (!TextUtils.isEmpty(item.director)) sb.append(item.director.trim()).append(' ');
+        if (item.year > 0) sb.append(item.year);
+        return sb.toString().trim();
+    }
+
+    private void loadPoster(ImageView ivThumb, Movie.Video item) {
+        if (ivThumb == null) return;
+        // 占位统一走 ImageView 背景层(统一占位组件 PosterPlaceholderDrawable),src 只放实图。
+        // 列表/宫格共用竖图变体;通栏用 3:2 横图变体,避免先裁成竖图后再被横卡裁切。
+        String url = item.pic == null ? "" : item.pic.trim();
+        if (url.isEmpty()) {
+            // 无封面:显示"加载失败"占位(统一占位组件,见 util/PosterPlaceholderDrawable)
+            ivThumb.setTag(TAG_LAST_IMAGE_KEY, null);
+            com.github.tvbox.osc.util.PicassoLoad.showFailedPlaceholder(ivThumb);
+            return;
+        }
+        // 已失败过且仍在窗口内的 URL:直接显示失败占位,不再重新发起请求(修复滑回又重载);清 src 露出占位
+        if (recentlyFailed(url)) {
+            ivThumb.setTag(TAG_LAST_IMAGE_KEY, null);
+            com.github.tvbox.osc.util.PicassoLoad.showFailedPlaceholder(ivThumb);
+            return;
+        }
+        boolean banner = mode == MODE_BANNER;
+        String imageKey = url + (banner ? "_search_banner_300x200" : "_search_poster_200x267");
+        // 恢复为正常占位(上一张可能是"加载失败");占位走背景层,不动 src。
+        com.github.tvbox.osc.util.PicassoLoad.setLoadingPlaceholder(ivThumb);
+        // 换绑新图前:先取消上一张还在途的 Picasso 请求(含旧 Target),再撤掉延迟扫光任务 + 停掉扫光,
+        // 并清空 src 露出占位(否则复用瞬间会残留上一张不同 item 的旧图,直到新图加载完成)。
+        // 带 Callback 的 into() 不会自动 cancel 上一个 target 的请求;不复用就取消,上一张图加载成功/失败
+        // 的回调会在 view 复用给新 item 之后触发,把旧图错画到新 item 上,正是"一张图同时渲染给两张卡、
+        // 后面整体下移错位"的根因。
+        Object oldTarget = ivThumb.getTag(TAG_TARGET);
+        if (oldTarget instanceof com.squareup.picasso.Target) {
+            Picasso.get().cancelRequest((com.squareup.picasso.Target) oldTarget);
+        }
+        Picasso.get().cancelRequest(ivThumb);
+        ivThumb.setTag(TAG_LAST_IMAGE_KEY, imageKey);
+        ivThumb.setImageDrawable(null);
+        int w = AutoSizeUtils.dp2px(mContext, banner ? 300 : 200);
+        int h = AutoSizeUtils.dp2px(mContext, banner ? 200 : 267);
+        int radius = AutoSizeUtils.dp2px(mContext, 12);
+        String cacheKey = MD5.string2MD5(imageKey);
+        // 已成功加载过(会话内缓存命中)→ 不再闪骨架屏,直接出图;
+        // 其余情况扫光延迟启动:命中(内存/磁盘)缓存的图会在延迟内就绪并取消,避免"闪一下"
+        boolean cached = loadedImages.contains(imageKey);
+        if (!cached) {
+            // 排新的延迟启动前必须先撤掉上一条(与本方法末尾的 cancelShimmer 成对):
+            // 否则"上一张图还在延迟窗口内 → 该 view 被复用到新 URL"时,旧 run 的 tag 会被覆盖成孤儿,
+            // 它在图片已经出图之后才触发,给已出图的 view 再叠一层没人会停的扫光
+            // (那个动画器是 INFINITE 的,会一直按 60fps tick 并顺着 Drawable→View 引用把视图留住)。
+            cancelShimmer(ivThumb);
+            final String tagImageKey = imageKey;
+            Runnable run = () -> {
+                // 双保险:view 已经复用到别的图、或实图已经出图(src 已被填上)就不启动
+                if (!tagImageKey.equals(ivThumb.getTag(TAG_LAST_IMAGE_KEY))) return;
+                if (ivThumb.getDrawable() != null) return;
+                com.github.tvbox.osc.ui.kit.PicassoShimmer.start(ivThumb);
+            };
+            ivThumb.setTag(TAG_SHIMMER_RUN, run);
+            MAIN.postDelayed(run, SHIMMER_DELAY_MS);
+        }
+        // 关键:不用 into(iv, callback) —— 其内部 ImageViewAction.complete() 会无条件把下载结果
+        // setImageDrawable 到 view 上,即使该 view 已复用给别的 item(weak reference 还活着时),
+        // 正是图片错位根源。改用自定义 Target,onBitmapLoaded 里自己校验"view 当前绑定的 key
+        // 仍是本 key"后才 setImageBitmap,彻底杜绝旧请求把图错画到复用后的 view。
+        final com.squareup.picasso.Target target = new com.squareup.picasso.Target() {
+            @Override
+            public void onBitmapLoaded(android.graphics.Bitmap bitmap, Picasso.LoadedFrom from) {
+                if (!imageKey.equals(ivThumb.getTag(TAG_LAST_IMAGE_KEY))) return; // view 已复用,丢弃
+                loadedImages.add(imageKey);
+                failedUrls.remove(url);
+                cancelShimmer(ivThumb);
+                com.github.tvbox.osc.ui.kit.PicassoShimmer.stop(ivThumb);
+                ivThumb.setImageDrawable(new android.graphics.drawable.BitmapDrawable(ivThumb.getResources(), bitmap));
+            }
+
+            @Override
+            public void onBitmapFailed(Exception e, android.graphics.drawable.Drawable errorDrawable) {
+                if (!imageKey.equals(ivThumb.getTag(TAG_LAST_IMAGE_KEY))) return; // view 已复用,不处理
+                failedUrls.put(url, System.currentTimeMillis());
+                ivThumb.setTag(TAG_LAST_IMAGE_KEY, null);
+                com.github.tvbox.osc.util.PicassoLoad.showFailedPlaceholder(ivThumb);
+            }
+
+            @Override
+            public void onPrepareLoad(android.graphics.drawable.Drawable placeHolderDrawable) {
+                // 占位走背景层,不塞 src
+            }
+        };
+        ivThumb.setTag(TAG_TARGET, target); // 强引用 Target,防止被 GC(复用前先清理旧 Target)
+        Picasso.get()
+                .load(url)
+                .transform(new RoundTransformation(cacheKey)
+                        .centerCorp(true)
+                        .override(w, h)
+                        .roundRadius(radius, RoundTransformation.RoundType.ALL))
+                .into(target);
+    }
+
+    private void cancelShimmer(ImageView iv) {
+        Object run = iv.getTag(TAG_SHIMMER_RUN);
+        if (run instanceof Runnable) {
+            MAIN.removeCallbacks((Runnable) run);
+        }
+        iv.setTag(TAG_SHIMMER_RUN, null);
+    }
+
+    private String safeSourceName(String sourceKey) {
+        try {
+            if (TextUtils.isEmpty(sourceKey)) return "";
+            SourceBean source = SourceConfigProviders.get().getSource(sourceKey);
+            return source == null ? "" : source.getName();
+        } catch (Throwable t) {
+            return "";
+        }
+    }
+
+    /** 布局可能不含某 id(列表无 tvDirector 等),setVisible/setText 需空安全 */
+    private void setVisible(BaseViewHolder helper, int id, boolean visible) {
+        View v = helper.getView(id);
+        if (v != null) v.setVisibility(visible ? View.VISIBLE : View.GONE);
+    }
+
+    private void setText(BaseViewHolder helper, int id, String text) {
+        View v = helper.getView(id);
+        if (v instanceof TextView) ((TextView) v).setText(text);
     }
 }

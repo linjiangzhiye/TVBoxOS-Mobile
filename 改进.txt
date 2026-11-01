@@ -1,0 +1,129 @@
+项目已完成模块合并、公开契约接线和源码边界门禁；app 的部分播放器直用仍待收口。本文记录当前状态、持续约束与后续改造顺序，详细规则以 AGENTS.md 为准。
+
+不立即新增多个模块全面重写；继续守住现有依赖规则，再按收益拆分大页面与物理模块。
+
+现状（与 AGENTS.md §二 同步维护）：全仓 **10 个 Gradle 模块** —— :app、:common、:core-network、:core-storage、:log、:player、:spider、:download、:share、:thirdparty。
+契约与实现合到同一模块后，边界不再靠拆 Gradle 模块保证，而是靠 **checkModuleDependencies 源码层门禁**：app/UI 禁止直连 :spider 的 ApiConfig/JsLoader/PlayUrlResolver，禁止 getCSP()/Hawk/EventBus/DownloadManager.get()/自建线程池与 OkHttpClient。
+播放器现状（2026-10-01，与 AGENTS.md §二/§七 同步）：旧 ExoPlayer 已迁至 Media3 1.11.1（匹配 compileSdk 36），类型 2 沿用旧配置；EXOmPlayer/xyz.doikki.videoplayer.exo 为兼容类名，实现只用 androidx.media3。禁止重新引入 com.google.android.exoplayer 依赖或旧包 import；Media3 各组件必须同版本，UI 不得 import androidx.media3。取流复用组合根注入的客户端，每个媒体源独立持有请求头快照；音轨/字幕选择用 Tracks/TrackSelectionOverride，字幕回调用 CueGroup。真机行为待用户人工回归。
+主题文字色只配主色与高亮色（2026-10-02，与 AGENTS.md §七 同步）：`brand` 管正文、标题与普通选中文字；`text_accent` 保留为同值派生资源，不再是主题文件/编辑器的独立配置项。`text_highlight` 单独控制链接、搜索来源与“我的”页节日文字；旧主题文件里的 `text_accent` 值读取与导入时静默忽略，旧版对调过的高亮值仍需正确迁移；自动升级键名本身不提示，确实丢失其他配置时仍需提示。
+播放器区样式不随主题（2026-10-02 更新，与 AGENTS.md §七 同步）：播放器底恒为黑，压在**视频画面**上的元素（控制条/OSD、暂停与滑动进度浮层、字幕与 seek 进度图标、播放器菜单浮层）一律用**固定配色**（白/半透明黑/固定字面量；进度与暂停提示底固定为 15% 白色半透明），禁止接 `text_foreground`/`text_sub`/`btn_select_*`/`bg_float` 等主题色；反之，**带主题面板底**的浮层与页面元素照旧走主题（直播页 EPG 信息条与频道/分组卡片、直播设置与线路抽屉、播放设置面板里的小组件按钮）。判断口径：**画在黑画面/视频上 → 固定配色；有自己的（主题）面板底 → 跟主题。**
+空心组件边框线 = 它自己的文字颜色（2026-10-02，与 AGENTS.md §七 同步）：凡“无填充、只有描边”的组件（空心按钮 `BtnSecondary`、小组件键 `WidgetBtn`/`PageBgChip`、危险入口红字键 `BtnDangerGhost`、`bg_r_*_stroke_primary` 描边小件），描边色必须与该组件自己的文字色同源——普通键 = 文字主色（`btn_plain_text`/`text_foreground`）、危险入口 = 危险红 `#E5484D`、禁用态 = `text_disable`；**禁止**再挂“空心按钮边框线颜色”`btn_cancel_bg`（该键此后只服务没有自带文字的纯描边容器与输入框）。主按钮与实心选中态的填充、描边同取独立配置且不透明的 `btn_confirm_bg`（派生为 `btn_select_bg` / `btn_select_stroke`），底上的文字取 `btn_confirm_text`（派生为 `btn_select_text`）；文字主色 `brand` 仍控制正文与空心按钮的文字/描边。兼容迁移仅针对 schema ≤ 3 的旧主题：缺 `btn_confirm_bg` 或该值带透明度时静默沿用该主题的 `brand`，旧不透明值保留；用户保存时按 schema 4 落盘；当前读取只迁移内存，存量文件不会自动改写。后续移除旧格式分支前，必须先在后台原子升级尚未保存的旧主题文件并验证重读结果，迁移失败的文件继续兼容；分享/备份中的旧主题包也仍会经过导入解析，须继续迁移或明确提示该旧格式不再支持，不能只凭本机文件已升级就删分支。schema 4 缺键或显式透明值按同类型内置主题补齐；真正的空心操作统一用 `BtnSecondary`。日志筛选、背景预设与直播选中条共用实心选中规则。
+空心按钮按下仍为空心（2026-10-01，与 AGENTS.md §七 同步）：`BtnSecondary`、`BtnDangerGhost` 与未选中的 `WidgetBtn` 在 `state_pressed` 下保持透明填充，描边与文字继续同色；点击反馈不能把空心键临时刷成实心。`BtnPrimary` 按下/短时禁用时保留原来的填充与文字对比，不得切到浅色半透明底导致白字难辨；只有真正的选中件才允许持续显示实心选中态。
+点击型组件不得带“选中外观”（2026-10-01，与 AGENTS.md §七 同步）：`FlowTagLayout` 的 `app:max_select` 只给真·可选件；只做“点一下就触发动作”的 chip（搜索页历史/热词/相关搜索）一律不写 `max_select` —— 写了以后点击会 `setSelected(true)`，而 chip 的底 `selector_widget_btn` 带“选中 = 实心填充”状态，点过的词会变成一块选中色。新增点击型 chip 用无状态底（只有描边/无底），别挂带 `state_selected` 的选择器。
+搜索页数据源：最近热搜 = `https://api.web.360kan.com/v1/rank?cat=3`（取 `data[].title` 前 10 条，两列带序号网格展示）；相关搜索 = `https://suggest.video.iqiyi.com/?if=mobile&key=<关键词>`（取 `data[].name`，内联 chip）。解析与 URL 编码收在 `util/SearchApiParsers`（纯逻辑带 JVM 单测）。
+
+纯文字按钮点击时不显示背景（2026-10-05 用户口径，与 AGENTS.md §七 同步）：TextButton、BtnGhost、SubtitleTextButton、多选操作栏与独立文字动作入口的默认/按下背景均保持透明，不得添加圆形无边界波纹或按下填色；保留可点击、可聚焦及原有触摸尺寸，文字色继续按各页面的主题/固定配色规则处理。
+
+一、目标架构
+
+依赖只允许自上而下：app/feature → 业务公开契约 → player/spider/download/share 等业务实现 → network/storage/state/log → 纯模型。业务实现放 internal 包，基础模块不得反向依赖业务或 UI；同一领域模型只定义一次，跨模块不共享可变对象。权威边界和源码门禁见 AGENTS.md 第一、二、六节。
+
+二、已落地的模块边界与剩余工作
+
+当前 10 个 Gradle 模块见第八节。原 core-model/core-utils/state 已合到 common（bean 纯模型、算法工具、系统状态）；spider-api/player-api 已回并 spider/player；原 crash/TabLayout/ViewPager1Delegate/quickjs 归入 thirdparty；ui-common 归入 app。契约与实现同模块后，通过 checkModuleDependencies 守源码边界。
+core-network 收口网络客户端；core-storage 对外只暴露 Repository 和类型安全 Config，不暴露 DAO；download 只公开 DownloadFacade；share 以可插拔平台提供分享传输，局域网 HTTP 服务由 app 通过 LanShareHost 桥接。app/UI 访问爬虫必须走契约，不直连 ApiConfig、JsLoader 或 PlayUrlResolver。
+播放器仍有 app 直用 MyVideoView、Media3 等残留，后续经 PlayerSession 和内核能力接口收口。旧 ExoPlayer 依赖已移除，IJK 内核也已移除（软解改 jellyfin FFmpeg decoder），Media3 版本统一为 1.11.1；真机播放行为由用户人工回归。
+
+三、页面与业务逻辑拆分
+
+PlayFragment 的目标是只负责 View 和生命周期；页面逻辑拆分为 PlayViewModel、PlayCoordinator、PlayerSession、SubtitleCoordinator 和 PlayHistoryRepository。PlayRequest、PlaySessionKeys、PlayedVodKey、SubtitleCoordinator、PlayHistoryRepository、PlayParseCoordinator 已抽出，剩余换源、解析与重试流程需结合真机回归逐步拆分。
+DetailActivity 逐步拆为 DetailViewModel、DetailRepository、EpisodeSelectionState、DetailDownloadCoordinator 和 QuickSearchCoordinator；Activity 只处理导航、弹窗与视图事件。SourceViewModel 仅依赖 SpiderService 等契约，支持 FakeSpiderService 的 JVM 测试。
+
+四、依赖注入
+
+先由 app 的 AppCompositionRoot 统一装配 network、storage、spider、download、players。新代码通过构造函数注入接口，ViewModel 通过 Factory 获取依赖；静态 get() 暂作兼容入口，旧调用逐步迁移。是否引入 Hilt 取决于手动组合根的实际复杂度。
+
+五、状态与事件
+
+页面状态使用 ViewModel + LiveData，逐步 Kotlin 化后可采用 StateFlow；一次性页面事件使用明确的 Event 类型。下载与播放的跨页状态由 Facade 或 PlaybackSessions 订阅，系统网络与电量由 SystemStateMonitor 单点管理。EventBus 已全仓移除且依赖不在 classpath；禁止重新引入，跨页/模块事件用直调、Facade 订阅或明确监听器。
+
+六、验收与安全红线
+
+app/UI 不得新增 getCSP()、DownloadManager.get()、Hawk 裸读、具体爬虫实现直连、具体播放器内核 import 或自建线程池。业务后台任务由模块级共享执行器管理，并带取消或过期自检。Room 查询不得在主线程执行；网络客户端由 core-network 统一装配，HTTPS/TLS 默认校验证书与主机名，WebView 默认拒绝证书错误。
+新增源码文件一律使用 Kotlin（.kt），不得再新建 .java；修改既有 .java 文件时优先就地转为 .kt，转换后须保持公共契约与行为不变，不改变对外接口与调用方代码；确需保留 Java 的场景须在提交说明写明原因（与 AGENTS.md §六.9 同步）。
+忽略证书错误由用户自行控制（2026-10-05 用户口径，与 AGENTS.md §七 同步）：设置页保留“忽略证书错误”开关，默认关闭；开启后对所有网站统一生效，无需逐个输入域名。WebView 立即生效，统一网络客户端重启应用后生效。不得绕过开关无条件放行，分享/备份还原不得自动启用该本机设置。
+用户主动删除、清除、清空数据先弹确认框；取消后不得更改数据。可滚动组件保留内边距并设置 clipToPadding=false。图片加载统一使用 PicassoLoad 和 PosterPlaceholderDrawable，运行时占位置于 ImageView 背景层。
+局域网服务按需启动；用户确认关闭后须立即停止对外监听、清除已配对设备并恢复仅本机回环。异常残留对外监听时须如实提示。路径拼接和解压均须防目录穿越，敏感网络操作须鉴权。其余主题、播放器样式、性能、构建与发布红线以 AGENTS.md 为准。
+崩溃页必须跟随当前生效主题（2026-10-16 用户口径，与 AGENTS.md §七 同步）：崩溃兜底页（第三方 CustomActivityOnCrash）跑在独立 :error_activity 进程，App 对该进程刻意最小化启动（不装 ThemeRuntime/Room/爬虫），禁止为配色把业务初始化搬进去。由主进程在主题生效时（启动装配、系统翻明暗、切主题后重启）把当前生效调色板的 bg_body / text_main / btn_confirm_bg / btn_confirm_text / text_accent 投影到独立 SharedPreferences（mbox_crash_page_theme；契约与着色在 thirdparty 的 CrashPageTheme，写方为 app 的 theme/CrashPageThemeSync，幂等写入），崩溃页只做一次轻量读取上色；无投影值时保持静态 AppTheme 外观，着色全程吞异常，不得让错误页再崩。该 SP 为派生数据，不进配置键体系、不参与备份还原。
+局域网配置扫码与导入（2026-10-05 用户口径，与 AGENTS.md §七 同步）：扫描有效连接二维码后直接使用链接与配对码连接，不回填输入框要求再点“连接”；取消或无效二维码不得自动连接。配置导入成功并完成落盘后自动重启 App，发起前显式标记内部重启，不得触发烟花、自动检查更新与首页“上次看到”等用户启动动作；导入失败须恢复本轮写入前的记录和配置（含主题、背景图与本地订阅文件），不自动重启。只有完整恢复才可提示已恢复；恢复异常须明确提示并保留文件快照。发起重启失败时撤销来源标记并提示。
+
+本地备份还原前的系统保护（2026-10-05 用户口径，与 AGENTS.md §七 同步）：使用本地 ZIP 或旧版目录备份前，先为当前设置/订阅与播放历史/收藏创建系统临时备份；保护备份失败则停止还原。系统备份存于应用私有目录，名称使用真实本地时间 yyyy-MM-dd-HH-mm-临时备份数据，按数据内容 SHA-256 去重（不把 ZIP 时间、条目顺序与清单元数据计入），同数据复用并更新保护时间，另以归档 SHA-256 校验完整性。列表删除入口改为由 D:\Code\Video\LiteIcon\说明2.svg 转换的说明图标，点击说明自动备份及回滚用途；系统备份禁止手动删除。用户主动使用系统备份还原成功后删除该项，失败保留；其余系统备份在距最近保护时间满一小时后的下一次 App 启动清理，清理在首页首帧后交共享后台执行器，不得删除正在使用的备份或普通手动备份。还原失败自动尝试回滚，只有完整恢复才能提示已恢复；系统回滚须恢复原设置键集合与原数据库缺失状态，本机私有/鉴权与证书开关不跨备份迁移。成功还原显式标记内部重启后重启 App。
+
+日志独立与备份操作留痕（2026-10-05 用户口径，与 AGENTS.md §七 同步）：手动备份、系统临时备份及其还原/回滚均不得复制、覆盖或删除独立日志数据库与 app_logs 文件；日志开关、级别和保留天数（app_log/log_level/log_retention）不参与备份/配置转移，旧包中的这些键忽略，系统精确回滚也保留本机日志配置。手动备份创建/删除、系统备份创建/去重复用/使用后删除/到期删除均须经 LogStore 记录业务日志，包含备份名、删除原因与成功/失败状态，批量部分成功必须逐项如实记录。沿用本机日志门控，备份操作不强制开启日志；还原自动重启前须在共享后台执行器限时冲刷并等待已接收业务日志写入，不得在主线程等待，日志写入异常不得把已提交的还原改报失败。
+开屏只并行预取首页数据，用动画缓冲较长的数据加载；可见期间不装配或绘制首页 Fragment/组件，首页壳（ViewPager、底栏）也延迟 inflate，不能只设 GONE 掩盖已创建的组件。遮罩关闭后才创建首页 Fragment、装配子页面并绘制首帧，让用户看到组件出现。
+数据先就绪可提前撤下动画；动画只播一次，先播完则停留最后帧 300ms 后直接进入首页，不继续等数据，也不设 20 秒内容兜底（素材解析或播放异常的兜底保留）。慢请求在入场后由首页接收同一轮结果，不得重复发起首屏请求。默认热播、订阅分类和关闭主页推荐时的首分类可在开屏预取，大块 XML/JSON 解析不能占用动画主线程；气泡、提示及自动检查等可见窗口须等首页首帧后再派发。节日素材选择集中在 SplashContentSelector，图片或视频类型按需扩展（与 AGENTS.md §七 同步）。
+启动来源统一判定（2026-10-04 用户口径，与 AGENTS.md §七 同步）：只有用户主动从桌面/启动器重新打开 App 的真正启动，才触发开屏烟花、自动检查更新与首页“上次看到”；这些动作仍须遵守各自的首帧和展示时序。更换主题、订阅源、开启本地服务等配置生效流程发起的进程/任务重启属于内部重启：发起方须显式传递一次性启动来源标记，新主页创建时消费，不得仅以启动页进入 MainActivity、进程冷启动或 Activity 重建推断用户主动启动。后台返回、Activity 重建/系统恢复与内部重启均不触发上述用户启动动作，也不消耗烟花次数；内部重启仍正常完成开屏、配置装配与首页初始化。
+“我的”页节日与启动烟花（2026-10-04 用户口径，与 AGENTS.md §七 同步）：“我的”页顶部左侧沿用当前应用名，大字单行显示（Debug 后缀也不得换行）；右侧仅在节日当天显示节日名（12sp），与应用名底部对齐，平日留空，不显示公历日期与农历日期；不要放到首页。节日烟花只在符合上述用户主动启动判定、开屏关闭且底栏完成首帧后播放；切后台再回来、应用内页面返回、Activity 重建/系统恢复及内部重启均不触发、不占次数。每组重复原有手指长按的 3 朵错峰动作，组与组也错开，不能同时齐射：普通宽度底栏在两个图标中心及中点各放一组，共 3 组 9 朵；底栏宽度达到 600dp 的大屏，再加入左边缘与左图标中心的中点、右图标中心与右边缘的中点，共 5 组 15 朵。元旦、除夕、农历正月初二至初十每个本地自然日最多 3 轮，第 2/3 轮分别距上一次实际发射至少 2 小时（满 2 小时可触发）；农历正月初一每次真正启动都发射，不限次数、无冷却。记录按本地日期持久化，次日启动时有旧记录才删除，没有记录就跳过；动画未启动不占次数。清理、准入或拒绝、发射、撤销都写 LogStore 业务日志。Debug 与 Release 均使用设备真实本地日期和时间；节日显示、烟花准入与跨日清理共用真实时钟，禁止固定节日预览日期。
+节日规则以单独 JSON 为准（2026-10-04，与 AGENTS.md §七 同步）：现有节日和二十四节气的名称、简介、显示与否、是否播放启动烟花、每日轮数、下一轮冷却小时数统一在一份节日 JSON 中维护；二十四节气须能在“我的”页顶部节日位置显示，但节气不得触发烟花，即使 JSON 将其烟花开关设为 true 也忽略；公历 10 月 1 日国庆节应播放烟花。公历/农历条目使用相同日期字段与配置字段，只由 `type` 决定日期换算；农历闰月不得重复命中普通节日，同日节日撞日时显示与烟花分别匹配，不能因显示优先级漏播。受限节日沿用每天最多 3 轮、相邻实际发射至少 2 小时；春节初一用配置表达不限次数和冷却。冷却小时数只接受 1～23 的整数，缺失、非整数或越界均按 1 小时处理。JSON 同时预留按节日选择开屏素材的配置入口，未配置时保持现有开屏动画；禁止在代码里复制维护第二份节日规则。
+节日文件固定在 `app/src/main/assets/calendar/holidays.json`：最上面的根级 `desc` 对象说明各字段意义，每条节日另保留字符串 `desc` 简介。每条都有 `id/name/desc/type/month/day/endDay/dateRule/term/includeLeapMonth/display/displayPriority/fireworks/splash`，公历/农历同构。`fixed` 按日期或日期段、`last_day` 按月末、`solar_term` 按节气计算（二十四节气均在 JSON 中显式列出）；农历正月初二至初十只参与烟花，不显示节日名。同一天跨历法的多个可显示名称须全部显示，用 `·` 分隔，按 `displayPriority` 从高到低排列；同一历法的可显示条目若重复配置同日/重叠固定区间、重复月末或同名节气，构建直接报错，跨历法真实撞日允许。烟花独立取 JSON 顺序第一条启用的非节气规则，每次启动仍只发一轮。`fireworks.maxLaunchesPerDay=0` 才表示不限次数，其余负数/非整数视为无效配置；`splash` 预留 `none/lottie/image/video` 类型的节日素材元数据，未配置的节日继续现有开屏效果。
+后续真正启用节日专属开屏时，必须让冷启动的素材选择及时拿到节日目录，同时保持开屏动画立即启动、不等待目录 I/O；当前所有 `splash.enabled=false`，图片/视频渲染器尚未接入，不能仅改 JSON 开关就宣称图片/视频开屏可用。
+组间时序补充：每次先随机打乱 3/5 个发射点的播放顺序，不能固定从左到右，每个点仍恰好放一组。第一组立即启动，后续每组相对前一组随机延后 100～500ms（逐组累加），不必等前组结束，允许交叠；每组内部仍按原长按动作错峰。“3/5 组”是单次启动中的动画组数，“每日最多 3 轮”是不同启动次数，不能混淆。
+订阅启动的文本解码、Gson 建树、站点/解析/直播/解码配置装配、缓存与偏好落盘、Jar 校验/加载均交给 :spider 模块共享执行器；完整配置快照、嗅探规则与广告名单就绪后在主线程整体替换引用并派发回调，禁止后台原地修改已发布集合。配置与 Jar 请求须保留过期自检；Jar 下载按请求隔离，加载成功后才提交缓存和候选加载器，加载失败或请求过期须恢复旧缓存，进程中断后的备份也须在下次校验前恢复。首页分类与列表解析继续使用共享执行器（与 AGENTS.md §二 同步）。
+
+七、下一步顺序
+
+1. 在真机回归条件具备时收口播放器内核能力，拆 PlayFragment 与 DetailActivity。
+2. 依赖边界稳定后再评估 playback shell 和 feature-* 模块，不为搬目录而拆模块。
+3. 按需推进 Java→Kotlin（新增源码一律 .kt，见 AGENTS.md §六.9）、StateFlow 和 Hilt；Media3、EventBus 移除、Hawk→DataStore 及模块门禁已落地，勿重复列为待办。
+
+八、现状模块清单
+
+:app                    应用入口、导航、依赖装配、页面和通用 UI 资源
+:common                 纯模型、算法工具、系统状态
+:core-network           网络客户端与策略
+:core-storage           Room、缓存、类型安全配置
+:log                    结构化日志与 Logcat 采集
+:spider                 爬虫契约与实现
+:player                 播放契约与内核实现
+:download               下载 Facade 与内部实现
+:share                  分享/导入导出契约与可插拔传输实现
+:thirdparty             TabLayout、CustomActivityOnCrash、QuickJS 等纯第三方代码
+
+尚未建立 playback 和 feature-* 模块；app 内的 ui/kit 已承载通用组件，成熟后再评估是否拆出。强制边界靠公开契约与 checkModuleDependencies 维护，不以模块数量为目标。
+
+九、发布与版本纪律（与 AGENTS.md 同步维护）
+1. Release / 更新说明只写“用户关注的内容”，禁止照搬 commit 列表：
+   按「新增功能 / 功能变更 / 移除停用 / 问题修复 / 体验与性能 / 兼容性注意」归并，
+   用“用户做了什么 → 会有什么变化”的句式，重要变更置顶，措辞克制不夸大。
+
+2. 开发者事项一律不进用户可见正文（已发生过把 AGENTS 规则文件改动写进 Release 的事故）：
+   - 规则/流程/文档类：AGENTS.md、改进.txt、doc/**、README、Git 提交规范等纯文档改动；
+   - 构建与发布体系：Gradle/AGP/依赖版本升级、依赖重构、CI、签名与打包脚本、版本号提升（chore(版本)）；
+   - 代码结构类：模块拆分与分层、接口抽取、命名与目录调整、死代码清理、内部机制替换
+     （用户能感知则写“效果”，不写“机制”）；
+   - 测试与门禁：单测、离线校验脚本、依赖门禁任务；
+   - 纯内部实现细节（占位符实现方式、日志埋点、注释、性能埋点等）。
+   判断标准：这条改动，普通用户看完能不能一句话说出“对我有什么用”；说不出就不写。
+   哪怕一次发版里内部改动占绝大多数，也只写用户可感知的那几条，宁少而准。
+
+3. 需要另存给开发者看的内部信息，包在 <!-- dev --> … <!-- /dev --> 围栏里（围栏须独占一行），
+   App「检查更新」弹窗会自动剔除；GitHub 网页不渲染 HTML 注释，网页正文依旧完整。
+   - 有用户可读内容的 doc/release-notes-<tag>.md 顶部至多写一个本版标题；CI 只原样贴手写正文，
+     不得再自动补 ## <tag>。正文缺失或全在开发者围栏内时，不得留下用户可见的孤立版本标题。
+   - App 汇总先清理连续重复标题及旧版对比引言，再判该版是否真有用户可读内容；纯标题/纯开发者
+     版本不计入说明条目。只展示一个版本不得称“跨 2 个版本”；“从 vX 到 vY”必须以实际已安装版本为起点。
+     发布前检查最终 Release 正文和 App 清洗结果；修已发布内容须编辑线上 Release，改文档或重跑旧 tag
+     不会让旧工作流采用新逻辑。（2026-10-03，与 AGENTS.md §九 同步）
+
+4. 发布前必须逐条自检：正文里不得出现 AGENTS、改进.txt、doc/、chore(、refactor(、docs(、ci(、test(、
+   依赖、模块、重构、门禁、单测、Gradle、versionCode、commit 短号等字样；命中就挪进围栏或直接删掉。
+
+5. 每次 push 若用户没有指定版本，先提升一次小版本号（versionName 末段 +1 并同步 versionCode）；
+   同时把 debugVersionName 设为上一版实际发布的版本号，不能按新版末段减 1 推算（版本可能跳号）；
+   打 tag 基于最新 versionName；出正式包基于最新 tag 对应版本；用户有明确说明时以用户说明为准。
+
+5b. 分支与发包流程（dev 先行，合到 main 才发包）：日常只提交并推送 dev，不在 dev 打 tag、不在 dev 发包；
+    确认 dev 没问题后，用合并提交（merge）合到 main，再在 main 最新提交上打 vX.Y.Z tag，由 CI 用 tag 发包。
+    流程固定为「dev 提交/推送 → 验证无问题 → merge 合 main → 在 main 打 tag → CI 发包」。
+    日常不发包时只 push dev，不升版本、不打 tag、不动 main；合并固定用 merge（不用 rebase/squash/fast-forward）。
+    用户明确说“只提 dev”或“直接发 dev 的包”时以当次指令为准，默认走上面流程。
+
+6. debug 构建产物严禁提交（除非用户明确要求并二次确认）。
+   发布含中文内容必须显式 UTF-8 写入并以字节发送，发布后抽查是否出现连续 “?” 乱码。
+
+## 下载鉴权与存储的持续约束（2026-10-01）
+
+- 下载权限必须按实际保存路径判断；Android 11+ 的应用私有目录不得要求“所有文件访问”权限。仅 Wi-Fi 等待属于排队状态。
+- URL、Cookie、Referer、UA 与自定义请求头通过公开契约刷新并原子替换；下载模块不得直接访问 WebView、ApiConfig 或具体登录实现，暂停/过期任务不得回写结果。
+- HLS 续传必须核对媒体序列、分片路径与顺序、字节范围、密钥/IV、init 布局；不能仅凭数组下标复用，也不能仅因短时鉴权参数变化清空进度。无法安全确认时暂停或清理后重下。
+- 401/403 先有限续期，404/410 先有限短重试并刷新清单，再确认永久缺片；登录失效必须可恢复暂停，不得高频循环请求旧地址。分片 URL 不整表持久化。

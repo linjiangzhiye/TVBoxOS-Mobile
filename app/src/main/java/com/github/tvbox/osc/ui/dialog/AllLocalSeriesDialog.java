@@ -1,19 +1,15 @@
 package com.github.tvbox.osc.ui.dialog;
 
 import android.content.Context;
-import android.view.View;
-
 import androidx.annotation.NonNull;
 import androidx.recyclerview.widget.GridLayoutManager;
 import androidx.recyclerview.widget.RecyclerView;
 
-import com.blankj.utilcode.util.ColorUtils;
 import com.github.tvbox.osc.R;
 import com.github.tvbox.osc.bean.VodInfo;
 import com.github.tvbox.osc.ui.adapter.SeriesAdapter;
-import com.github.tvbox.osc.ui.widget.GridSpacingItemDecoration;
+import com.github.tvbox.osc.ui.kit.GridSpacingItemDecoration;
 import com.github.tvbox.osc.util.Utils;
-import com.lxj.xpopup.core.DrawerPopupView;
 import com.lxj.xpopup.interfaces.OnSelectListener;
 
 import org.jetbrains.annotations.NotNull;
@@ -26,7 +22,7 @@ import java.util.List;
  * @Date : on 2023/10/25 10:43.
  * @Description : 本地视频全集弹窗
  */
-public class AllLocalSeriesDialog extends DrawerPopupView {
+public class AllLocalSeriesDialog extends AppDrawerPopupView {
 
     List<VodInfo.VodSeries> mList;
     private final OnSelectListener mSelectListener;
@@ -45,9 +41,7 @@ public class AllLocalSeriesDialog extends DrawerPopupView {
     @Override
     protected void onCreate() {
         super.onCreate();
-        View bg = findViewById(R.id.bg);
-        bg.setBackgroundColor(ColorUtils.getColor(R.color.bg_popup));
-        findViewById(R.id.v_gesture_line).setVisibility(GONE);
+        findViewById(R.id.v_drag_zone).setVisibility(GONE); // 右侧抽屉无拖拽手势条,隐藏热区
         RecyclerView rv = findViewById(R.id.rv);
 
         rv.setLayoutManager(new GridLayoutManager(getContext(), Utils.getSeriesSpanCount(mList)));
