@@ -39,6 +39,14 @@ jobs:
           distribution: temurin
           java-version: '17'
 
+      - name: Set up Python 3.10 for Chaquopy
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Configure Chaquopy build Python
+        run: echo "CHAQUOPY_BUILD_PYTHON=$(python3 -c 'import sys; print(sys.executable)')" >> "$GITHUB_ENV"
+
       # 校验 gradle wrapper 并缓存依赖,加速后续构建
       - name: Setup Gradle
         uses: gradle/actions/setup-gradle@v4

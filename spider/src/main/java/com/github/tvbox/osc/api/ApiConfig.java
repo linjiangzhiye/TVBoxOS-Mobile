@@ -79,6 +79,7 @@ public class ApiConfig implements com.github.tvbox.osc.spiderapi.SourceConfigApi
         appContext = context == null ? null : context.getApplicationContext();
         com.github.catvod.crawler.JarLoader.setContext(context);
         com.github.catvod.crawler.JsLoader.setContext(context);
+        pyLoader.setContext(context);
         com.github.tvbox.osc.util.FileUtils.setContext(context);
         com.github.tvbox.osc.util.UA.setContext(context);
         com.github.tvbox.osc.util.js.local.setContext(context);
@@ -152,6 +153,7 @@ public class ApiConfig implements com.github.tvbox.osc.spiderapi.SourceConfigApi
 
     private volatile JarLoader jarLoader = new JarLoader();
     private JsLoader jsLoader = new JsLoader();
+    private final com.github.catvod.crawler.pyLoader pyLoader = new com.github.catvod.crawler.pyLoader();
 
     private String userAgent = "okhttp/3.15";
 
@@ -388,6 +390,7 @@ public class ApiConfig implements com.github.tvbox.osc.spiderapi.SourceConfigApi
             // 被新订阅的搜索继续命中复用(此前靠搜索页 onDestroy 的 resetSources 暴力兜底,
             // 现 onDestroy 已改为 stopAllSourceTasks 不再销毁实例,这里必须显式清理)。
             com.github.catvod.crawler.JsLoader.load();
+            pyLoader.clear();
             ConfigBuilder cleared = new ConfigBuilder();
             String userLiveUrl = SystemConfig.getLiveUrl();
             if (!StringUtils.isBlank(userLiveUrl)) {
@@ -986,6 +989,7 @@ public class ApiConfig implements com.github.tvbox.osc.spiderapi.SourceConfigApi
         if (sitesEl == null || !sitesEl.isJsonArray()) {
             throw new IllegalStateException("不是订阅配置(缺少 sites):" + apiUrl);
         }
+        pyLoader.setConfig(infoJson.toString());
         for (JsonElement opt : sitesEl.getAsJsonArray()) {
             JsonObject obj = (JsonObject) opt;
             SourceBean sb = new SourceBean();
@@ -1375,9 +1379,14 @@ public class ApiConfig implements com.github.tvbox.osc.spiderapi.SourceConfigApi
     }
 
     public Spider getCSP(SourceBean sourceBean) {
-        boolean js = sourceBean.getApi().endsWith(".js") || sourceBean.getApi().contains(".js?");
-        if (js) return jsLoader.getSpider(sourceBean.getKey(), sourceBean.getApi(), sourceBean.getExt(), sourceBean.getJar());
-        return jarLoader.getSpider(sourceBean.getKey(), sourceBean.getApi(), sourceBean.getExt(), sourceBean.getJar());
+        String api = sourceBean.getApi();
+        if (api.contains(".py")) {
+            pyLoader.setRecentPyKey(sourceBean.getKey());
+            return pyLoader.getSpider(sourceBean.getKey(), api, sourceBean.getExt());
+        }
+        boolean js = api.endsWith(".js") || api.contains(".js?");
+        if (js) return jsLoader.getSpider(sourceBean.getKey(), api, sourceBean.getExt(), sourceBean.getJar());
+        return jarLoader.getSpider(sourceBean.getKey(), api, sourceBean.getExt(), sourceBean.getJar());
     }
 
     @SuppressWarnings("unchecked")
@@ -1389,6 +1398,9 @@ public class ApiConfig implements com.github.tvbox.osc.spiderapi.SourceConfigApi
         Object doParam = param == null ? null : param.get("do");
         if ("js".equals(String.valueOf(doParam).trim())) {
             return jsLoader.proxyInvoke((Map<String, String>) param);
+        }
+        if ("py".equals(String.valueOf(doParam).trim())) {
+            return pyLoader.proxyInvoke((Map<String, String>) param);
         }
         return jarLoader.proxyInvoke(param);
     }
