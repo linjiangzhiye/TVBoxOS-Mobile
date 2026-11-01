@@ -1077,16 +1077,13 @@ class HomeFragment : BaseVbFragment<FragmentHomeBinding>() {
         val shownAt = android.os.SystemClock.uptimeMillis()
         bubbleUntil = shownAt + BUBBLE_SHOW_MS
         host.onStartupBubbleVisible(bubbleUntil)
-        val visibleContent = fragments.getOrNull(mBinding.mViewPager.currentItem)
-        val liveBubble = visibleContent?.view?.findViewById<View>(R.id.btn_live)
-        val bubble = LastViewedDialog(host, vod, mBinding.root, liveBubble)
+        val bubble = LastViewedDialog(host, vod, mBinding.root, null)
         lastViewedBubble = bubble
         XPopup.Builder(host)
             .hasShadowBg(false)
             .isDestroyOnDismiss(true)
             .isCenterHorizontal(true)
             .isTouchThrough(true)
-            // 没有可见直播球时沿用原位置；有直播球时保持水平居中并按空间选择同排或上移。
             .offsetY(ScreenUtils.getAppScreenHeight() - ConvertUtils.dp2px(155f + 44f))
             .asCustom(bubble)
             .show()
