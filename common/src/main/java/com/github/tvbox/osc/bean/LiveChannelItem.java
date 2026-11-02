@@ -19,6 +19,10 @@ public class LiveChannelItem {
     private int channelIndex;
     private int channelNum;
     private String channelName;
+    private String channelLogo;
+    private String epgUrl;
+    private String tvgId;
+    private String tvgName;
     private ArrayList<String> channelSourceNames;
     private ArrayList<String> channelUrls;
     public int sourceIndex = 0;
@@ -55,6 +59,42 @@ public class LiveChannelItem {
 
     public String getChannelName() {
         return channelName;
+    }
+
+    /** 频道台标；直播源未提供时为空。 */
+    public String getChannelLogo() {
+        return channelLogo;
+    }
+
+    public void setChannelLogo(String channelLogo) {
+        this.channelLogo = channelLogo;
+    }
+
+    /** 频道自带的 EPG 地址；可为 XMLTV，也可为支持 {name}/{date} 模板的接口。 */
+    public String getEpgUrl() {
+        return epgUrl;
+    }
+
+    public void setEpgUrl(String epgUrl) {
+        this.epgUrl = epgUrl;
+    }
+
+    /** M3U/XMLTV 频道标识，EPG 匹配优先使用。 */
+    public String getTvgId() {
+        return tvgId;
+    }
+
+    public void setTvgId(String tvgId) {
+        this.tvgId = tvgId;
+    }
+
+    /** M3U 中用于节目单查询的频道名。 */
+    public String getTvgName() {
+        return tvgName;
+    }
+
+    public void setTvgName(String tvgName) {
+        this.tvgName = tvgName;
     }
 
     public ArrayList<String> getChannelUrls() {

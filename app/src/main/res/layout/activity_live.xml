@@ -39,6 +39,15 @@
 			android:layout_marginRight="@dimen/dp_5"
 			android:gravity="center"
 			android:orientation="vertical">
+			<ImageView
+				android:id="@+id/iv_channel_logo"
+				android:layout_width="32dp"
+				android:layout_height="32dp"
+				android:layout_marginBottom="2dp"
+				android:contentDescription="@null"
+				android:scaleType="centerInside"
+				android:visibility="gone"
+				tools:visibility="visible" />
 			<com.github.tvbox.osc.ui.tv.widget.MarqueeTextView
 				android:id="@+id/tv_channel_bar_name"
 				android:layout_width="wrap_content"
@@ -72,6 +81,43 @@
 		</LinearLayout>
 
 		<LinearLayout
+			android:id="@+id/epg_program_info"
+			android:layout_width="match_parent"
+			android:layout_height="wrap_content"
+			android:layout_centerVertical="true"
+			android:layout_marginStart="4dp"
+			android:layout_marginEnd="8dp"
+			android:layout_toLeftOf="@id/epg_source_controls"
+			android:layout_toRightOf="@id/channelinfo"
+			android:orientation="vertical">
+
+			<TextView
+				android:id="@+id/tv_epg_current"
+				android:layout_width="match_parent"
+				android:layout_height="wrap_content"
+				android:ellipsize="end"
+				android:maxLines="2"
+				android:text="节目信息加载中…"
+				android:textColor="@color/text_foreground"
+				android:textSize="13sp"
+				android:textStyle="bold" />
+
+			<TextView
+				android:id="@+id/tv_epg_next"
+				android:layout_width="match_parent"
+				android:layout_height="wrap_content"
+				android:layout_marginTop="4dp"
+				android:ellipsize="end"
+				android:maxLines="1"
+				android:textColor="@color/text_foreground"
+				android:textSize="12sp"
+				android:visibility="gone"
+				tools:visibility="visible"
+				tools:text="下一：节目名称  21:00-22:00" />
+		</LinearLayout>
+
+		<LinearLayout
+			android:id="@+id/epg_source_controls"
 			android:layout_width="wrap_content"
 			android:layout_height="wrap_content"
 			android:layout_marginRight="20dp"

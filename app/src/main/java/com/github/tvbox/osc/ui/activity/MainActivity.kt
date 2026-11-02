@@ -74,11 +74,13 @@ class MainActivity : BaseVbActivity<ActivityMainBinding>(), UserStartupGate {
 
     companion object {
         const val EXTRA_STARTUP_SPLASH = "com.github.tvbox.osc.STARTUP_SPLASH"
-        private const val POST_ANIMATION_HOLD_MS = 300L
-        private const val ANIMATION_LOAD_TIMEOUT_MS = 10_000L
-        private const val ANIMATION_PLAYBACK_GRACE_MS = 3_000L
-        private const val IMAGE_LOAD_TIMEOUT_MS = 3_000L
-        private const val IMAGE_ONLY_DISPLAY_MS = 1_000L
+        private const val POST_ANIMATION_HOLD_MS = 120L
+        private const val ANIMATION_LOAD_TIMEOUT_MS = 1_500L
+        private const val ANIMATION_PLAYBACK_GRACE_MS = 500L
+        private const val IMAGE_LOAD_TIMEOUT_MS = 1_500L
+        private const val IMAGE_ONLY_DISPLAY_MS = 350L
+        /** 开屏总时长硬上限：网络/数据/动画再慢也不能无限停留。 */
+        private const val SPLASH_HARD_TIMEOUT_MS = 1_500L
 
         /** 底栏「首页」项在"列表已离开顶部"时的标题(常态标题仍由 res/menu/main_bottom_navigation.xml 给出) */
         private const val BACK_TO_TOP_TITLE = "回到顶部"
@@ -148,6 +150,12 @@ class MainActivity : BaseVbActivity<ActivityMainBinding>(), UserStartupGate {
     private val finishStartupSplash = Runnable {
         startup.onAnimationTailReady()
         maybeDismissStartupSplash()
+    }
+    private val splashHardTimeout = Runnable {
+        if (startup.splashVisible) {
+            startup.onAnimationTailReady()
+            maybeDismissStartupSplash()
+        }
     }
     private val animationLoadTimeout = Runnable {
         // 素材解析失败或过慢时退场；正常动画按播完后停留 300ms 退场。
@@ -755,6 +763,8 @@ class MainActivity : BaseVbActivity<ActivityMainBinding>(), UserStartupGate {
         imageOnlyFallback = null
         window.addFlags(WindowManager.LayoutParams.FLAG_FULLSCREEN)
         overlay.visibility = View.VISIBLE
+        overlay.removeCallbacks(splashHardTimeout)
+        overlay.postDelayed(splashHardTimeout, SPLASH_HARD_TIMEOUT_MS)
         // 仅对素材解析加兜底；正常播放不被超时截断。
         overlay.postDelayed(animationLoadTimeout, ANIMATION_LOAD_TIMEOUT_MS)
         // 开屏素材立即开始；节日目录在首帧后由预取任务后台加载。
@@ -790,6 +800,7 @@ class MainActivity : BaseVbActivity<ActivityMainBinding>(), UserStartupGate {
                 loadSplashBackgroundImage(content.backgroundImagePath) { }
                 mBinding.startupSplashAnimation.apply {
                     repeatCount = 0
+                    speed = 1.5f
                     setFailureListener {
                         if (startup.splashVisible) overlay.post(animationLoadTimeout)
                     }
@@ -928,6 +939,7 @@ class MainActivity : BaseVbActivity<ActivityMainBinding>(), UserStartupGate {
         // 开屏未能绘制首帧的极端情况，改在首页首次显示后启动数据预取。
         mBinding.startupSplashOverlay.removeCallbacks(startStartupHomePrefetch)
         mBinding.startupSplashOverlay.removeCallbacks(finishStartupSplash)
+        mBinding.startupSplashOverlay.removeCallbacks(splashHardTimeout)
         mBinding.startupSplashOverlay.removeCallbacks(animationLoadTimeout)
         mBinding.startupSplashOverlay.removeCallbacks(animationPlaybackTimeout)
         mBinding.startupSplashOverlay.removeCallbacks(imageLoadTimeout)

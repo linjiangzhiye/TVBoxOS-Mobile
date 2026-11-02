@@ -57,6 +57,8 @@ import com.github.tvbox.osc.util.HttpClient;
 import com.github.tvbox.osc.util.HeavyTaskUtil;
 import com.github.tvbox.osc.util.LiveConfig;
 import com.github.tvbox.osc.util.LiveSourceEntries;
+import com.github.tvbox.osc.util.live.LiveEpgRepository;
+import com.github.tvbox.osc.util.live.LiveSourceCache;
 import com.github.tvbox.osc.util.live.TxtSubscribe;
 import xyz.doikki.videoplayer.player.PlaybackErrorReporter;
 import com.google.gson.JsonArray;
@@ -104,8 +106,16 @@ public class LiveActivity extends BaseActivity implements LiveLineSelectHost, Li
     TextView tip_chname;
 
     TextView tv_srcinfo;
+    TextView tv_epg_current;
+    TextView tv_epg_next;
+    ImageView iv_channel_logo;
 
     private boolean isBack = false;
+    private static final long EPG_LOAD_DELAY_MS = 1_200L;
+    private int epgLoadEpoch = 0;
+    private Object epgRequestTag = null;
+    private boolean epgHasDataForCurrent = false;
+    private final Runnable loadCurrentEpgRunnable = this::loadCurrentEpg;
     private volatile int liveLoadEpoch = 0;
     /** 本次加载频道列表时的直播源签名(SystemConfig.getLiveUrl());回前台比对变化用 */
     private String loadedLiveUrl = null;
@@ -180,6 +190,9 @@ public class LiveActivity extends BaseActivity implements LiveLineSelectHost, Li
         tv_channelnum = findViewById(R.id.tv_channel_bottom_number); //底部数字
 
         tv_srcinfo = findViewById(R.id.tv_source);//线路状态
+        tv_epg_current = findViewById(R.id.tv_epg_current);
+        tv_epg_next = findViewById(R.id.tv_epg_next);
+        iv_channel_logo = findViewById(R.id.iv_channel_logo);
 
         //源切换
         findViewById(R.id.ic_pre_source).setOnClickListener(view -> playPreSource());
@@ -202,16 +215,118 @@ public class LiveActivity extends BaseActivity implements LiveLineSelectHost, Li
         initLiveChannelList();
     }
 
-    //显示底部EPG
-    private void showBottomEpg() {
-        if (channel_Name.getChannelName() != null) {
-            mSideControlView.setTitle(channel_Name.getChannelName());
-            if (mNormalControlView != null) mNormalControlView.setTitle(channel_Name.getChannelName());
-            tip_chname.setText(channel_Name.getChannelName());
-            tv_channelnum.setText("" + channel_Name.getChannelNum());
-            //todo 上一/下一/当前节目信息
+    // 显示底部频道/台标/EPG；节目信息只更新现有信息条，不改变直播页布局。
+    private void showBottomEpg(boolean resetProgram) {
+        LiveChannelItem item = currentLiveChannelItem != null ? currentLiveChannelItem : channel_Name;
+        if (item == null || item.getChannelName() == null) return;
+        mSideControlView.setTitle(item.getChannelName());
+        if (mNormalControlView != null) mNormalControlView.setTitle(item.getChannelName());
+        tip_chname.setText(item.getChannelName());
+        tv_channelnum.setText(String.valueOf(item.getChannelNum()));
+        showChannelLogo(item);
+        if (resetProgram) {
+            epgHasDataForCurrent = false;
+            tv_epg_current.setText("节目信息加载中…");
+            tv_epg_next.setText("");
+            tv_epg_next.setVisibility(View.GONE);
         }
         updateLineText();
+    }
+
+    private void showChannelLogo(LiveChannelItem item) {
+        if (iv_channel_logo == null) return;
+        com.squareup.picasso.Picasso.get().cancelRequest(iv_channel_logo);
+        iv_channel_logo.setImageDrawable(null);
+        String logo = item == null ? "" : item.getChannelLogo();
+        if (logo == null) logo = "";
+        logo = logo.trim();
+        if (logo.isEmpty() || "false".equalsIgnoreCase(logo) || !(logo.startsWith("http://") || logo.startsWith("https://"))) {
+            iv_channel_logo.setVisibility(View.GONE);
+            return;
+        }
+        String replaceName = item.getTvgName();
+        if (replaceName == null || replaceName.trim().isEmpty()) replaceName = item.getChannelName();
+        logo = logo.replace("{name}", replaceName == null ? "" : replaceName);
+        iv_channel_logo.setVisibility(View.VISIBLE);
+        final String requestedLogo = logo;
+        iv_channel_logo.setTag(requestedLogo);
+        com.squareup.picasso.Picasso.get().load(logo).fit().centerInside()
+                .into(iv_channel_logo, new com.squareup.picasso.Callback() {
+                    @Override
+                    public void onSuccess() {
+                        if (iv_channel_logo != null) iv_channel_logo.setVisibility(View.VISIBLE);
+                    }
+
+                    @Override
+                    public void onError(Exception e) {
+                        if (iv_channel_logo != null && requestedLogo.equals(itemLogoTag())) {
+                            iv_channel_logo.setVisibility(View.GONE);
+                        }
+                    }
+                });
+    }
+
+    private String itemLogoTag() {
+        Object tag = iv_channel_logo == null ? null : iv_channel_logo.getTag();
+        return tag instanceof String ? (String) tag : "";
+    }
+
+    private void scheduleEpgLoad() {
+        epgLoadEpoch++;
+        epgHasDataForCurrent = false;
+        mHandler.removeCallbacks(loadCurrentEpgRunnable);
+        LiveEpgRepository.cancel(epgRequestTag);
+        epgRequestTag = new Object();
+        mHandler.postDelayed(loadCurrentEpgRunnable, EPG_LOAD_DELAY_MS);
+    }
+
+    private void loadCurrentEpg() {
+        final LiveChannelItem item = currentLiveChannelItem;
+        final Object requestTag = epgRequestTag;
+        final int requestEpoch = epgLoadEpoch;
+        if (item == null || requestTag == null) return;
+        LiveEpgRepository.load(this, item, System.currentTimeMillis(), requestTag, programs -> {
+            if (requestEpoch != epgLoadEpoch || requestTag != epgRequestTag || item != currentLiveChannelItem) return;
+            if ((programs == null || programs.isEmpty()) && epgHasDataForCurrent) return;
+            showEpgPrograms(programs);
+        });
+    }
+
+    private void showEpgPrograms(java.util.List<LiveEpgRepository.Program> programs) {
+        if (tv_epg_current == null || tv_epg_next == null) return;
+        if (programs == null) programs = java.util.Collections.emptyList();
+        epgHasDataForCurrent = !programs.isEmpty();
+        long now = System.currentTimeMillis();
+        LiveEpgRepository.Program current = null;
+        LiveEpgRepository.Program next = null;
+        for (LiveEpgRepository.Program program : programs) {
+            if (program.getStartMs() <= now && now < program.getEndMs()) {
+                current = program;
+            } else if (program.getStartMs() > now) {
+                next = program;
+                break;
+            }
+        }
+        if (current != null) {
+            tv_epg_current.setText("当前：" + current.getTitle() + "  " + formatEpgTime(current.getStartMs()) + "-" + formatEpgTime(current.getEndMs()));
+        } else if (next != null) {
+            tv_epg_current.setText("当前：暂无节目");
+        } else {
+            tv_epg_current.setText("暂无节目信息");
+        }
+        if (next != null) {
+            tv_epg_next.setText("下一：" + next.getTitle() + "  " + formatEpgTime(next.getStartMs()) + "-" + formatEpgTime(next.getEndMs()));
+            tv_epg_next.setVisibility(View.VISIBLE);
+        } else {
+            tv_epg_next.setText("");
+            tv_epg_next.setVisibility(View.GONE);
+        }
+    }
+
+    private String formatEpgTime(long timeMs) {
+        java.text.SimpleDateFormat format = new java.text.SimpleDateFormat("HH:mm", Locale.CHINA);
+        format.setTimeZone(java.util.TimeZone.getTimeZone("GMT+8:00"));
+        return format.format(new Date(timeMs));
     }
 
     /** 同步线路文字(页面 tv_srcinfo 与全屏线路标签),只显示当前线路序号 */
@@ -353,6 +468,9 @@ public class LiveActivity extends BaseActivity implements LiveLineSelectHost, Li
     @Override
     protected void onDestroy() {
         liveLoadEpoch++;
+        epgLoadEpoch++;
+        LiveEpgRepository.cancel(epgRequestTag);
+        epgRequestTag = null;
         mHandler.removeCallbacksAndMessages(null);
         super.onDestroy();
         if (mVideoView != null) {
@@ -401,7 +519,8 @@ public class LiveActivity extends BaseActivity implements LiveLineSelectHost, Li
         }else {
             currentLiveChannelItem.setinclude_back(false);
         }
-        showBottomEpg();
+        showBottomEpg(!changeSource);
+        if (!changeSource) scheduleEpgLoad();
 
         mVideoView.setUrl(currentLiveChannelItem.getUrl());
         mVideoView.start();
@@ -674,51 +793,49 @@ public class LiveActivity extends BaseActivity implements LiveLineSelectHost, Li
      */
     public void loadProxyLives(String url, List<LiveChannelGroup> fallback) {
         final int requestEpoch = ++liveLoadEpoch;
+        final String sourceUrl;
         try {
             Uri parsedUrl = Uri.parse(url);
-            url = new String(Base64.decode(parsedUrl.getQueryParameter("ext"), Base64.DEFAULT | Base64.URL_SAFE | Base64.NO_WRAP), "UTF-8");
+            sourceUrl = new String(Base64.decode(parsedUrl.getQueryParameter("ext"),
+                    Base64.DEFAULT | Base64.URL_SAFE | Base64.NO_WRAP), "UTF-8");
         } catch (Throwable th) {
             useFallbackOrFail(fallback, "频道列表为空");
             return;
         }
         showLoading();
-        HttpClient.get(url, null, new HCallBack() {
+        HeavyTaskUtil.executeBigTask(() -> {
+            if (!isLiveLoadCurrent(requestEpoch)) return;
+            LiveSourceCache.Entry cached = LiveSourceCache.load(this, sourceUrl);
+            if (cached != null) {
+                mHandler.post(() -> {
+                    if (!isLiveLoadCurrent(requestEpoch)) return;
+                    applyLiveSource(requestEpoch, sourceUrl, cached.getGroups(), fallback, true);
+                });
+            } else {
+                mHandler.post(() -> fetchLiveSource(requestEpoch, sourceUrl, fallback));
+            }
+        });
+    }
 
+    private void fetchLiveSource(int requestEpoch, String sourceUrl, List<LiveChannelGroup> fallback) {
+        HttpClient.get(sourceUrl, null, new HCallBack() {
             @Override
             public void onSuccess(String content) {
                 HeavyTaskUtil.executeBigTask(() -> {
-                    if (requestEpoch != liveLoadEpoch) return;
+                    if (!isLiveLoadCurrent(requestEpoch)) return;
                     try {
-                        LinkedHashMap<String, LinkedHashMap<String, ArrayList<String>>> parsed = new LinkedHashMap<>();
-                        TxtSubscribe.parse(parsed, content);
-                        JsonArray livesArray = TxtSubscribe.live2JsonArray(parsed);
-                        if (requestEpoch != liveLoadEpoch) return;
+                        JsonArray livesArray = TxtSubscribe.parseToJsonArray(content);
+                        if (livesArray == null || livesArray.size() == 0) {
+                            mHandler.post(() -> {
+                                if (!isLiveLoadCurrent(requestEpoch)) return;
+                                useFallbackOrFail(fallback, "频道列表为空");
+                            });
+                            return;
+                        }
+                        LiveSourceCache.save(LiveActivity.this, sourceUrl, livesArray);
                         mHandler.post(() -> {
                             if (!isLiveLoadCurrent(requestEpoch)) return;
-                            com.github.tvbox.osc.spiderapi.LiveChannelConfigProviders.get().loadLivesAsync(livesArray,
-                                    new com.github.tvbox.osc.spiderapi.LiveChannelConfigApi.LoadCallback() {
-                                        @Override
-                                        public boolean isCurrent() {
-                                            return isLiveLoadCurrent(requestEpoch);
-                                        }
-
-                                        @Override
-                                        public void onResult(boolean success) {
-                                            if (!success) {
-                                                useFallbackOrFail(fallback, "直播源解析失败,请检查订阅中的直播源");
-                                                return;
-                                            }
-                                            List<LiveChannelGroup> list = com.github.tvbox.osc.spiderapi.LiveChannelConfigProviders.get().getChannelGroupList();
-                                            if (list.isEmpty()) {
-                                                useFallbackOrFail(fallback, "频道列表为空");
-                                                return;
-                                            }
-                                            liveChannelGroupList.clear();
-                                            liveChannelGroupList.addAll(list);
-                                            showSuccess();
-                                            initLiveState();
-                                        }
-                                    });
+                            applyLiveSource(requestEpoch, sourceUrl, livesArray, fallback, false);
                         });
                     } catch (Throwable th) {
                         mHandler.post(() -> {
@@ -737,6 +854,61 @@ public class LiveActivity extends BaseActivity implements LiveLineSelectHost, Li
                 com.github.tvbox.osc.log.LogStore.fail(com.github.tvbox.osc.log.Category.OTHER,
                         "直播: 直播源加载失败: " + (e == null ? "null" : e.getMessage()));
                 useFallbackOrFail(fallback, "直播源加载失败,请检查网络或直播源");
+            }
+        });
+    }
+
+    private void applyLiveSource(int requestEpoch, String sourceUrl, JsonArray livesArray,
+                                 List<LiveChannelGroup> fallback, boolean fromCache) {
+        com.github.tvbox.osc.spiderapi.LiveChannelConfigProviders.get().loadLivesAsync(livesArray,
+                new com.github.tvbox.osc.spiderapi.LiveChannelConfigApi.LoadCallback() {
+                    @Override
+                    public boolean isCurrent() {
+                        return isLiveLoadCurrent(requestEpoch);
+                    }
+
+                    @Override
+                    public void onResult(boolean success) {
+                        if (!success) {
+                            useFallbackOrFail(fallback, "直播源解析失败,请检查订阅中的直播源");
+                            return;
+                        }
+                        List<LiveChannelGroup> list =
+                                com.github.tvbox.osc.spiderapi.LiveChannelConfigProviders.get().getChannelGroupList();
+                        if (list.isEmpty()) {
+                            useFallbackOrFail(fallback, "频道列表为空");
+                            return;
+                        }
+                        liveChannelGroupList.clear();
+                        liveChannelGroupList.addAll(list);
+                        showSuccess();
+                        initLiveState();
+                        if (fromCache) refreshLiveSourceCache(requestEpoch, sourceUrl);
+                    }
+                });
+    }
+
+    /** 缓存先显示后，后台只刷新下一次打开使用的缓存，不替换当前频道列表、不打断播放。 */
+    private void refreshLiveSourceCache(int requestEpoch, String sourceUrl) {
+        HttpClient.get(sourceUrl, null, new HCallBack() {
+            @Override
+            public void onSuccess(String content) {
+                HeavyTaskUtil.executeBigTask(() -> {
+                    if (!isLiveLoadCurrent(requestEpoch)) return;
+                    try {
+                        JsonArray refreshed = TxtSubscribe.parseToJsonArray(content);
+                        if (refreshed != null && refreshed.size() > 0) {
+                            LiveSourceCache.save(LiveActivity.this, sourceUrl, refreshed);
+                        }
+                    } catch (Throwable ignored) {
+                        // 后台刷新失败时继续使用已展示的缓存。
+                    }
+                });
+            }
+
+            @Override
+            public void onError(Throwable e) {
+                // 静默刷新，不影响当前播放。
             }
         });
     }

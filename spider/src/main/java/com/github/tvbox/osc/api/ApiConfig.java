@@ -1300,9 +1300,18 @@ public class ApiConfig implements com.github.tvbox.osc.spiderapi.SourceConfigApi
             for (JsonElement channelElement : ((JsonObject) groupElement).get("channels").getAsJsonArray()) {
                 JsonObject obj = (JsonObject) channelElement;
                 LiveChannelItem liveChannelItem = new LiveChannelItem();
-                liveChannelItem.setChannelName(obj.get("name").getAsString().trim());
+                String channelName = DefaultConfig.safeJsonString(obj, "name", "Unnamed").trim();
+                liveChannelItem.setChannelName(channelName);
                 liveChannelItem.setChannelIndex(channelIndex++);
                 liveChannelItem.setChannelNum(++channelNum);
+                String logo = DefaultConfig.safeJsonString(obj, "logo", "");
+                if (logo.isEmpty()) logo = DefaultConfig.safeJsonString(obj, "tvg-logo", "");
+                liveChannelItem.setChannelLogo(logo);
+                String epgUrl = DefaultConfig.safeJsonString(obj, "epg", "");
+                if (epgUrl.isEmpty()) epgUrl = DefaultConfig.safeJsonString(obj, "tvg-url", "");
+                liveChannelItem.setEpgUrl(epgUrl);
+                liveChannelItem.setTvgId(DefaultConfig.safeJsonString(obj, "tvg-id", ""));
+                liveChannelItem.setTvgName(DefaultConfig.safeJsonString(obj, "tvg-name", ""));
                 ArrayList<String> urls = DefaultConfig.safeJsonStringList(obj, "urls");
                 ArrayList<String> sourceNames = new ArrayList<>();
                 ArrayList<String> sourceUrls = new ArrayList<>();
