@@ -115,6 +115,8 @@ public class LiveActivity extends BaseActivity implements LiveLineSelectHost, Li
     private int epgLoadEpoch = 0;
     private Object epgRequestTag = null;
     private boolean epgHasDataForCurrent = false;
+    private java.util.List<LiveEpgRepository.Program> currentEpgPrograms = java.util.Collections.emptyList();
+    private String currentEpgProgramsChannel = "";
     private final Runnable loadCurrentEpgRunnable = this::loadCurrentEpg;
     private volatile int liveLoadEpoch = 0;
     /** 本次加载频道列表时的直播源签名(SystemConfig.getLiveUrl());回前台比对变化用 */
@@ -193,6 +195,8 @@ public class LiveActivity extends BaseActivity implements LiveLineSelectHost, Li
         tv_epg_current = findViewById(R.id.tv_epg_current);
         tv_epg_next = findViewById(R.id.tv_epg_next);
         iv_channel_logo = findViewById(R.id.iv_channel_logo);
+        tv_epg_current.setOnClickListener(view -> showEpgScheduleDialog());
+        tv_epg_next.setOnClickListener(view -> showEpgScheduleDialog());
 
         //源切换
         findViewById(R.id.ic_pre_source).setOnClickListener(view -> playPreSource());
@@ -226,6 +230,8 @@ public class LiveActivity extends BaseActivity implements LiveLineSelectHost, Li
         showChannelLogo(item);
         if (resetProgram) {
             epgHasDataForCurrent = false;
+            currentEpgPrograms = java.util.Collections.emptyList();
+            currentEpgProgramsChannel = "";
             tv_epg_current.setText("节目信息加载中…");
             tv_epg_next.setText("");
             tv_epg_next.setVisibility(View.GONE);
@@ -296,6 +302,13 @@ public class LiveActivity extends BaseActivity implements LiveLineSelectHost, Li
         if (tv_epg_current == null || tv_epg_next == null) return;
         if (programs == null) programs = java.util.Collections.emptyList();
         epgHasDataForCurrent = !programs.isEmpty();
+        if (epgHasDataForCurrent) {
+            currentEpgPrograms = programs;
+            currentEpgProgramsChannel = currentLiveChannelItem == null ? "" : currentLiveChannelItem.getChannelName();
+        } else {
+            currentEpgPrograms = java.util.Collections.emptyList();
+            currentEpgProgramsChannel = "";
+        }
         long now = System.currentTimeMillis();
         LiveEpgRepository.Program current = null;
         LiveEpgRepository.Program next = null;
@@ -312,7 +325,7 @@ public class LiveActivity extends BaseActivity implements LiveLineSelectHost, Li
         } else if (next != null) {
             tv_epg_current.setText("当前：暂无节目");
         } else {
-            tv_epg_current.setText("暂无节目信息");
+            tv_epg_current.setText("暂无节目信息\n点击重试");
         }
         if (next != null) {
             tv_epg_next.setText("下一：" + next.getTitle() + "  " + formatEpgTime(next.getStartMs()) + "-" + formatEpgTime(next.getEndMs()));
@@ -321,6 +334,28 @@ public class LiveActivity extends BaseActivity implements LiveLineSelectHost, Li
             tv_epg_next.setText("");
             tv_epg_next.setVisibility(View.GONE);
         }
+    }
+
+    private void showEpgScheduleDialog() {
+        if (currentEpgPrograms == null || currentEpgPrograms.isEmpty()) {
+            AppBubble.toast("暂无节目单，正在重新获取");
+            scheduleEpgLoad();
+            return;
+        }
+        LiveChannelItem item = currentLiveChannelItem;
+        String channelName = item == null ? currentEpgProgramsChannel : item.getChannelName();
+        java.util.List<String> lines = new ArrayList<>();
+        long now = System.currentTimeMillis();
+        for (LiveEpgRepository.Program program : currentEpgPrograms) {
+            boolean playing = program.getStartMs() <= now && now < program.getEndMs();
+            lines.add((playing ? "▶ " : "   ") + formatEpgTime(program.getStartMs()) + "-"
+                    + formatEpgTime(program.getEndMs()) + "  " + program.getTitle());
+        }
+        new androidx.appcompat.app.AlertDialog.Builder(this)
+                .setTitle((channelName == null || channelName.trim().isEmpty() ? "直播" : channelName) + " · 节目单")
+                .setItems(lines.toArray(new String[0]), null)
+                .setPositiveButton("关闭", null)
+                .show();
     }
 
     private String formatEpgTime(long timeMs) {

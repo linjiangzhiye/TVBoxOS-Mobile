@@ -89,7 +89,11 @@
 			android:layout_marginEnd="8dp"
 			android:layout_toLeftOf="@id/epg_source_controls"
 			android:layout_toRightOf="@id/channelinfo"
-			android:orientation="vertical">
+			android:background="?attr/selectableItemBackground"
+			android:clickable="true"
+			android:focusable="true"
+			android:orientation="vertical"
+			android:padding="4dp">
 
 			<TextView
 				android:id="@+id/tv_epg_current"

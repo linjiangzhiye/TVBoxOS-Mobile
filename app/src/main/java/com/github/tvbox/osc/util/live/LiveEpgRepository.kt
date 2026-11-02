@@ -17,6 +17,7 @@ import java.net.URLEncoder
 import java.security.MessageDigest
 import java.text.SimpleDateFormat
 import java.util.Date
+import java.util.LinkedHashSet
 import java.util.Locale
 import java.util.TimeZone
 import java.util.concurrent.TimeUnit
@@ -62,28 +63,56 @@ object LiveEpgRepository {
             if (cached.isNotEmpty()) MAIN.post { callback.onPrograms(cached) }
         }
 
-        val queryName = preferredChannelName(channel)
-        val url = buildEpgUrl(channel.epgUrl, queryName, dateMs)
-        if (url.isEmpty()) return
-        HttpClient.get(url, requestTag, object : HCallBack {
+        val queryNames = buildQueryNames(channel)
+        val urls = buildEpgUrls(channel.epgUrl, queryNames, dateMs)
+        if (urls.isEmpty()) {
+            MAIN.post { callback.onPrograms(emptyList()) }
+            return
+        }
+        requestCandidate(context, channel, dateMs, cacheKey, queryNames, urls, 0, requestTag, callback)
+    }
+
+    private fun requestCandidate(
+        context: Context,
+        channel: LiveChannelItem,
+        dateMs: Long,
+        cacheKey: String,
+        queryNames: List<String>,
+        urls: List<String>,
+        index: Int,
+        requestTag: Any,
+        callback: Callback
+    ) {
+        if (index >= urls.size) {
+            MAIN.post { callback.onPrograms(emptyList()) }
+            return
+        }
+        HttpClient.get(urls[index], requestTag, object : HCallBack {
             override fun onSuccess(content: String?) {
                 if (content.isNullOrBlank()) {
-                    MAIN.post { callback.onPrograms(emptyList()) }
+                    requestCandidate(context, channel, dateMs, cacheKey, queryNames, urls,
+                        index + 1, requestTag, callback)
                     return
                 }
                 HeavyTaskUtil.executeBigTask {
                     val programs = try {
-                        parseResponse(content, channel, queryName, dateMs)
+                        parseResponse(content, channel, queryNames, dateMs)
                     } catch (_: Throwable) {
                         emptyList()
                     }
-                    if (programs.isNotEmpty()) saveCache(context, cacheKey, programs)
-                    MAIN.post { callback.onPrograms(programs) }
+                    if (programs.isNotEmpty()) {
+                        saveCache(context, cacheKey, programs)
+                        MAIN.post { callback.onPrograms(programs) }
+                    } else {
+                        requestCandidate(context, channel, dateMs, cacheKey, queryNames, urls,
+                            index + 1, requestTag, callback)
+                    }
                 }
             }
 
             override fun onError(e: Throwable?) {
-                MAIN.post { callback.onPrograms(emptyList()) }
+                requestCandidate(context, channel, dateMs, cacheKey, queryNames, urls,
+                    index + 1, requestTag, callback)
             }
         })
     }
@@ -115,8 +144,35 @@ object LiveEpgRepository {
         return normalized.ifEmpty { channel.channelName?.trim().orEmpty() }
     }
 
-    private fun buildEpgUrl(configured: String?, queryName: String, dateMs: Long): String {
-        val address = configured?.trim().takeUnless { it.isNullOrEmpty() } ?: DEFAULT_EPG_URL
+    private fun buildQueryNames(channel: LiveChannelItem): List<String> {
+        val names = LinkedHashSet<String>()
+        fun add(value: String?) {
+            val trimmed = value?.trim().orEmpty()
+            if (trimmed.isNotEmpty()) names.add(trimmed)
+        }
+        add(channel.tvgName)
+        add(normalizeChannelName(channel.tvgName))
+        add(channel.channelName)
+        add(normalizeChannelName(channel.channelName))
+        add(channel.channelName?.substringBefore(' '))
+        if (names.isEmpty()) names.add("")
+        return names.toList()
+    }
+
+    private fun buildEpgUrls(configured: String?, queryNames: List<String>, dateMs: Long): List<String> {
+        val urls = LinkedHashSet<String>()
+        val configuredAddress = configured?.trim().orEmpty()
+        if (configuredAddress.startsWith("http://") || configuredAddress.startsWith("https://")) {
+            if (isXmlAddress(configuredAddress)) urls.add(configuredAddress)
+            else for (name in queryNames) urls.add(buildEpgUrl(configuredAddress, name, dateMs))
+        }
+        for (name in queryNames) urls.add(buildEpgUrl(DEFAULT_EPG_URL, name, dateMs))
+        urls.remove("")
+        return urls.toList()
+    }
+
+    private fun buildEpgUrl(address: String, queryName: String, dateMs: Long): String {
+        if (address.isEmpty()) return ""
         return try {
             if (address.contains("{name}") || address.contains("{date}")) {
                 address.replace("{name}", encode(queryName))
@@ -135,11 +191,11 @@ object LiveEpgRepository {
     private fun parseResponse(
         content: String,
         channel: LiveChannelItem,
-        queryName: String,
+        queryNames: List<String>,
         dateMs: Long
     ): List<Program> {
         val trimmed = content.trim()
-        return if (trimmed.startsWith("<")) parseXml(trimmed, channel, queryName)
+        return if (trimmed.startsWith("<")) parseXml(trimmed, channel, queryNames.firstOrNull().orEmpty())
         else parseJson(trimmed, dateMs)
     }
 
