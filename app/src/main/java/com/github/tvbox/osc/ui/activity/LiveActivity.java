@@ -86,6 +86,9 @@ import xyz.doikki.videoplayer.player.VideoView;
 public class LiveActivity extends BaseActivity implements LiveLineSelectHost, LiveSettingHost {
     private VideoView mVideoView;
     private LinearLayout tvLeftChannelListLayout;
+    private View liveChannelDrawer;
+    private View liveChannelDrawerPanel;
+    private View liveChannelDrawerScrim;
     private RecyclerView mChannelGroupView;
     private RecyclerView mLiveChannelView;
     public LiveChannelGroupNewAdapter liveChannelGroupAdapter;
@@ -178,6 +181,9 @@ public class LiveActivity extends BaseActivity implements LiveLineSelectHost, Li
         mVideoView = findViewById(R.id.mVideoView);
 
         tvLeftChannelListLayout = findViewById(R.id.tvLeftChannnelListLayout);
+        liveChannelDrawer = findViewById(R.id.live_channel_drawer);
+        liveChannelDrawerPanel = findViewById(R.id.live_channel_drawer_panel);
+        liveChannelDrawerScrim = findViewById(R.id.live_channel_drawer_scrim);
 
         mChannelGroupView = findViewById(R.id.mGroupGridView);
         mLiveChannelView = findViewById(R.id.mChannelGridView);
@@ -188,7 +194,10 @@ public class LiveActivity extends BaseActivity implements LiveLineSelectHost, Li
         tip_chname.setOnClickListener(view -> {
             mChannelGroupView.scrollToPosition(currentChannelGroupIndex);
             mLiveChannelView.scrollToPosition(currentLiveChannelIndex);
+            toggleLiveChannelDrawer();
         });
+        findViewById(R.id.live_channel_drawer_toggle).setOnClickListener(view -> toggleLiveChannelDrawer());
+        liveChannelDrawerScrim.setOnClickListener(view -> closeLiveChannelDrawer());
         tv_channelnum = findViewById(R.id.tv_channel_bottom_number); //底部数字
 
         tv_srcinfo = findViewById(R.id.tv_source);//线路状态
@@ -381,6 +390,8 @@ public class LiveActivity extends BaseActivity implements LiveLineSelectHost, Li
             mPasswordDialog.cancelFromBack();
         } else if (DialogCoordinator.dismissSimpleHostPopupOnBack(this)) {
             return;
+        } else if (liveChannelDrawer != null && liveChannelDrawer.getVisibility() == View.VISIBLE) {
+            closeLiveChannelDrawer();
         } else if(isBack){
             isBack= false;
             playPreSource();
@@ -525,6 +536,38 @@ public class LiveActivity extends BaseActivity implements LiveLineSelectHost, Li
                 mChannelGroupView.smoothScrollToPosition(currentChannelGroupIndex);
             }
         }
+        openLiveChannelDrawer();
+    }
+
+    private void toggleLiveChannelDrawer() {
+        if (liveChannelDrawer == null) return;
+        if (liveChannelDrawer.getVisibility() == View.VISIBLE) closeLiveChannelDrawer();
+        else openLiveChannelDrawer();
+    }
+
+    private void openLiveChannelDrawer() {
+        if (liveChannelDrawer == null || liveChannelDrawerPanel == null) return;
+        if (liveChannelDrawer.getVisibility() == View.VISIBLE) return;
+        liveChannelDrawer.setVisibility(View.VISIBLE);
+        liveChannelDrawerScrim.setAlpha(0f);
+        liveChannelDrawerScrim.animate().alpha(1f).setDuration(160).start();
+        liveChannelDrawerPanel.post(() -> {
+            liveChannelDrawerPanel.setTranslationX(-liveChannelDrawerPanel.getWidth());
+            liveChannelDrawerPanel.animate().translationX(0f).setDuration(180).start();
+        });
+    }
+
+    private void closeLiveChannelDrawer() {
+        if (liveChannelDrawer == null || liveChannelDrawerPanel == null ||
+                liveChannelDrawer.getVisibility() != View.VISIBLE) return;
+        liveChannelDrawerScrim.animate().alpha(0f).setDuration(140).start();
+        liveChannelDrawerPanel.animate().translationX(-liveChannelDrawerPanel.getWidth())
+                .setDuration(160)
+                .withEndAction(() -> {
+                    if (liveChannelDrawer == null) return;
+                    liveChannelDrawer.setVisibility(View.GONE);
+                    liveChannelDrawerPanel.setTranslationX(0f);
+                }).start();
     }
 
     private boolean playChannel(int channelGroupIndex, int liveChannelIndex, boolean changeSource) {
@@ -604,7 +647,7 @@ public class LiveActivity extends BaseActivity implements LiveLineSelectHost, Li
         mSideControlView.setOnLiveSideListener(new LiveSideControlView.OnLiveSideListener() {
             @Override
             public void onExpand() {
-                showAllChannelDialog();
+                openLiveChannelDrawer();
             }
 
             @Override
@@ -786,6 +829,7 @@ public class LiveActivity extends BaseActivity implements LiveLineSelectHost, Li
     private void clickLiveChannel(int position) {
         liveChannelItemAdapter.setSelectedChannelIndex(position);
         playChannel(liveChannelGroupAdapter.getSelectedGroupIndex(), position, false);
+        closeLiveChannelDrawer();
     }
 
 
@@ -1022,7 +1066,7 @@ public class LiveActivity extends BaseActivity implements LiveLineSelectHost, Li
     }
 
     private boolean isListOrSettingLayoutVisible() {
-        return tvLeftChannelListLayout.getVisibility() == View.VISIBLE;
+        return liveChannelDrawer != null && liveChannelDrawer.getVisibility() == View.VISIBLE;
     }
 
     private void showPasswordDialog(int groupIndex, int liveChannelIndex) {

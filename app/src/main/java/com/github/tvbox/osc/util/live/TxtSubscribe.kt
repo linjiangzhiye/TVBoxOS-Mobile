@@ -35,6 +35,7 @@ object TxtSubscribe {
     private val TVG_LOGO_PATTERN: Pattern = Pattern.compile("tvg-logo=\"(.*?)\"")
     private val TVG_NAME_PATTERN: Pattern = Pattern.compile("tvg-name=\"(.*?)\"")
     private val TVG_URL_PATTERN: Pattern = Pattern.compile("tvg-url=\"(.*?)\"")
+    private val URL_TVG_PATTERN: Pattern = Pattern.compile("url-tvg=\"(.*?)\"")
     private val TVG_ID_PATTERN: Pattern = Pattern.compile("tvg-id=\"(.*?)\"")
     private val HTTP_USER_AGENT_PATTERN: Pattern = Pattern.compile("http-user-agent=\"(.*?)\"")
     private val CATCHUP_PATTERN: Pattern = Pattern.compile("catchup=\"(.*?)\"")
@@ -136,13 +137,14 @@ object TxtSubscribe {
             val reader = BufferedReader(StringReader(str.replace("\r\n", "\n").replace("\r", "")))
             var currentGroup: JsonObject? = null
             var pendingChannel: JsonObject? = null
+            val globalMeta = JsonObject()
             var pendingMeta = JsonObject()
             while (true) {
                 var line = reader.readLine() ?: break
                 line = line.trim { it <= ' ' }
                 if (line.isEmpty()) continue
                 if (line.startsWith("#EXTM3U")) {
-                    mergeMeta(pendingMeta, buildMeta(line))
+                    mergeMeta(globalMeta, buildMeta(line))
                     continue
                 }
                 if (isSetting(line)) {
@@ -155,6 +157,7 @@ object TxtSubscribe {
                     currentGroup = findOrCreateGroup(result, groupName)
                     pendingChannel = JsonObject()
                     pendingChannel.addProperty("name", get(line, NAME_PATTERN))
+                    mergeMeta(pendingChannel, globalMeta)
                     mergeMeta(pendingChannel, buildMeta(line))
                     mergeMeta(pendingChannel, pendingMeta)
                     pendingMeta = JsonObject()
@@ -324,7 +327,9 @@ object TxtSubscribe {
     private fun buildMeta(line: String): JsonObject {
         val obj = JsonObject()
         put(obj, "logo", get(line, TVG_LOGO_PATTERN))
-        put(obj, "epg", get(line, TVG_URL_PATTERN))
+        var epg = get(line, TVG_URL_PATTERN)
+        if (epg.isEmpty()) epg = get(line, URL_TVG_PATTERN)
+        put(obj, "epg", epg)
         put(obj, "tvg-id", get(line, TVG_ID_PATTERN))
         put(obj, "tvg-name", get(line, TVG_NAME_PATTERN))
         put(obj, "tvg-chno", get(line, TVG_CHNO_PATTERN))

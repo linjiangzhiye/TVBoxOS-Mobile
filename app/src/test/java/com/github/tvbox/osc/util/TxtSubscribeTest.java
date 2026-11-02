@@ -38,4 +38,18 @@ public class TxtSubscribeTest {
         assertEquals("https://example.com/logo.png", channel.get("logo").getAsString());
         assertEquals("https://example.com/epg.xml", channel.get("epg").getAsString());
     }
+
+    @Test
+    public void m3uGlobalEpgHeaderAppliesToEveryChannel() {
+        String m3u = "#EXTM3U url-tvg=\"https://example.com/epg.gz\"\n"
+                + "#EXTINF:-1 tvg-id=\"cctv1\" group-title=\"央视\",CCTV1\n"
+                + "https://example.com/1.m3u8\n"
+                + "#EXTINF:-1 tvg-id=\"cctv2\" group-title=\"央视\",CCTV2\n"
+                + "https://example.com/2.m3u8\n";
+        JsonArray groups = TxtSubscribe.parseToJsonArray(m3u);
+        assertNotNull(groups);
+        JsonArray channels = groups.get(0).getAsJsonObject().getAsJsonArray("channels");
+        assertEquals("https://example.com/epg.gz", channels.get(0).getAsJsonObject().get("epg").getAsString());
+        assertEquals("https://example.com/epg.gz", channels.get(1).getAsJsonObject().get("epg").getAsString());
+    }
 }

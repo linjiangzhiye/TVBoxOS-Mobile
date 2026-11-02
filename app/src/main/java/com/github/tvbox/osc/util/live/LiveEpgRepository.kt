@@ -8,10 +8,13 @@ import com.github.tvbox.osc.bean.LiveChannelItem
 import com.github.tvbox.osc.util.HCallBack
 import com.github.tvbox.osc.util.HeavyTaskUtil
 import com.github.tvbox.osc.util.HttpClient
+import com.github.tvbox.osc.util.OkGoHelper
 import com.google.gson.JsonArray
 import com.google.gson.JsonObject
 import com.google.gson.JsonParser
+import okhttp3.Request
 import org.xmlpull.v1.XmlPullParser
+import java.io.ByteArrayInputStream
 import java.io.File
 import java.net.URLEncoder
 import java.security.MessageDigest
@@ -21,6 +24,7 @@ import java.util.LinkedHashSet
 import java.util.Locale
 import java.util.TimeZone
 import java.util.concurrent.TimeUnit
+import java.util.zip.GZIPInputStream
 
 /**
  * 直播 EPG 的异步加载、解析与缓存。
@@ -87,34 +91,46 @@ object LiveEpgRepository {
             MAIN.post { callback.onPrograms(emptyList()) }
             return
         }
-        HttpClient.get(urls[index], requestTag, object : HCallBack {
-            override fun onSuccess(content: String?) {
-                if (content.isNullOrBlank()) {
-                    requestCandidate(context, channel, dateMs, cacheKey, queryNames, urls,
-                        index + 1, requestTag, callback)
-                    return
-                }
-                HeavyTaskUtil.executeBigTask {
-                    val programs = try {
-                        parseResponse(content, channel, queryNames, dateMs)
-                    } catch (_: Throwable) {
-                        emptyList()
-                    }
-                    if (programs.isNotEmpty()) {
-                        saveCache(context, cacheKey, programs)
-                        MAIN.post { callback.onPrograms(programs) }
-                    } else {
-                        requestCandidate(context, channel, dateMs, cacheKey, queryNames, urls,
-                            index + 1, requestTag, callback)
+        HeavyTaskUtil.executeBigTask {
+            val request = Request.Builder().url(urls[index]).tag(requestTag).build()
+            val call = OkGoHelper.getDefaultClient().newCall(request)
+            val content = try {
+                call.execute().use { response ->
+                    if (!response.isSuccessful || response.body == null) "" else {
+                        decodeResponse(response.body!!.bytes())
                     }
                 }
+            } catch (_: Throwable) {
+                ""
             }
-
-            override fun onError(e: Throwable?) {
+            if (call.isCanceled()) return@executeBigTask
+            if (content.isBlank()) {
+                requestCandidate(context, channel, dateMs, cacheKey, queryNames, urls,
+                    index + 1, requestTag, callback)
+                return@executeBigTask
+            }
+            val programs = try {
+                parseResponse(content, channel, queryNames, dateMs)
+            } catch (_: Throwable) {
+                emptyList()
+            }
+            if (programs.isNotEmpty()) {
+                saveCache(context, cacheKey, programs)
+                MAIN.post { callback.onPrograms(programs) }
+            } else {
                 requestCandidate(context, channel, dateMs, cacheKey, queryNames, urls,
                     index + 1, requestTag, callback)
             }
-        })
+        }
+    }
+
+    private fun decodeResponse(bytes: ByteArray): String {
+        if (bytes.size >= 2 && bytes[0] == 0x1f.toByte() && bytes[1] == 0x8b.toByte()) {
+            return GZIPInputStream(ByteArrayInputStream(bytes)).bufferedReader(Charsets.UTF_8).use {
+                it.readText()
+            }
+        }
+        return bytes.toString(Charsets.UTF_8)
     }
 
     @JvmStatic
@@ -419,7 +435,7 @@ object LiveEpgRepository {
 
     private fun isXmlAddress(address: String): Boolean {
         val lower = address.lowercase(Locale.ROOT)
-        return lower.contains(".xml") || lower.contains("xmltv")
+        return lower.contains(".xml") || lower.contains(".gz") || lower.contains("xmltv")
     }
 
     private fun cleanTitle(value: String): String =
