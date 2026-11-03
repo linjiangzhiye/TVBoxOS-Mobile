@@ -81,6 +81,11 @@ android {
     }
 
     packaging {
+        // 与 AVBox 相同：APK 内压缩原生库，安装时由系统解压。
+        // 只缩小 APK 下载体积，不删功能、不改 UI。
+        jniLibs {
+            useLegacyPackaging true
+        }
         resources {
             excludes += ['META-INF/DEPENDENCIES', 'META-INF/beans.xml']
         }
